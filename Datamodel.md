@@ -10,17 +10,18 @@ erDiagram
         string id
         string name
         string description
+        string status
     }
 
     CLIENT {
         string id
         string name
         string description
+        string status
         string client_type
         string client_secret_hash
         string token_endpoint_auth_method
         array grant_types
-        boolean require_pkce
         array redirect_uris
         array post_logout_redirect_uris
         array allowed_scopes
@@ -58,6 +59,7 @@ erDiagram
         string password_hash
         boolean email_verified
         string status
+        number auth_version
         number failed_login_count
         number locked_until
         number password_updated_at
@@ -68,6 +70,7 @@ erDiagram
         string user_id
         string client_id
         string login_host
+        number auth_version
         number auth_time
         number expires_at
     }
@@ -78,6 +81,7 @@ erDiagram
         string client_id
         string user_id
         string code_challenge
+        number auth_version
         number used_at
         number expires_at
     }
@@ -88,6 +92,7 @@ erDiagram
         string client_id
         string user_id
         string scope
+        number auth_version
         number expires_at
     }
 
@@ -132,22 +137,24 @@ erDiagram
 
 | PK | SK | Attributes |
 | -- | -- | -- |
-| ORG#{org} | DETAILS | name=LiteLogin, description, created_at, updated_at |
+| ORG#{org} | DETAILS | name=LiteLogin, description, status=active\|suspended, created_at, updated_at |
 | ORG#{org} | CLIENT#{client} |  |
 | ORG#{org} | POOL#{pool} |  |
 | POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, created_at, updated_at, version |
-| USER#{user} | DETAILS | pool_id, email=example@example.com, password_hash="$argon2id$v=19$m=19456,t=2,p=1$...", email_verified=true, status=active\|disabled, failed_login_count, locked_until, password_updated_at, created_at, updated_at, version, GSI1PK=POOL#{pool}, GSI1SK=EMAIL#{email} |
+| USER#{user} | DETAILS | pool_id, email=example@example.com, password_hash="$argon2id$v=19$m=19456,t=2,p=1$...", email_verified=true, status=active\|disabled, auth_version=1, failed_login_count, locked_until, password_updated_at, created_at, updated_at, version, GSI1PK=POOL#{pool}, GSI1SK=EMAIL#{email} |
 | POOL#{pool}#EMAIL#{email} | EMAIL | user_id |
-| CLIENT#{client} | DETAILS | org_id, name=LiteLogin, description, client_type=public\|confidential, client_secret_hash, token_endpoint_auth_method=none\|client_secret_basic\|client_secret_post, grant_types=[authorization_code, refresh_token], require_pkce=true, redirect_uris=[https://login.microsoftonline.com/common/oauth2/nativeclient], post_logout_redirect_uris=[], allowed_scopes=[openid, email, offline_access], user_pool_id={pool}, registration_enabled=true, theme={...}, access_token_ttl=900, id_token_ttl=900, refresh_token_ttl=2592000, refresh_family_ttl=7776000, session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version |
+| CLIENT#{client} | DETAILS | org_id, name=LiteLogin, description, status=active\|disabled, client_type=public\|confidential, client_secret_hash, token_endpoint_auth_method=none\|client_secret_basic\|client_secret_post, grant_types=[authorization_code, refresh_token], redirect_uris=[https://login.microsoftonline.com/common/oauth2/nativeclient], post_logout_redirect_uris=[], allowed_scopes=[openid, email, offline_access], user_pool_id={pool}, registration_enabled=true, theme={...}, access_token_ttl=900, id_token_ttl=900, refresh_token_ttl=2592000, refresh_family_ttl=7776000, session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version |
 | CLIENT#{client} | LOGIN_HOST#{login_host} | type=default\|custom, status=pending\|verified |
 | LOGIN_HOST#{login_host} | CLIENT | client_id, org_id, type=default\|custom, status=pending\|verified |
-| KEYS | KID#{kid} | status=next\|active\|retired, alg=ES256, kms_key_arn, public_jwk, created_at, activated_at, retired_at |
+| KEYS | KID#{kid} | status=next\|active\|retired, alg=RS256, kms_key_arn, public_jwk, created_at, activated_at, retired_at |
 
 - **Times:** all times are epoch seconds and all TTLs are in seconds.
 - **Client secrets:** a client secret is a 256-bit random value, so it's stored as a SHA-256 hash (a slow password hash isn't needed) and compared in constant time. Public clients have no secret and `token_endpoint_auth_method=none`.
 - **`version`:** used for optimistic locking. Every admin update increments it, with the condition `version = :expected`.
 - **Login hosts:** a client's hosts are the `CLIENT#{client}` / `LOGIN_HOST#` items. The client item has no `login_hosts` attribute.
-- **Signing keys:** private keys never leave KMS. Tokens are signed with the KMS `Sign` API, and the table holds only the public JWK and the rotation state.
+- **Signing keys:** private keys never leave KMS. Tokens are signed with the KMS `Sign` API (`RSASSA_PKCS1_V1_5_SHA_256`), and the table holds only the public JWK and the rotation state. KMS returns RSA signatures as raw bytes, which go straight into the JWT. If ES256 is ever added, note that KMS returns ECDSA signatures DER-encoded; they must be converted to the 64-byte `R || S` form that JWTs require.
+- **PKCE:** required for every client, public and confidential. Only `code_challenge_method=S256` is accepted. There is no per-client setting.
+- **`auth_version`:** a counter on the user, starting at 1. Sessions, authorization codes and refresh families record the value at the time they were created, and are valid only while it still equals the user's current value. See "Revoke everything for a user".
 
 User IDs are globally unique (UUIDv4 or ULID), so a user can be read by ID alone. Pool membership is the `pool_id` attribute, and email uniqueness is scoped to the pool by the `POOL#{pool}#EMAIL#{email}` item.
 
@@ -166,27 +173,28 @@ Holds short-lived authentication state: browser sessions, authorization codes, r
 
 - Every item has `expires_at` (epoch seconds), and DynamoDB TTL is enabled on that attribute. TTL deletion can lag by up to ~48 hours, so every read must also check `expires_at > now`.
 - Every secret (session cookie, authorization code, refresh token, one-time token) is a 256-bit random value. Only its SHA-256 hash is stored, so a leaked table or backup can't be replayed. `{..._hash}` below means that hash, hex encoded.
-- All reads from this table are strongly consistent.
+- All base-table reads are strongly consistent. GSI1 reads can't be (DynamoDB only offers eventually consistent reads on a GSI), so GSI1 is never used to decide whether a credential is valid. That decision always comes from base-table reads and `auth_version`.
 
 | PK | SK | Attributes |
 | -- | -- | -- |
-| SESSION#{session_hash} | DETAILS | org_id, pool_id, user_id, client_id, login_host, auth_time, amr=["pwd"], created_at, last_seen_at, idle_expires_at, expires_at, ip, user_agent, GSI1PK=USER#{user}, GSI1SK=SESSION#{created_at} |
-| CODE#{code_hash} | DETAILS | iss, client_id, redirect_uri, scope, nonce, code_challenge, code_challenge_method=S256, pool_id, user_id, session_hash, auth_time, used_at, family_id, expires_at (now + 60s) |
-| REFRESH_FAMILY#{family} | DETAILS | iss, client_id, pool_id, user_id, scope, auth_time, created_at, expires_at (absolute lifetime), GSI1PK=USER#{user}, GSI1SK=REFRESH_FAMILY#{created_at} |
+| SESSION#{session_hash} | DETAILS | org_id, pool_id, user_id, client_id, login_host, auth_version, auth_time, amr=["pwd"], created_at, last_seen_at, idle_expires_at, expires_at, ip, user_agent, GSI1PK=USER#{user}, GSI1SK=SESSION#{created_at} |
+| CODE#{code_hash} | DETAILS | iss, client_id, redirect_uri, scope, nonce, code_challenge, code_challenge_method=S256, pool_id, user_id, session_hash, auth_version, auth_time, used_at, family_id, expires_at (now + 60s) |
+| REFRESH_FAMILY#{family} | DETAILS | iss, client_id, pool_id, user_id, scope, auth_version, auth_time, created_at, expires_at (absolute lifetime), GSI1PK=USER#{user}, GSI1SK=REFRESH_FAMILY#{created_at} |
 | REFRESH#{token_hash} | DETAILS | family_id, client_id, used_at, expires_at |
 | OTT#{token_hash} | DETAILS | purpose=verify_email\|reset_password\|change_email, pool_id, user_id, email, new_email, expires_at |
 
 - **Sessions:** `expires_at` is the absolute lifetime (and the TTL attribute). `idle_expires_at` is pushed forward on activity.
 - **Refresh tokens:** every token belongs to a family that starts with one authorization code grant. A refresh token is valid only while its `REFRESH_FAMILY` item exists. To revoke a family, delete that item. Its orphaned `REFRESH` items then fail the check and expire through TTL.
 - **Authorization codes:** kept after use (`used_at` set) until TTL removes them. A reused code can then be detected, and the family it issued revoked (RFC 6749 §4.1.2).
+- **Revocation:** a session, code or refresh family is valid only while its `auth_version` equals the user's current `auth_version`. Incrementing the user's `auth_version` revokes all of them at once. Deleting the items afterwards is only cleanup.
 
 ### GSI1 (user → sessions and refresh families)
 
 | PK | SK | Projection |
 | -- | -- | -- |
-| GSI1PK = USER#{user} | GSI1SK = SESSION#{created_at} or REFRESH_FAMILY#{created_at} | INCLUDE: client_id, created_at, last_seen_at, ip, user_agent, expires_at |
+| GSI1PK = USER#{user} | GSI1SK = SESSION#{created_at} or REFRESH_FAMILY#{created_at} | INCLUDE: client_id, auth_version, created_at, last_seen_at, ip, user_agent, expires_at |
 
-The index is sparse. Only `SESSION` and `REFRESH_FAMILY` items carry GSI1 attributes, so codes, refresh tokens and one-time tokens aren't indexed.
+The index is sparse. Only `SESSION` and `REFRESH_FAMILY` items carry GSI1 attributes, so codes, refresh tokens and one-time tokens aren't indexed. It is used for listing and cleanup only, never for validation.
 
 ## Access Patterns
 
@@ -198,11 +206,12 @@ Used by every browser-facing endpoint (`/authorize`, login, registration, passwo
 
 1. GetItem `LOGIN_HOST#{host}` / `CLIENT` → `client_id`, `org_id`, `status`. Reject unless `status=verified`.
 2. If the request carries a `client_id` parameter, reject unless it equals the host's `client_id`.
-3. GetItem `CLIENT#{client}` / `DETAILS` → `user_pool_id`, `redirect_uris`, `allowed_scopes`, `registration_enabled`, `theme`, token and session lifetimes.
-4. If the request carries a `redirect_uri`, reject unless it exactly matches an entry in `redirect_uris`.
-5. GetItem `POOL#{pool}` / `DETAILS` → `status`, `require_email_verified`. Reject unless `status=active`.
+3. GetItem `ORG#{org}` / `DETAILS` → `status`. Reject unless `status=active`.
+4. GetItem `CLIENT#{client}` / `DETAILS` → `status`, `user_pool_id`, `redirect_uris`, `allowed_scopes`, `registration_enabled`, `theme`, token and session lifetimes. Reject unless `status=active`.
+5. If the request carries a `redirect_uri`, reject unless it exactly matches an entry in `redirect_uris`.
+6. GetItem `POOL#{pool}` / `DETAILS` → `status`, `require_email_verified`. Reject unless `status=active`.
 
-Steps 1, 3 and 5 read configuration that rarely changes, so they can be cached in the Lambda for 30–60 seconds.
+Steps 1, 3, 4 and 6 read configuration that rarely changes, so they can be cached in the Lambda for 30–60 seconds. As a result, suspending an org or disabling a client takes effect within that cache time.
 
 ### Discovery and JWKS
 
@@ -215,7 +224,7 @@ Steps 1, 3 and 5 read configuration that rarely changes, so they can be cached i
 1. Resolve client. Reject if `registration_enabled` is false.
 2. Generate a new user ID (UUIDv4 or ULID) and hash the password (argon2id).
 3. TransactWriteItems:
-   - Put `USER#{user}` / `DETAILS` (`pool_id`, `GSI1PK=POOL#{pool}`, `GSI1SK=EMAIL#{email}`, `email`, `password_hash`, `email_verified=false`, `status=active`, `created_at`), condition `attribute_not_exists(PK)`
+   - Put `USER#{user}` / `DETAILS` (`pool_id`, `GSI1PK=POOL#{pool}`, `GSI1SK=EMAIL#{email}`, `email`, `password_hash`, `email_verified=false`, `status=active`, `auth_version=1`, `created_at`), condition `attribute_not_exists(PK)`
    - Put `POOL#{pool}#EMAIL#{email}` / `EMAIL` (`user_id`), condition `attribute_not_exists(PK)`
 4. If the transaction is cancelled because of the email item, the email is already registered. To avoid revealing that, show the same "check your email" page and send the existing user an email instead.
 5. Put `OTT#{token_hash}` / `DETAILS` (`purpose=verify_email`, `pool_id`, `user_id`, `email`, `expires_at` = now + 24h) and send the verification email.
@@ -224,57 +233,72 @@ Steps 1, 3 and 5 read configuration that rarely changes, so they can be cached i
 
 1. Resolve client → `user_pool_id`.
 2. GetItem `POOL#{pool}#EMAIL#{email}` / `EMAIL` (strongly consistent) → `user_id`. If not found, verify the password against a dummy hash anyway (so response time doesn't reveal which emails exist), then fail.
-3. GetItem `USER#{user}` / `DETAILS` → `password_hash`, `status`, `email_verified`.
+3. GetItem `USER#{user}` / `DETAILS` (strongly consistent) → `password_hash`, `status`, `email_verified`, `locked_until`, `auth_version`.
 4. Reject if `locked_until > now`. Verify the password. Reject unless `status=active`, and unless `email_verified` is true when the pool's `require_email_verified` is true. Use the same error message for every failure.
    - Wrong password: UpdateItem ADD `failed_login_count 1`. If the new count reaches the limit (e.g. 5), SET `locked_until = now + 15 min` and reset the count.
    - Correct password with a non-zero count: UpdateItem SET `failed_login_count = 0`.
 5. If the hash uses outdated parameters, rehash and UpdateItem `password_hash`.
-6. Put `SESSION#{session_hash}` / `DETAILS` with `auth_time=now` and GSI1 keys. Set the session cookie (`HttpOnly`, `Secure`, `SameSite=Lax`).
+6. Put `SESSION#{session_hash}` / `DETAILS` with `auth_time=now`, the user's current `auth_version`, and GSI1 keys. Set the session cookie (`HttpOnly`, `Secure`, `SameSite=Lax`).
 7. Continue the pending `/authorize` request.
 
 ### Authorize (`/authorize`)
 
-1. Resolve client. Validate `response_type=code`, `scope` ⊆ `allowed_scopes`, and that `code_challenge` (S256) is present when the client requires PKCE.
-2. If there is a session cookie, GetItem `SESSION#{session_hash}` / `DETAILS`. The session is usable only if:
+1. Resolve client. Validate `response_type=code` and `scope` ⊆ `allowed_scopes`. Reject unless `code_challenge` is present with `code_challenge_method=S256`; a missing challenge or `plain` is always rejected.
+2. If there is a session cookie, GetItem `SESSION#{session_hash}` / `DETAILS`, then GetItem `USER#{user}` / `DETAILS` (strongly consistent) → `status`, `auth_version`. The session is usable only if:
    - `expires_at` and `idle_expires_at` are in the future
    - its `pool_id` equals the client's `user_pool_id`
+   - the user exists and has `status=active`
+   - the session's `auth_version` equals the user's `auth_version`
    - `max_age` (if requested) is satisfied by `auth_time`
    - `prompt=login` was not requested
 3. If there is no usable session: return `login_required` for `prompt=none`, otherwise show the login page.
 4. UpdateItem the session's `last_seen_at` and `idle_expires_at`. To limit writes, only do this if `last_seen_at` is more than 5 minutes old.
-5. Put `CODE#{code_hash}` / `DETAILS` (`iss` = `https://{host}` of this request, `expires_at` = now + 60s), condition `attribute_not_exists(PK)`.
+5. Put `CODE#{code_hash}` / `DETAILS` (`iss` = `https://{host}` of this request, the session's `auth_version`, `expires_at` = now + 60s), condition `attribute_not_exists(PK)`.
 6. Redirect to `redirect_uri` with `code` and `state`.
 
 ### Exchange authorization code (`/token`, `grant_type=authorization_code`)
 
-1. GetItem `CLIENT#{client}` / `DETAILS`. Authenticate the client: confidential clients verify `client_secret` against `client_secret_hash`. Public clients send only `client_id` and rely on PKCE.
-2. UpdateItem `CODE#{code_hash}` / `DETAILS` SET `used_at = :now`, condition `attribute_exists(PK) AND attribute_not_exists(used_at) AND expires_at > :now`, ReturnValues `ALL_NEW`. This makes each code single use.
-   - If the condition fails, GetItem the code. If it exists and has `used_at` and `family_id`, the code is being reused: DeleteItem `REFRESH_FAMILY#{family_id}`. Return `invalid_grant` in either case.
-3. Verify `client_id` and `redirect_uri` match the code, that `code_verifier` matches `code_challenge`, and that this request's host matches the code's `iss`.
-4. GetItem `USER#{user}` / `DETAILS`. Reject unless `status=active`.
-5. If the client is allowed refresh tokens, TransactWriteItems:
-   - Put `REFRESH_FAMILY#{family}` / `DETAILS` (`iss` copied from the code, with GSI1 keys)
-   - Put `REFRESH#{token_hash}` / `DETAILS`
-   - Update `CODE#{code_hash}` SET `family_id`
-6. Sign the ID token and access token with the code's `iss`, using KMS `Sign` with the `active` signing key (its `kid` goes in the JWT header). The Lambda caches which key is active for 5 minutes. Return them along with the refresh token.
+Everything is validated before the code is consumed, so a wrong `code_verifier` can't burn a valid code. Consuming the code and creating the refresh family happen in one transaction.
+
+1. GetItem `CLIENT#{client}` / `DETAILS` and `ORG#{org}` / `DETAILS` (cached). Reject unless both have `status=active`. Authenticate the client: confidential clients verify `client_secret` against `client_secret_hash`. Public clients send only `client_id` and rely on PKCE.
+2. GetItem `CODE#{code_hash}` / `DETAILS`. Return `invalid_grant` if it's missing or expired.
+   - If `used_at` is already set, the code is being reused. If it has a `family_id`, DeleteItem `REFRESH_FAMILY#{family_id}`. Return `invalid_grant`.
+3. Verify all of the following, and return `invalid_grant` without consuming the code if any fails:
+   - `client_id` and `redirect_uri` match the code
+   - SHA-256 of `code_verifier` matches `code_challenge`
+   - this request's host matches the code's `iss`
+4. GetItem `USER#{user}` / `DETAILS` → `status`, `auth_version`. Return `invalid_grant` unless `status=active` and the user's `auth_version` equals the code's.
+5. TransactWriteItems:
+   - Update `CODE#{code_hash}` SET `used_at = :now` (and `family_id`, if a refresh token is being issued), condition `attribute_not_exists(used_at) AND expires_at > :now`
+   - ConditionCheck `USER#{user}`: `status = active AND auth_version = :code_auth_version`
+   - If the client is allowed refresh tokens: Put `REFRESH_FAMILY#{family}` / `DETAILS` (`iss` and `auth_version` copied from the code, with GSI1 keys), condition `attribute_not_exists(PK)`
+   - If the client is allowed refresh tokens: Put `REFRESH#{token_hash}` / `DETAILS`, condition `attribute_not_exists(PK)`
+6. If the transaction fails, GetItem the code again. If `used_at` is now set, a concurrent request redeemed it first: treat this as reuse and DeleteItem `REFRESH_FAMILY#{family_id}`. Return `invalid_grant` in every failure case.
+7. Sign the ID token and access token with the code's `iss`, using KMS `Sign` with the `active` signing key (its `kid` goes in the JWT header). The Lambda caches which key is active for 5 minutes. Return them along with the refresh token.
+
+If the Lambda crashes after step 5 commits, the code is consumed and the client must restart authorization. That's the intended trade-off for single-use codes.
 
 ### Refresh tokens (`/token`, `grant_type=refresh_token`)
 
-1. Authenticate the client (as above).
+1. Authenticate the client (as above, including the client and org status checks).
 2. GetItem `REFRESH#{token_hash}` / `DETAILS`. Return `invalid_grant` if it's missing, expired, or issued to a different `client_id`.
 3. If `used_at` is set, the token is being reused. DeleteItem `REFRESH_FAMILY#{family_id}` and return `invalid_grant`.
-4. GetItem `REFRESH_FAMILY#{family_id}` / `DETAILS` → `user_id`, `scope`, `iss`. Return `invalid_grant` if it's missing (revoked) or if this request's host doesn't match `iss`.
-5. TransactWriteItems:
+4. GetItem `REFRESH_FAMILY#{family_id}` / `DETAILS` → `user_id`, `scope`, `iss`, `auth_version`. Return `invalid_grant` if it's missing (revoked) or if this request's host doesn't match `iss`.
+5. GetItem `USER#{user}` / `DETAILS` → `status`, `auth_version`. Return `invalid_grant` unless `status=active` and the user's `auth_version` equals the family's.
+6. TransactWriteItems:
    - ConditionCheck `REFRESH_FAMILY#{family_id}`: `attribute_exists(PK)`
+   - ConditionCheck `USER#{user}`: `status = active AND auth_version = :family_auth_version`. This stops a concurrent disable or password reset from racing with token issuance.
    - Update `REFRESH#{old_hash}` SET `used_at`, condition `attribute_not_exists(used_at)`
-   - Put `REFRESH#{new_hash}` (same `family_id`, `expires_at` = min(now + token lifetime, family `expires_at`))
-6. If the transaction fails, return `invalid_grant`.
-7. GetItem `USER#{user}` / `DETAILS`. Reject unless `status=active`. Issue new tokens with the family's `iss`.
+   - Put `REFRESH#{new_hash}` (same `family_id`, `expires_at` = min(now + token lifetime, family `expires_at`)), condition `attribute_not_exists(PK)`
+7. If the transaction fails, GetItem `REFRESH#{old_hash}` again. If `used_at` is now set, a concurrent request used the same token: treat it as reuse and DeleteItem `REFRESH_FAMILY#{family_id}`. Return `invalid_grant` in every failure case.
+8. Issue new tokens with the family's `iss`.
+
+Reuse detection is strict: two simultaneous requests with the same token revoke the family, even when they're a legitimate client retry. If that causes support problems (typically mobile apps on unreliable networks), add a grace window of a few seconds. Within that window, a just-used token returns `invalid_grant` without revoking the family.
 
 ### UserInfo (`/userinfo`)
 
 1. Verify the access token's signature and expiry, and that its `iss` matches this request's host. No table read is needed for this.
-2. GetItem `USER#{sub}` / `DETAILS` and return claims for the granted scopes.
+2. GetItem `USER#{sub}` / `DETAILS`. Return `401` unless the user exists and has `status=active`. Otherwise return claims for the granted scopes.
 
 Access tokens are not revocable before they expire, so keep their lifetime short (5–15 minutes).
 
@@ -288,14 +312,20 @@ Refresh token families are not tied to the browser session and survive logout. U
 
 ### Revoke everything for a user (logout everywhere)
 
-Also used after a password reset, a password change, or disabling the user.
+Also used after a password reset, a password change, or disabling the user. In those flows, step 1 is part of that flow's own user update.
 
-1. Query GSI1 `GSI1PK = USER#{user}`. This returns every session and refresh family.
-2. BatchWriteItem: delete each returned `SESSION` and `REFRESH_FAMILY` item. Paginate if needed.
+1. **Revoke.** UpdateItem `USER#{user}` / `DETAILS` ADD `auth_version 1`. From this moment, every existing session, unredeemed code and refresh family for the user fails validation. This step is the revocation.
+2. **Clean up** (can run asynchronously):
+   - Query GSI1 `GSI1PK = USER#{user}`, following `LastEvaluatedKey` until all pages are read.
+   - Delete every `SESSION` and `REFRESH_FAMILY` item whose `auth_version` is lower than the user's new value. BatchWriteItem takes at most 25 deletes per call; retry `UnprocessedItems` with backoff.
+   - GSI1 may not yet show items created moments before step 1. That's harmless: step 1 already invalidated them, and TTL removes them.
+
+Access tokens that were already issued stay valid until they expire, which is why their lifetime is kept short.
 
 ### List a user's active sessions
 
-1. Query GSI1 `GSI1PK = USER#{user}`, `begins_with(GSI1SK, "SESSION#")`. Skip any result whose `expires_at` has passed.
+1. GetItem `USER#{user}` / `DETAILS` → `auth_version`.
+2. Query GSI1 `GSI1PK = USER#{user}`, `begins_with(GSI1SK, "SESSION#")`. Skip any result whose `expires_at` has passed or whose `auth_version` is lower than the user's.
 
 ### Verify email
 
@@ -315,14 +345,14 @@ Also used after a password reset, a password change, or disabling the user.
 1. Hash the new password.
 2. TransactWriteItems:
    - Delete `OTT#{token_hash}` / `DETAILS`, condition `purpose = reset_password AND expires_at > :now`
-   - Update `USER#{user}` / `DETAILS` SET `password_hash`, `password_updated_at`, `email_verified = true` (the user just proved they own the email)
-3. Revoke everything for the user.
+   - Update `USER#{user}` / `DETAILS` SET `password_hash`, `password_updated_at`, `email_verified = true` (the user just proved they own the email), `failed_login_count = 0`, REMOVE `locked_until`, ADD `auth_version 1`
+3. Run the cleanup step of "Revoke everything for the user". The `auth_version` increment in step 2 has already revoked everything.
 
 ### Change password (signed in)
 
 1. Verify the current password (as in login steps 3–4).
-2. UpdateItem `USER#{user}` / `DETAILS` SET `password_hash`, `password_updated_at`.
-3. Revoke everything for the user, then create a new session for the current browser.
+2. UpdateItem `USER#{user}` / `DETAILS` SET `password_hash`, `password_updated_at`, ADD `auth_version 1`, ReturnValues `UPDATED_NEW`. This revokes every session, including the current one.
+3. Create a new session for the current browser with the new `auth_version`, then run the cleanup step of "Revoke everything for the user".
 
 ### Change email (signed in)
 
@@ -339,6 +369,8 @@ Also used after a password reset, a password change, or disabling the user.
 | Pattern | Operation |
 | -- | -- |
 | Get org | GetItem `ORG#{org}` / `DETAILS` |
+| Suspend or reactivate org | UpdateItem `ORG#{org}` / `DETAILS` SET `status=suspended\|active`. Takes effect within the config cache time (30–60 seconds). |
+| Disable or enable client | UpdateItem `CLIENT#{client}` / `DETAILS` SET `status=disabled\|active`, condition `version = :expected`. Takes effect within the config cache time; the client's refresh tokens stop working while it's disabled. |
 | List clients in org | Query `PK=ORG#{org}`, `begins_with(SK, "CLIENT#")`, then BatchGetItem `CLIENT#{client}` / `DETAILS` |
 | List pools in org | Query `PK=ORG#{org}`, `begins_with(SK, "POOL#")`, then BatchGetItem `POOL#{pool}` / `DETAILS` |
 | Create pool | TransactWriteItems: Put `POOL#{pool}` / `DETAILS` + Put `ORG#{org}` / `POOL#{pool}` |
@@ -348,8 +380,8 @@ Also used after a password reset, a password change, or disabling the user.
 | List users in pool | Query config GSI1 `GSI1PK=POOL#{pool}` (sorted by email, paginated) |
 | Search users by email prefix | Query config GSI1 `GSI1PK=POOL#{pool}`, `begins_with(GSI1SK, "EMAIL#{prefix}")` |
 | Get user | GetItem `USER#{user}` / `DETAILS` |
-| Disable user | UpdateItem `USER#{user}` / `DETAILS` SET `status=disabled`, then revoke everything for the user |
-| Delete user | Revoke everything for the user, then TransactWriteItems deleting `USER#{user}` / `DETAILS` and `POOL#{pool}#EMAIL#{email}` / `EMAIL` |
+| Disable user | UpdateItem `USER#{user}` / `DETAILS` SET `status=disabled`, ADD `auth_version 1`, then run the revocation cleanup |
+| Delete user | TransactWriteItems deleting `USER#{user}` / `DETAILS` and `POOL#{pool}#EMAIL#{email}` / `EMAIL`, then run the revocation cleanup. Every credential fails validation as soon as the user item is gone. |
 | Delete pool | Reject if any client in the org uses it (Query the org's clients, BatchGetItem, check `user_pool_id`). Otherwise UpdateItem `POOL#{pool}` SET `status=deleting`, then a background job pages through config GSI1 `GSI1PK=POOL#{pool}` deleting each user (as above), and finally deletes `POOL#{pool}` / `DETAILS` and `ORG#{org}` / `POOL#{pool}` |
 
 ### Admin: login hosts
@@ -365,7 +397,7 @@ Also used after a password reset, a password change, or disabling the user.
 
 Runs on a schedule (e.g. every 90 days).
 
-1. **Prepare.** Create an asymmetric KMS key (`ECC_NIST_P256`, `SIGN_VERIFY`) and call `GetPublicKey`. Put `KEYS` / `KID#{kid}` (`status=next`, `public_jwk`, `kms_key_arn`), condition `attribute_not_exists(PK)`. The key now appears in the JWKS, but nothing is signed with it yet.
+1. **Prepare.** Create an asymmetric KMS key (`RSA_2048`, `SIGN_VERIFY`) and call `GetPublicKey`. Put `KEYS` / `KID#{kid}` (`status=next`, `public_jwk`, `kms_key_arn`), condition `attribute_not_exists(PK)`. The key now appears in the JWKS, but nothing is signed with it yet.
 2. **Activate.** Wait at least as long as relying parties cache the JWKS (24 hours is safe), so they already trust the key. Then TransactWriteItems:
    - Update the current key SET `status=retired`, `retired_at`, condition `status = active`
    - Update the next key SET `status=active`, `activated_at`, condition `status = next`
@@ -381,5 +413,9 @@ KMS `Sign` requests count against a per-account, per-region quota. Request a quo
 2. **User IDs are globally unique.** User items are keyed `USER#{user}`, and the token `sub` is the user ID, so no pool claim is needed.
 3. **`iss` is the URL of the host used for login.** Discovery on each host advertises that host as its issuer. The issuer is fixed when the authorization code is created and carried on the code and the refresh family, so refreshed tokens keep it. Token, refresh and userinfo requests must arrive on that same host.
    - Consequence: relying parties identify users by `iss` + `sub`. If a client moves from its default host to a custom host, the RP sees a new issuer and must be reconfigured, and RPs that key users on `iss` + `sub` will treat existing users as new ones. Document this for customers adding a custom domain.
-4. **Signing keys live in KMS.** One global key set (ES256) signs tokens for every org and host. DynamoDB holds only the public keys and the rotation state.
+4. **Signing keys live in KMS.** One global key set signs tokens for every org and host, and DynamoDB holds only the public keys and the rotation state. Per-org keys would limit the impact of a compromised key, but aren't needed for v1.
+5. **RS256 for token signing.** It's the algorithm relying parties most widely support, and KMS RSA signatures can go into a JWT without conversion.
+6. **PKCE (S256) is required for every client.** This follows OAuth 2.1. Before onboarding a relying party, confirm that it sends PKCE.
+7. **Revocation is `auth_version`, not deletion.** Logout everywhere, password changes, password resets and disabling a user all increment the user's `auth_version`, which invalidates every session, code and refresh family immediately. Deleting those items through GSI1 is cleanup only, because GSI reads are eventually consistent.
+8. **No cross-client SSO in v1.** Each login host belongs to one client, and session cookies are host-only, so each client has its own browser sessions even when clients share a pool. That's why session lifetimes are set per client. Cross-client SSO would need a shared login host per org or pool, with session lifetimes and `iss` at that level. It can be added later without changing the other tables.
 
