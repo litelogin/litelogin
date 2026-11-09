@@ -24,6 +24,7 @@ erDiagram
         array grant_types
         array redirect_uris
         array post_logout_redirect_uris
+        array allowed_origins
         array allowed_scopes
         string user_pool_id
         boolean registration_enabled
@@ -140,18 +141,19 @@ erDiagram
 | ORG#{org} | DETAILS | name=LiteLogin, description, status=active\|suspended, created_at, updated_at |
 | ORG#{org} | CLIENT#{client} |  |
 | ORG#{org} | POOL#{pool} |  |
-| POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, created_at, updated_at, version |
+| POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, created_at, updated_at, version, (while deleting) GSI2PK=WORK, GSI2SK=pool_deletion#{pool}, work_attempts, work_updated_at |
 | USER#{user} | DETAILS | pool_id, email=example@example.com, password_hash="$argon2id$v=19$m=19456,t=2,p=1$...", email_verified=true, status=active\|disabled, auth_version=1, failed_login_count, locked_until, password_updated_at, created_at, updated_at, version, GSI1PK=POOL#{pool}, GSI1SK=EMAIL#{email} |
 | POOL#{pool}#EMAIL#{email} | EMAIL | user_id |
-| CLIENT#{client} | DETAILS | org_id, name=LiteLogin, description, status=active\|disabled, client_type=public\|confidential, client_secret_hash, token_endpoint_auth_method=none\|client_secret_basic\|client_secret_post, grant_types=[authorization_code, refresh_token], redirect_uris=[https://login.microsoftonline.com/common/oauth2/nativeclient], post_logout_redirect_uris=[], allowed_scopes=[openid, email, offline_access], user_pool_id={pool}, registration_enabled=true, theme={...}, access_token_ttl=900, id_token_ttl=900, refresh_token_ttl=2592000, refresh_family_ttl=7776000, session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version |
-| CLIENT#{client} | LOGIN_HOST#{login_host} | type=default\|custom, status=pending\|verified |
-| LOGIN_HOST#{login_host} | CLIENT | client_id, org_id, type=default\|custom, status=pending\|verified |
+| CLIENT#{client} | DETAILS | org_id, name=LiteLogin, description, status=active\|disabled, client_type=public\|confidential, client_secret_hash, token_endpoint_auth_method=none\|client_secret_basic\|client_secret_post, grant_types=[authorization_code, refresh_token], redirect_uris=[https://login.microsoftonline.com/common/oauth2/nativeclient], post_logout_redirect_uris=[], allowed_origins=[https://app.acme.com], allowed_scopes=[openid, email, offline_access], user_pool_id={pool}, registration_enabled=true, theme={...}, access_token_ttl=900, id_token_ttl=900, refresh_token_ttl=2592000, refresh_family_ttl=7776000, session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version |
+| CLIENT#{client} | LOGIN_HOST#{login_host} | type=default\|custom, status=pending\|verified\|removing |
+| LOGIN_HOST#{login_host} | CLIENT | client_id, org_id, type=default\|custom, status=pending\|verified\|removing, (while pending or removing) GSI2PK=WORK, GSI2SK=custom_domain#{login_host}, work_attempts, work_updated_at, work_last_error |
 | KEYS | KID#{kid} | status=next\|active\|retired, alg=RS256, kms_key_arn, public_jwk, created_at, activated_at, retired_at |
 
 - **Times:** all times are epoch seconds and all TTLs are in seconds.
 - **Client secrets:** a client secret is a 256-bit random value, so it's stored as a SHA-256 hash (a slow password hash isn't needed) and compared in constant time. Public clients have no secret and `token_endpoint_auth_method=none`.
 - **`version`:** used for optimistic locking. Every admin update increments it, with the condition `version = :expected`.
-- **Login hosts:** a client's hosts are the `CLIENT#{client}` / `LOGIN_HOST#` items. The client item has no `login_hosts` attribute.
+- **Login hosts:** a client's hosts are the `CLIENT#{client}` / `LOGIN_HOST#` items. The client item has no `login_hosts` attribute. A custom host is `verified` only when both its certificate has been issued and its DNS (CNAME) points to LiteLogin. Only `verified` hosts serve requests.
+- **`allowed_origins`:** the browser origins allowed to call `/token` and `/userinfo` cross-origin (CORS). It is configured separately from `redirect_uris`, and is empty for clients that never call these endpoints from a browser.
 - **Signing keys:** private keys never leave KMS. Tokens are signed with the KMS `Sign` API (`RSASSA_PKCS1_V1_5_SHA_256`), and the table holds only the public JWK and the rotation state. KMS returns RSA signatures as raw bytes, which go straight into the JWT. If ES256 is ever added, note that KMS returns ECDSA signatures DER-encoded; they must be converted to the 64-byte `R || S` form that JWTs require.
 - **PKCE:** required for every client, public and confidential. Only `code_challenge_method=S256` is accepted. There is no per-client setting.
 - **`auth_version`:** a counter on the user, starting at 1. Sessions, authorization codes and refresh families record the value at the time they were created, and are valid only while it still equals the user's current value. See "Revoke everything for a user".
@@ -165,6 +167,16 @@ User IDs are globally unique (UUIDv4 or ULID), so a user can be read by ID alone
 | GSI1PK = POOL#{pool} | GSI1SK = EMAIL#{email} | INCLUDE: email, email_verified, status, created_at |
 
 The index is sparse: only user items carry GSI1 attributes. `password_hash` is never projected. GSI reads are eventually consistent, so this index is for admin listing and search only, never for login.
+
+### GSI2 (outstanding background work)
+
+| PK | SK | Projection |
+| -- | -- | -- |
+| GSI2PK = WORK | GSI2SK = {work_type}#{id} | INCLUDE: status, work_attempts, work_updated_at, work_last_error |
+
+- **What it holds:** an item carries GSI2 attributes only while it has background work outstanding: a login host that is `pending` or `removing`, or a pool that is `deleting`. The Worker removes them when the work is done, so the index only ever holds in-progress work.
+- **How it's used:** the DynamoDB stream starts work immediately. The scheduled reconciler queries GSI2 to retry work whose `work_updated_at` is stale, so a missed stream record or a failed Worker run can't leave work stuck.
+- **Partition size:** this index uses a single partition key, which is fine because the volume of outstanding work is small.
 
 
 ## Session Table
@@ -182,6 +194,10 @@ Holds short-lived authentication state: browser sessions, authorization codes, r
 | REFRESH_FAMILY#{family} | DETAILS | iss, client_id, pool_id, user_id, scope, auth_version, auth_time, created_at, expires_at (absolute lifetime), GSI1PK=USER#{user}, GSI1SK=REFRESH_FAMILY#{created_at} |
 | REFRESH#{token_hash} | DETAILS | family_id, client_id, used_at, expires_at |
 | OTT#{token_hash} | DETAILS | purpose=verify_email\|reset_password\|change_email, pool_id, user_id, email, new_email, expires_at |
+| IDEMPOTENCY#{caller_hash}#{key} | DETAILS | request_hash, status=in_progress\|completed, response_status, response_body, expires_at (now + 24h) |
+
+- **Idempotency keys:** `IDEMPOTENCY` items record admin API requests sent with an `Idempotency-Key` header. `{caller_hash}` is a SHA-256 of the caller's IAM principal ARN, so keys are scoped per caller.
+- **Secrets are never stored in the response.** `response_body` omits client secrets, so a replayed "create client" response has no secret and includes `"secret_unavailable": true`. A caller that lost the original response rotates the secret.
 
 - **Sessions:** `expires_at` is the absolute lifetime (and the TTL attribute). `idle_expires_at` is pushed forward on activity.
 - **Refresh tokens:** every token belongs to a family that starts with one authorization code grant. A refresh token is valid only while its `REFRESH_FAMILY` item exists. To revoke a family, delete that item. Its orphaned `REFRESH` items then fail the check and expire through TTL.
@@ -226,7 +242,10 @@ Steps 1, 3, 4 and 6 read configuration that rarely changes, so they can be cache
 3. TransactWriteItems:
    - Put `USER#{user}` / `DETAILS` (`pool_id`, `GSI1PK=POOL#{pool}`, `GSI1SK=EMAIL#{email}`, `email`, `password_hash`, `email_verified=false`, `status=active`, `auth_version=1`, `created_at`), condition `attribute_not_exists(PK)`
    - Put `POOL#{pool}#EMAIL#{email}` / `EMAIL` (`user_id`), condition `attribute_not_exists(PK)`
-4. If the transaction is cancelled because of the email item, the email is already registered. To avoid revealing that, show the same "check your email" page and send the existing user an email instead.
+   - ConditionCheck `POOL#{pool}` / `DETAILS`: `status = active`. This stops a user being created behind a pool deletion that's already running.
+4. If the transaction is cancelled because of the email item, the email is already registered. To avoid revealing that, show the same "check your email" page:
+   - If the existing user's `email_verified` is false, send a new verification email (step 5). This covers a user retrying after their first registration request failed while sending email.
+   - Otherwise, send the existing user a "you already have an account" email with a password reset link.
 5. Put `OTT#{token_hash}` / `DETAILS` (`purpose=verify_email`, `pool_id`, `user_id`, `email`, `expires_at` = now + 24h) and send the verification email.
 
 ### Login with email and password
@@ -374,24 +393,36 @@ Access tokens that were already issued stay valid until they expire, which is wh
 | List clients in org | Query `PK=ORG#{org}`, `begins_with(SK, "CLIENT#")`, then BatchGetItem `CLIENT#{client}` / `DETAILS` |
 | List pools in org | Query `PK=ORG#{org}`, `begins_with(SK, "POOL#")`, then BatchGetItem `POOL#{pool}` / `DETAILS` |
 | Create pool | TransactWriteItems: Put `POOL#{pool}` / `DETAILS` + Put `ORG#{org}` / `POOL#{pool}` |
-| Create client | TransactWriteItems: Put `CLIENT#{client}` / `DETAILS`, Put `ORG#{org}` / `CLIENT#{client}`, Put the default login host (both items, below) |
+| Create client | TransactWriteItems: Put `CLIENT#{client}` / `DETAILS`, Put `ORG#{org}` / `CLIENT#{client}`, Put the default login host (both items, below), ConditionCheck `POOL#{pool}` / `DETAILS` `status = active` |
 | Update client | UpdateItem `CLIENT#{client}` / `DETAILS`, condition `version = :expected` |
-| Delete client | Query `PK=CLIENT#{client}`, `begins_with(SK, "LOGIN_HOST#")`; TransactWriteItems deleting the client item, the org index item, and both items for each host |
+| Delete client | Query `PK=CLIENT#{client}`, `begins_with(SK, "LOGIN_HOST#")`. If any custom hosts exist, remove them first ("Remove host") and reject the delete until they're gone, so their CloudFront tenants are cleaned up. Then TransactWriteItems deleting the client item, the org index item, and both items for the default host. |
 | List users in pool | Query config GSI1 `GSI1PK=POOL#{pool}` (sorted by email, paginated) |
 | Search users by email prefix | Query config GSI1 `GSI1PK=POOL#{pool}`, `begins_with(GSI1SK, "EMAIL#{prefix}")` |
+| Create user | Same transaction as registration: Put `USER#{user}`, Put `POOL#{pool}#EMAIL#{email}`, ConditionCheck `POOL#{pool}` `status = active`. With an initial password, store its hash. Without one, Put an `OTT` item (`purpose=reset_password`) and email a password-set link. |
 | Get user | GetItem `USER#{user}` / `DETAILS` |
 | Disable user | UpdateItem `USER#{user}` / `DETAILS` SET `status=disabled`, ADD `auth_version 1`, then run the revocation cleanup |
 | Delete user | TransactWriteItems deleting `USER#{user}` / `DETAILS` and `POOL#{pool}#EMAIL#{email}` / `EMAIL`, then run the revocation cleanup. Every credential fails validation as soon as the user item is gone. |
-| Delete pool | Reject if any client in the org uses it (Query the org's clients, BatchGetItem, check `user_pool_id`). Otherwise UpdateItem `POOL#{pool}` SET `status=deleting`, then a background job pages through config GSI1 `GSI1PK=POOL#{pool}` deleting each user (as above), and finally deletes `POOL#{pool}` / `DETAILS` and `ORG#{org}` / `POOL#{pool}` |
+| Delete pool | Reject if any client in the org uses it (Query the org's clients, BatchGetItem, check `user_pool_id`). Otherwise UpdateItem `POOL#{pool}` SET `status=deleting` and the GSI2 work attributes. Because user and client creation check `status = active` in their transactions, nothing new can be added after this point. A background job then pages through config GSI1 `GSI1PK=POOL#{pool}` deleting each user (as above), and finally deletes `POOL#{pool}` / `DETAILS` and `ORG#{org}` / `POOL#{pool}` |
 
 ### Admin: login hosts
 
 | Pattern | Operation |
 | -- | -- |
 | List a client's hosts | Query `PK=CLIENT#{client}`, `begins_with(SK, "LOGIN_HOST#")` |
-| Add host | TransactWriteItems: Put `LOGIN_HOST#{host}` / `CLIENT` (`client_id`, `org_id`, `type`, `status=pending`), condition `attribute_not_exists(PK)`; Put `CLIENT#{client}` / `LOGIN_HOST#{host}` (`type`, `status=pending`). The default host is created with `status=verified`. |
-| Verify custom host | After the DNS TXT or ACM check passes, TransactWriteItems updating `status=verified` on both items |
-| Remove host | TransactWriteItems deleting both items |
+| Add host | TransactWriteItems: Put `LOGIN_HOST#{host}` / `CLIENT` (`client_id`, `org_id`, `type`, `status=pending`, GSI2 work attributes), condition `attribute_not_exists(PK)`; Put `CLIENT#{client}` / `LOGIN_HOST#{host}` (`type`, `status=pending`). The default host is created with `status=verified` and no GSI2 attributes. |
+| Verify custom host | When the certificate has been issued and the host's CNAME points to LiteLogin, TransactWriteItems updating `status=verified` on both items and removing the GSI2 attributes from the forward item |
+| Remove host | TransactWriteItems setting `status=removing` on both items, and the GSI2 work attributes on the forward item. The host stops serving immediately, because only `verified` hosts resolve. Once its CloudFront tenant has been removed, the Worker deletes both items. Default hosts have no tenant, so they are deleted directly. |
+
+### Admin: idempotent requests
+
+For admin API requests that carry an `Idempotency-Key` header:
+
+1. Put `IDEMPOTENCY#{caller_hash}#{key}` / `DETAILS` (`request_hash` = SHA-256 of method, path and body; `status=in_progress`), condition `attribute_not_exists(PK)`.
+2. If the put succeeds, process the request, then UpdateItem SET `status=completed`, `response_status`, `response_body` (without secrets).
+3. If the item already exists:
+   - `request_hash` differs: return `422`. The key was reused for a different request.
+   - `status=in_progress`: return `409`. The original request is still running.
+   - `status=completed`: return the stored response.
 
 ### Rotate signing keys
 
@@ -418,4 +449,5 @@ KMS `Sign` requests count against a per-account, per-region quota. Request a quo
 6. **PKCE (S256) is required for every client.** This follows OAuth 2.1. Before onboarding a relying party, confirm that it sends PKCE.
 7. **Revocation is `auth_version`, not deletion.** Logout everywhere, password changes, password resets and disabling a user all increment the user's `auth_version`, which invalidates every session, code and refresh family immediately. Deleting those items through GSI1 is cleanup only, because GSI reads are eventually consistent.
 8. **No cross-client SSO in v1.** Each login host belongs to one client, and session cookies are host-only, so each client has its own browser sessions even when clients share a pool. That's why session lifetimes are set per client. Cross-client SSO would need a shared login host per org or pool, with session lifetimes and `iss` at that level. It can be added later without changing the other tables.
+9. **Background work is recorded on the item itself.** A host that is `pending` or `removing`, or a pool that is `deleting`, carries GSI2 attributes until its work finishes. The stream starts the work and the reconciler retries it, so there is no separate job entity.
 
