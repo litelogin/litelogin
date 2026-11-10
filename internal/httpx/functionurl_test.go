@@ -83,9 +83,9 @@ func TestNewRequestRejectsInvalidBase64(t *testing.T) {
 }
 
 func TestFunctionURLHandlerResponse(t *testing.T) {
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.SetCookie(w, &http.Cookie{Name: "a", Value: "1"})
-		http.SetCookie(w, &http.Cookie{Name: "b", Value: "2"})
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "a", Value: "1", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+		http.SetCookie(w, &http.Cookie{Name: "b", Value: "2", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Add("Vary", "Origin")
 		w.Header().Add("Vary", "Cookie")
@@ -116,7 +116,7 @@ func TestFunctionURLHandlerResponse(t *testing.T) {
 
 func TestFunctionURLHandlerBinaryBody(t *testing.T) {
 	binary := []byte{0xff, 0xfe, 0x00, 0x01}
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(binary)
 	})
@@ -139,7 +139,7 @@ func TestFunctionURLHandlerBinaryBody(t *testing.T) {
 
 func TestFunctionURLHandlerBadRequest(t *testing.T) {
 	called := false
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true })
+	h := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { called = true })
 
 	resp, err := FunctionURLHandler(h)(context.Background(), events.LambdaFunctionURLRequest{
 		RawPath:         "/",

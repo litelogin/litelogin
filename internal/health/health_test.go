@@ -45,7 +45,7 @@ func TestHandler(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			Handler(fakeDescriber{failTable: tt.failTable}, tables, logger).
-				ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+				ServeHTTP(rec, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", nil))
 
 			if rec.Code != tt.wantStatus {
 				t.Errorf("status = %d, want %d", rec.Code, tt.wantStatus)
