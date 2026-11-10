@@ -211,7 +211,7 @@ The admin API is for deployment operators.
 
 | Resource | Operations |
 | -- | -- |
-| `/v1/orgs` | Create |
+| `/v1/orgs` | Create, list (oldest first) |
 | `/v1/orgs/{org}` | Get, update, suspend, reactivate |
 | `/v1/orgs/{org}/pools` | Create, list |
 | `/v1/pools/{pool}` | Get, update, delete (asynchronous; returns `202`) |
@@ -229,7 +229,7 @@ The admin API is for deployment operators.
 
 - **Versioning:** the API is versioned in the path (`/v1`). Changes within a version are additive only.
 - **Optimistic locking:** `GET` returns the item's `version` as an `ETag`. Updates must send `If-Match`, and a mismatch returns `412`.
-- **Pagination:** list endpoints take `limit` and an opaque `cursor`. The cursor is the encoded DynamoDB `LastEvaluatedKey`, bound to its listing (e.g. the pool and `email_prefix`) and signed with a KMS HMAC key, so callers can't change it or use it for another listing. The key never leaves KMS. Only the user list is paginated today; the other lists are small and return every item, and they gain a `next_cursor` the same way if they grow.
+- **Pagination:** list endpoints take `limit` and an opaque `cursor`. The cursor is the encoded DynamoDB `LastEvaluatedKey`, bound to its listing (e.g. the pool and `email_prefix`) and signed with a KMS HMAC key, so callers can't change it or use it for another listing. The key never leaves KMS. The org and user lists are paginated; the other lists (an org's pools and clients, a client's hosts, signing keys) are small and return every item, and they gain a `next_cursor` the same way if they grow.
 - **Idempotency:** create requests and other important changes accept an `Idempotency-Key` header. A retry with the same key and body returns the original response, so a lost response can't create a duplicate. Keys are scoped per caller and kept for 24 hours. The CLI sends one on every create. Client secrets aren't stored with the response: a replayed "create client" response has no secret, and the caller rotates it if the original response was lost.
 - **Errors:** JSON `{ "error": "<code>", "message": "<text>" }` with standard HTTP status codes. A missing `If-Match` is `428`, a stale one `412`, and unknown request fields are rejected with `400`, so a misspelled field fails instead of being ignored.
 - **Actions:** suspend, reactivate, disable, enable and rotate-secret are `POST` to a sub-path (e.g. `POST /v1/clients/{client}/disable`). They accept `If-Match` but don't require it. Revoking a user's sessions is `DELETE /v1/users/{user}/sessions`.

@@ -17,6 +17,7 @@ import (
 type Store interface {
 	CreateOrg(ctx context.Context, org *store.Org) error
 	GetOrg(ctx context.Context, orgID string) (*store.Org, error)
+	ListOrgs(ctx context.Context, opts store.ListOrgsOptions) ([]store.Org, string, error)
 	UpdateOrg(ctx context.Context, org *store.Org) error
 	SetOrgStatus(ctx context.Context, orgID, status string, expectedVersion int64) (int64, error)
 
@@ -88,6 +89,7 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	route("POST /v1/orgs", s.createOrg)
+	route("GET /v1/orgs", s.listOrgs)
 	route("GET /v1/orgs/{org}", s.getOrg)
 	route("PATCH /v1/orgs/{org}", s.updateOrg)
 	route("POST /v1/orgs/{org}/suspend", s.setOrgStatus(store.OrgSuspended))

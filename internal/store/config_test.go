@@ -346,3 +346,46 @@ func TestPoolDeletion(t *testing.T) {
 	_, err = e.DeletePoolUsers(e.ctx, active.ID, 10)
 	wantErr(t, err, ErrConditionFailed)
 }
+
+func TestListOrgs(t *testing.T) {
+	e := newTestEnv(t)
+	orgs, next, err := e.ListOrgs(e.ctx, ListOrgsOptions{})
+	must(t, err)
+	if len(orgs) != 0 || next != "" {
+		t.Fatalf("empty table: %v %q", orgs, next)
+	}
+	var want []string
+	for _, name := range []string{"First", "Second", "Third"} {
+		o := &Org{ID: newID(), Name: name}
+		must(t, e.CreateOrg(e.ctx, o))
+		want = append(want, o.ID)
+		e.clock.Advance(time.Second)
+	}
+	// A failed duplicate create leaves no extra list item.
+	wantErr(t, e.CreateOrg(e.ctx, &Org{ID: want[0], Name: "Dup"}), ErrAlreadyExists)
+
+	var got []string
+	cursor := ""
+	for page := 0; ; page++ {
+		orgs, next, err := e.ListOrgs(e.ctx, ListOrgsOptions{Limit: 2, Cursor: cursor})
+		must(t, err)
+		for _, o := range orgs {
+			got = append(got, o.ID)
+			if o.Name == "" || o.Status != OrgActive {
+				t.Fatalf("listed org without details: %+v", o)
+			}
+		}
+		if next == "" {
+			break
+		}
+		if page > 3 {
+			t.Fatal("listing doesn't end")
+		}
+		cursor = next
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("listed %v, want oldest first %v", got, want)
+	}
+	_, _, err = e.ListOrgs(e.ctx, ListOrgsOptions{Cursor: "bogus"})
+	wantErr(t, err, ErrInvalidCursor)
+}

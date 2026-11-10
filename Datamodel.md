@@ -139,6 +139,7 @@ erDiagram
 | PK | SK | Attributes |
 | -- | -- | -- |
 | ORG#{org} | DETAILS | name=LiteLogin, description, status=active\|suspended, created_at, updated_at, version |
+| ORGS | ORG#{created_at}#{org} | org_id |
 | ORG#{org} | CLIENT#{client} |  |
 | ORG#{org} | POOL#{pool} |  |
 | POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, created_at, updated_at, version, (while deleting) GSI2PK=WORK, GSI2SK=pool_deletion#{pool}, work_attempts, work_updated_at |
@@ -388,6 +389,8 @@ Access tokens that were already issued stay valid until they expire, which is wh
 
 | Pattern | Operation |
 | -- | -- |
+| Create org | TransactWriteItems: Put `ORG#{org}` / `DETAILS` + Put `ORGS` / `ORG#{created_at}#{org}`, both condition `attribute_not_exists(PK)` |
+| List orgs | Query `PK=ORGS` (oldest first, paginated), then BatchGetItem `ORG#{org}` / `DETAILS`. The list item holds only the org ID and its sort key uses `created_at`, which never changes, so updates never touch it. All orgs share one partition, which is fine: orgs are created rarely and listed only by operators. |
 | Get org | GetItem `ORG#{org}` / `DETAILS` |
 | Update org | UpdateItem `ORG#{org}` / `DETAILS` SET `name`, `description`, condition `version = :expected` |
 | Suspend or reactivate org | UpdateItem `ORG#{org}` / `DETAILS` SET `status=suspended\|active`, condition `version = :expected`. Takes effect within the config cache time (30–60 seconds). |

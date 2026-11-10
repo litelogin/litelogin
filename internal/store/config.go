@@ -135,6 +135,19 @@ type hostReverseItem struct {
 	Status string `dynamodbav:"status"`
 }
 
+// orgListItem is ORGS / ORG#{created_at}#{org}: lists every org, oldest
+// first. It holds only the org ID; details come from the org item.
+type orgListItem struct {
+	keys
+	OrgID string `dynamodbav:"org_id"`
+}
+
+// orgListSK sorts by creation time, which never changes, so the item never
+// needs updating. The time is zero-padded so it sorts as a string.
+func orgListSK(org *Org) string {
+	return fmt.Sprintf("%s%012d#%s", pfxOrg, org.CreatedAt, org.ID)
+}
+
 // orgIndexItem is ORG#{org} / CLIENT#{client} or ORG#{org} / POOL#{pool}.
 type orgIndexItem struct {
 	keys
@@ -153,18 +166,83 @@ func (s *Store) CreateOrg(ctx context.Context, org *Org) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName:           aws.String(s.config),
-		Item:                item,
-		ConditionExpression: aws.String("attribute_not_exists(PK)"),
+	listed, err := marshal(orgListItem{keys: keys{pkOrgs, orgListSK(org)}, OrgID: org.ID})
+	if err != nil {
+		return err
+	}
+	err = s.transact(ctx, []types.TransactWriteItem{
+		put(s.config, item, "attribute_not_exists(PK)", nil, nil),
+		put(s.config, listed, "attribute_not_exists(PK)", nil, nil),
 	})
-	if ok, _ := conditionFailed(err); ok {
+	if asTxFailure(err) != nil {
 		return ErrAlreadyExists
 	}
-	if err != nil {
-		return fmt.Errorf("store: create org: %w", err)
+	return err
+}
+
+// ListOrgsOptions controls ListOrgs.
+type ListOrgsOptions struct {
+	// Limit is the page size; 0 means 50.
+	Limit int32
+	// Cursor continues a previous listing.
+	Cursor string
+}
+
+// ListOrgs lists every org, oldest first. It returns a cursor for the next
+// page, or "" on the last page.
+func (s *Store) ListOrgs(ctx context.Context, opts ListOrgsOptions) ([]Org, string, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
 	}
-	return nil
+	in := &dynamodb.QueryInput{
+		TableName:                 aws.String(s.config),
+		KeyConditionExpression:    aws.String("PK = :pk"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": avS(pkOrgs)},
+		Limit:                     aws.Int32(limit),
+	}
+	if opts.Cursor != "" {
+		start, err := decodeCursor(opts.Cursor, map[string]string{AttrPK: pkOrgs})
+		if err != nil {
+			return nil, "", err
+		}
+		in.ExclusiveStartKey = start
+	}
+	out, err := s.db.Query(ctx, in)
+	if err != nil {
+		return nil, "", fmt.Errorf("store: list orgs: %w", err)
+	}
+	ids := make([]string, 0, len(out.Items))
+	for _, raw := range out.Items {
+		var it orgListItem
+		if err := unmarshal(raw, &it); err != nil {
+			return nil, "", err
+		}
+		ids = append(ids, it.OrgID)
+	}
+	items, err := s.batchGet(ctx, s.config, ids, func(id string) map[string]types.AttributeValue {
+		return key(pfxOrg+id, skDetails)
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	byID := make(map[string]Org, len(items))
+	for _, raw := range items {
+		var it orgItem
+		if err := unmarshal(raw, &it); err != nil {
+			return nil, "", err
+		}
+		it.ID = strings.TrimPrefix(it.PK, pfxOrg)
+		byID[it.ID] = it.Org
+	}
+	orgs := make([]Org, 0, len(ids))
+	for _, id := range ids {
+		if o, ok := byID[id]; ok { // orgs are never deleted, but don't fail if one is
+			orgs = append(orgs, o)
+		}
+	}
+	next, err := encodeCursor(out.LastEvaluatedKey)
+	return orgs, next, err
 }
 
 // GetOrg returns an org.

@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -83,6 +84,38 @@ func (s *Server) createOrg(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeVersioned(w, http.StatusCreated, org.Version, orgJSON(org))
+	return nil
+}
+
+// listOrgs lists every org, oldest first.
+func (s *Server) listOrgs(w http.ResponseWriter, r *http.Request) error {
+	limit, err := pageLimit(r)
+	if err != nil {
+		return err
+	}
+	const scope = "orgs"
+	var inner string
+	if c := r.URL.Query().Get("cursor"); c != "" {
+		if inner, err = s.Cursor.Verify(r.Context(), scope, c); err != nil {
+			return err
+		}
+	}
+	orgs, next, err := s.Store.ListOrgs(r.Context(), store.ListOrgsOptions{Limit: limit, Cursor: inner})
+	if errors.Is(err, store.ErrInvalidCursor) {
+		return errInvalidCursor()
+	}
+	if err != nil {
+		return err
+	}
+	signed, err := s.Cursor.Sign(r.Context(), scope, next)
+	if err != nil {
+		return err
+	}
+	out := list[Org]{Items: make([]Org, 0, len(orgs)), NextCursor: signed}
+	for i := range orgs {
+		out.Items = append(out.Items, orgJSON(&orgs[i]))
+	}
+	writeJSON(w, http.StatusOK, out)
 	return nil
 }
 

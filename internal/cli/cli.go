@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
@@ -145,6 +146,11 @@ func (a *App) discoverEndpoint(ctx context.Context, env string) (string, error) 
 	}
 	name := "litelogin-" + env + "-admin"
 	out, err := lambda.NewFromConfig(cfg).GetFunctionUrlConfig(ctx, &lambda.GetFunctionUrlConfigInput{FunctionName: aws.String(name)})
+	var missing *lambdatypes.ResourceNotFoundException
+	if errors.As(err, &missing) {
+		return "", fmt.Errorf("no function %s in region %q with AWS profile %q: use the profile for the %s account (--profile or $AWS_PROFILE), and --region if it's deployed elsewhere",
+			name, cfg.Region, a.awsProfile(), env)
+	}
 	if err != nil {
 		return "", fmt.Errorf("look up the Admin API of %s (function %s): %w", env, name, err)
 	}

@@ -104,6 +104,7 @@ const (
 	pfxLoginHost = "LOGIN_HOST#"
 	pfxKID       = "KID#"
 	pkKeys       = "KEYS"
+	pkOrgs       = "ORGS"
 
 	pfxSession       = "SESSION#"
 	pfxCode          = "CODE#"

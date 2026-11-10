@@ -143,8 +143,23 @@ func (a *App) orgCommand() *cobra.Command {
 	upd.Flags().StringVar(&name, "name", "", "new name")
 	upd.Flags().StringVar(&desc, "description", "", "new description")
 
+	var limit int
+	var cursor string
+	var all bool
+	list := &cobra.Command{
+		Use: "list", Short: "List orgs, oldest first", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			orgs, next, err := listPages[admin.Org](a, cmd, "/v1/orgs", url.Values{}, limit, cursor, all)
+			if err != nil {
+				return err
+			}
+			return printList(a.Stdout, a.output, orgs, next, "id", "name", "status", "created_at", "version")
+		},
+	}
+	pageFlags(list, &limit, &cursor, &all)
+
 	return group("org", "Manage orgs",
-		create,
+		create, list,
 		getCommand[admin.Org](a, "get ORG", "Show an org", "/v1/orgs/"),
 		upd,
 		actionCommand[admin.Org](a, "suspend ORG", "Suspend an org: its clients stop serving logins", "/v1/orgs/", "/suspend"),
@@ -204,6 +219,43 @@ func deleteCommand(a *App, use, short, prefix, what string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.remove(cmd, prefix+esc(args[0]), what+" "+args[0])
 		},
+	}
+}
+
+// pageFlags adds the paging flags of a paginated list command.
+func pageFlags(cmd *cobra.Command, limit *int, cursor *string, all *bool) {
+	cmd.Flags().IntVar(limit, "limit", 0, "page size (1-100, default 50)")
+	cmd.Flags().StringVar(cursor, "cursor", "", "continue from a previous page")
+	cmd.Flags().BoolVar(all, "all", false, "fetch every page")
+}
+
+// listPages fetches one page of a paginated list, or every page with all.
+// It returns the items and the cursor of the next page ("" at the end).
+func listPages[T any](a *App, cmd *cobra.Command, path string, q url.Values, limit int, cursor string, all bool) ([]T, string, error) {
+	var items []T
+	next := cursor
+	for {
+		if limit > 0 {
+			q.Set("limit", strconv.Itoa(limit))
+		}
+		if next != "" {
+			q.Set("cursor", next)
+		}
+		p := path
+		if len(q) > 0 {
+			p += "?" + q.Encode()
+		}
+		var page struct {
+			Items      []T    `json:"items"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if _, err := a.get(cmd, p, &page); err != nil {
+			return nil, "", err
+		}
+		items, next = append(items, page.Items...), page.NextCursor
+		if !all || next == "" {
+			return items, next, nil
+		}
 	}
 }
 
@@ -483,43 +535,20 @@ func (a *App) userCommand() *cobra.Command {
 	list := &cobra.Command{
 		Use: "list", Short: "List or search a pool's users, sorted by email", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			var users []admin.User
-			next := cursor
-			for {
-				q := url.Values{}
-				if prefix != "" {
-					q.Set("email_prefix", prefix)
-				}
-				if limit > 0 {
-					q.Set("limit", strconv.Itoa(limit))
-				}
-				if next != "" {
-					q.Set("cursor", next)
-				}
-				var page struct {
-					Items      []admin.User
-					NextCursor string `json:"next_cursor"`
-				}
-				path := "/v1/pools/" + esc(pool) + "/users"
-				if len(q) > 0 {
-					path += "?" + q.Encode()
-				}
-				if _, err := a.get(cmd, path, &page); err != nil {
-					return err
-				}
-				users, next = append(users, page.Items...), page.NextCursor
-				if !all || next == "" {
-					break
-				}
+			q := url.Values{}
+			if prefix != "" {
+				q.Set("email_prefix", prefix)
+			}
+			users, next, err := listPages[admin.User](a, cmd, "/v1/pools/"+esc(pool)+"/users", q, limit, cursor, all)
+			if err != nil {
+				return err
 			}
 			return printList(a.Stdout, a.output, users, next, "id", "email", "email_verified", "status", "created_at")
 		},
 	}
 	list.Flags().StringVar(&pool, "pool", "", "user pool ID (required)")
 	list.Flags().StringVar(&prefix, "email-prefix", "", "only users whose email starts with this")
-	list.Flags().IntVar(&limit, "limit", 0, "page size (1-100, default 50)")
-	list.Flags().StringVar(&cursor, "cursor", "", "continue from a previous page")
-	list.Flags().BoolVar(&all, "all", false, "fetch every page")
+	pageFlags(list, &limit, &cursor, &all)
 	_ = list.MarkFlagRequired("pool")
 
 	upd := &cobra.Command{

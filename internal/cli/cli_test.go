@@ -445,3 +445,51 @@ func TestRetries(t *testing.T) {
 		t.Fatalf("a POST without a key was retried: %v after %d calls", err, calls.Load())
 	}
 }
+
+func TestOrgList(t *testing.T) {
+	e := newEnv(t)
+	if out := e.run("", "org", "list"); !strings.Contains(out, "NAME") {
+		t.Fatalf("empty org list: %s", out)
+	}
+	var want []string
+	for _, name := range []string{"Acme", "Globex", "Initech"} {
+		var o admin.Org
+		e.json(&o, "", "org", "create", "--name", name)
+		want = append(want, o.ID)
+	}
+	var page struct {
+		Items      []admin.Org `json:"items"`
+		NextCursor string      `json:"next_cursor"`
+	}
+	e.json(&page, "", "org", "list", "--limit", "2")
+	if len(page.Items) != 2 || page.NextCursor == "" {
+		t.Fatalf("page 1: %+v", page)
+	}
+	var rest struct {
+		Items      []admin.Org `json:"items"`
+		NextCursor string      `json:"next_cursor"`
+	}
+	e.json(&rest, "", "org", "list", "--limit", "2", "--cursor", page.NextCursor)
+	got := []string{page.Items[0].ID, page.Items[1].ID}
+	for _, o := range rest.Items {
+		got = append(got, o.ID)
+	}
+	// Orgs created in the same second sort by ID, so compare as sets.
+	if len(got) != 3 || rest.NextCursor != "" {
+		t.Fatalf("pages: %+v then %+v", page, rest)
+	}
+	for _, id := range want {
+		if !strings.Contains(strings.Join(got, ","), id) {
+			t.Fatalf("org %s missing from %v", id, got)
+		}
+	}
+	if out := e.run("", "org", "list", "--all", "--limit", "1"); strings.Count(out, "active") != 3 || strings.Contains(out, "More results") {
+		t.Fatalf("--all: %s", out)
+	}
+	if out := e.run("", "org", "list", "--limit", "1"); !strings.Contains(out, "More results: --cursor ") {
+		t.Fatalf("paged table output: %s", out)
+	}
+	if _, errOut, code := e.try("", "org", "list", "--cursor", "bogus"); code == 0 || !strings.Contains(errOut, "invalid cursor") {
+		t.Fatalf("bad cursor: %q", errOut)
+	}
+}

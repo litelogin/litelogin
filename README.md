@@ -79,6 +79,7 @@ dist/litelogin configure --profile litelogin-dev --environment dev   # look up a
 
 export AWS_PROFILE=litelogin-dev
 dist/litelogin init --org "Acme" --client "Acme Portal" --redirect-uri https://app.acme.com/callback
+dist/litelogin org list
 dist/litelogin client list --org ORG
 echo "$PASSWORD" | dist/litelogin user create --pool POOL --email admin@acme.com --password-stdin
 dist/litelogin keys list

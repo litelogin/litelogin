@@ -219,9 +219,22 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) error {
 }
 
 const (
-	defaultUserPage = 50
-	maxUserPage     = 100
+	defaultPageSize = 50
+	maxPageSize     = 100
 )
+
+// pageLimit reads the limit query parameter of a paginated list.
+func pageLimit(r *http.Request) (int32, error) {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		return defaultPageSize, nil
+	}
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil || n < 1 || n > maxPageSize {
+		return 0, errInvalid("limit must be between 1 and %d", maxPageSize)
+	}
+	return int32(n), nil
+}
 
 // listUsers lists a pool's users sorted by email, optionally only those
 // whose email starts with email_prefix.
@@ -231,11 +244,9 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	q := r.URL.Query()
-	limit := defaultUserPage
-	if v := q.Get("limit"); v != "" {
-		if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > maxUserPage {
-			return errInvalid("limit must be between 1 and %d", maxUserPage)
-		}
+	limit, err := pageLimit(r)
+	if err != nil {
+		return err
 	}
 	prefix := strings.ToLower(strings.TrimSpace(q.Get("email_prefix")))
 	if len(prefix) > 254 {
@@ -253,7 +264,7 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	users, next, err := s.Store.ListUsers(r.Context(), poolID, store.ListUsersOptions{
-		EmailPrefix: prefix, Limit: int32(limit), Cursor: inner, //nolint:gosec // limit is at most maxUserPage
+		EmailPrefix: prefix, Limit: limit, Cursor: inner,
 	})
 	if errors.Is(err, store.ErrInvalidCursor) {
 		return errInvalid("invalid cursor")
