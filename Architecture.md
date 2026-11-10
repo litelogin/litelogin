@@ -402,8 +402,8 @@ If a deployment needs instant client or org disablement, shorten the cache time 
 
 ## Open decisions
 
-1. **Runtime language.** TypeScript on Node.js has the largest OIDC/JOSE ecosystem. Go or Rust have faster cold starts and cheaper CPU-bound argon2id. Pick one before writing handlers.
-2. **Infrastructure as code tool.** AWS CDK, AWS SAM or Terraform.
-3. **Custom domain onboarding.** Confirm that CloudFront SaaS Manager fits the expected number of custom domains and the onboarding flow. The fallback is one distribution per custom domain, or per batch of domains.
-4. **Production region.**
-5. **Listing orgs.** The data model has no access pattern for listing all orgs, so the admin API can't offer `GET /v1/orgs` without a Scan. A small deployment could accept the Scan. A larger one would need a sparse GSI on org items.
+Decided: Lambdas and the CLI are written in **Go** (`provided.al2023`, arm64), and infrastructure is managed with **Terraform / OpenTofu**. See [ImplementationPlan.md](ImplementationPlan.md).
+
+1. **Custom domain onboarding.** Confirm that CloudFront SaaS Manager fits the expected number of custom domains and the onboarding flow. The fallback is one distribution per custom domain, or per batch of domains.
+2. **Production region.**
+3. **Listing orgs.** The data model has no access pattern for listing all orgs, so the admin API can't offer `GET /v1/orgs` without a Scan. A small deployment could accept the Scan. A larger one would need a sparse GSI on org items.
