@@ -150,17 +150,24 @@ func TestVerifyDummyTakesAsLongAsVerify(t *testing.T) {
 	encoded, _ := h.Hash("pw")
 	h.VerifyDummy("warm up") // the dummy hash is created on first use
 
-	measure := func(fn func()) time.Duration {
-		best := time.Hour
-		for range 5 {
-			start := time.Now()
-			fn()
-			best = min(best, time.Since(start))
-		}
-		return best
+	// The deterministic part: the dummy hash costs exactly as much as a
+	// real one, because it uses the hasher's own parameters.
+	p, _, _, err := parseArgon2(h.dummy)
+	if err != nil || p != h.Params {
+		t.Fatalf("dummy hash parameters %+v, %v; want %+v", p, err, h.Params)
 	}
-	verify := measure(func() { _, _, _ = h.Verify("wrong", encoded) })
-	dummy := measure(func() { h.VerifyDummy("wrong") })
+
+	// The timing check. Measurements alternate, so load on a shared CI
+	// runner slows both sides alike, and the fastest of each is compared.
+	verify, dummy := time.Hour, time.Hour
+	for range 7 {
+		start := time.Now()
+		_, _, _ = h.Verify("wrong", encoded)
+		verify = min(verify, time.Since(start))
+		start = time.Now()
+		h.VerifyDummy("wrong")
+		dummy = min(dummy, time.Since(start))
+	}
 	if dummy < verify/2 || dummy > verify*2 {
 		t.Fatalf("dummy verification %v vs real %v: timing reveals unknown users", dummy, verify)
 	}
