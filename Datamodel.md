@@ -350,6 +350,8 @@ Access tokens that were already issued stay valid until they expire, which is wh
 
 ### Verify email
 
+Opening the emailed link only shows a confirmation button, and the button's POST consumes the token. Mail scanners open links in emails, and that mustn't use up the token. The same applies to password reset links.
+
 1. TransactWriteItems:
    - Delete `OTT#{token_hash}` / `DETAILS`, condition `purpose = verify_email AND expires_at > :now`
    - Update `USER#{user}` / `DETAILS` SET `email_verified = true`, condition `email = :ott_email`. This guards against the email having changed since the token was sent.
@@ -360,6 +362,8 @@ Access tokens that were already issued stay valid until they expire, which is wh
 1. Resolve client → `user_pool_id`.
 2. GetItem `POOL#{pool}#EMAIL#{email}` / `EMAIL`. If the user exists, Put `OTT#{token_hash}` / `DETAILS` (`purpose=reset_password`, `expires_at` = now + 30 min) and send the email.
 3. Always show the same "if an account exists, we sent an email" response.
+
+Admin invites use the same token: the user is created without a password, and a `reset_password` token (valid for 7 days) is emailed with a link to the client's default host. Choosing a password completes the reset, which also verifies the email. If the email can't be sent, the user is deleted again, so the request can be retried.
 
 ### Complete password reset
 

@@ -22,9 +22,11 @@ import (
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 
 	"github.com/litelogin/litelogin/internal/admin"
 	"github.com/litelogin/litelogin/internal/crypto"
+	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/httpx"
 	"github.com/litelogin/litelogin/internal/platform"
 	"github.com/litelogin/litelogin/internal/store"
@@ -96,10 +98,16 @@ func run(logger *slog.Logger) error {
 		Log:               logger,
 	}
 	if inLambda {
+		// Invites are sent only when email is configured.
+		if from := os.Getenv("LITELOGIN_EMAIL_FROM"); from != "" {
+			srv.Email = &email.SES{Client: sesv2.NewFromConfig(cfg), From: from, ConfigurationSet: os.Getenv("LITELOGIN_SES_CONFIGURATION")}
+		}
 		lambda.Start(httpx.FunctionURLHandler(srv.Handler()))
 		return nil
 	}
 	srv.Caller = func(*http.Request) (string, bool) { return localCaller, true }
+	// Invite links point at the local Auth server (make run-auth).
+	srv.Email, srv.LinkScheme, srv.LinkPort = &email.Printer{W: os.Stderr}, "http", "8080"
 	return serveLocal(logger, srv.Handler())
 }
 

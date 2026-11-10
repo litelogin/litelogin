@@ -1,0 +1,10 @@
+{{define "content"}}
+<dl>
+<dt>Email</dt><dd>{{.Account.Email}}{{if not .Account.EmailVerified}} (not verified){{end}}</dd>
+</dl>
+<form method="post" action="/logout">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<button type="submit">Sign out</button>
+</form>
+<div class="links"><a href="/password/forgot">Change your password</a></div>
+{{end}}

@@ -1,0 +1,10 @@
+{{define "content"}}
+<form method="post" action="/password/reset">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="token" value="{{.Token}}">
+<label for="password">New password</label>
+<input id="password" name="password" type="password" autocomplete="new-password" minlength="{{.MinPassword}}" required autofocus>
+<p class="hint">At least {{.MinPassword}} characters. This signs you out everywhere.</p>
+<button type="submit">Change password</button>
+</form>
+{{end}}

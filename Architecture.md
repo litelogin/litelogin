@@ -106,7 +106,10 @@ The data model resolves every request from its host. Lambda never sees the viewe
 
 - **Origin:** CloudFront forwards to Lambda function URLs. API Gateway would add cost and latency without adding anything we need, because routing happens inside the function and WAF runs at CloudFront.
 - **Why not OAC:** CloudFront Origin Access Control isn't used here. With OAC, function URLs require the viewer to send a SHA-256 hash of every POST body, and browsers submitting login forms don't.
-- **Locking down the URLs:** function URLs use `AuthType: NONE`. CloudFront adds a secret origin header, and the Lambda rejects any request without it, so the function URL can't be called directly to bypass WAF. The secret lives in Secrets Manager, rotates, and the Lambda accepts both the current and previous value during rotation.
+- **Locking down the URLs:** function URLs use `AuthType: NONE`. CloudFront adds a secret origin header (`X-Litelogin-Origin-Secret`), and the Lambda rejects any request without it, so the function URL can't be called directly to bypass WAF.
+  - Terraform generates two secrets, `a` and `b`, and CloudFront sends the active one. The Lambda accepts both, so the secret rotates without downtime: replace the inactive secret, deploy, switch `active_origin_secret` to it, and deploy again.
+  - The Lambda's environment holds only the secrets' SHA-256 hashes, so its configuration doesn't hold anything that lets you call it directly.
+  - The secret isn't in Secrets Manager. CloudFront's origin configuration holds it in plain text anyway, and refreshing a Secrets Manager secret value needs `GetSecretValue`, which the read-only plan role doesn't have.
 
 ### Caching at the edge
 
@@ -247,7 +250,7 @@ litelogin init --org "Acme" --client "Acme Portal" --redirect-uri https://app.ac
 litelogin client create --org {org} --name "Mobile app" --type public --redirect-uri com.acme.app:/callback
 litelogin host add --client {client} login.acme.com
 litelogin host status --client {client} login.acme.com
-litelogin user create --pool {pool} --email admin@acme.com --invite
+litelogin user create --pool {pool} --email admin@acme.com --invite --client {client}
 litelogin user revoke-sessions {user}
 ```
 
@@ -296,7 +299,6 @@ The admin API is the contract between LiteLogin and every management tool, inclu
 - **In-memory caches,** per execution environment:
   - Config items (`LOGIN_HOST`, `ORG`, `CLIENT`, `POOL`): 30–60 seconds
   - The active signing key ID: 5 minutes. A stale value is harmless, because a retired key stays in the JWKS until every token it signed has expired.
-  - The origin secret: 5 minutes
 - **Timeouts:** 10 seconds for the Auth and Admin Lambdas. Background functions get longer timeouts, sized to their job.
 - **Cold starts:** keep dependencies small. If p99 latency matters, add provisioned concurrency to the Auth Lambda.
 
@@ -365,7 +367,7 @@ If a deployment needs instant client or org disablement, shorten the cache time 
 - **Response headers:**
   - A strict `Content-Security-Policy` on HTML pages, plus `frame-ancestors 'none'` to prevent clickjacking.
   - `Cache-Control: no-store` on all `/token` responses and authenticated pages.
-- **Secrets:** the origin secret is in Secrets Manager. There are no long-lived credentials in environment variables.
+- **Secrets:** there are no long-lived credentials in environment variables. The Auth Lambda holds only the origin secret's hashes (see "Origin: Lambda function URLs").
 - **Logging:** never log passwords, tokens, codes, cookies or client secrets. Log hashed identifiers instead.
 
 ## Observability

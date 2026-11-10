@@ -26,6 +26,8 @@ dist/litelogin --endpoint http://localhost:8081 init --org Acme --client "Acme P
   --redirect-uri http://localhost:3000/callback
 ```
 
+The admin server gives local clients default hosts under `litelogin.localhost`, and browsers resolve every `*.localhost` name to this machine. So the client above signs users in at <http://acme-portal.litelogin.localhost:8080/login>. Locally, emails (verification, password reset, invites) are printed to the Auth server's output instead of being sent.
+
 Run the tests:
 
 ```sh

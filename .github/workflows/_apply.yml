@@ -96,17 +96,22 @@ jobs:
       - name: Smoke test
         working-directory: infra/envs/${{ inputs.environment }}
         run: |
-          url="$(terraform output -raw auth_function_url)"
+          # Through CloudFront, /healthz answers. Directly on the function
+          # URL, without the origin secret, everything is refused.
+          edge="https://$(terraform output -raw edge_domain_name)"
+          direct="$(terraform output -raw auth_function_url)"
+          ok=""
           for attempt in 1 2 3 4 5; do
-            if curl -fsS "${url%/}/healthz"; then
-              echo
-              exit 0
+            if curl -fsS "${edge}/healthz"; then
+              echo; ok=1; break
             fi
             echo "attempt ${attempt} failed; retrying"
             sleep 5
           done
-          echo "/healthz did not return 200"
-          exit 1
+          [ -n "$ok" ] || { echo "/healthz through CloudFront did not return 200"; exit 1; }
+          code="$(curl -s -o /dev/null -w '%{http_code}' "${direct%/}/healthz")"
+          [ "$code" = 403 ] || { echo "direct function URL request returned ${code}, want 403"; exit 1; }
+          echo "direct function URL request refused (403)"
 
       # A signed read through the Admin API's IAM-authenticated function
       # URL, which also checks the API can read the active signing key. An

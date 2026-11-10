@@ -1,0 +1,10 @@
+You've been invited
+
+An account has been created for you at {{.Brand}}. Choose a password to start using it.
+
+Choose a password:
+{{.Link}}
+
+This link works for {{.Expires}}. If you weren't expecting this, you can ignore this email.
+
+-- {{.Brand}} ({{.Host}})

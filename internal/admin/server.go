@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/litelogin/litelogin/internal/crypto"
+	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -29,6 +30,7 @@ type Store interface {
 
 	CreateClient(ctx context.Context, c *store.Client, defaultHost string) error
 	GetClient(ctx context.Context, clientID string) (*store.Client, error)
+	CreateOneTimeToken(ctx context.Context, t *store.OneTimeToken, lifetime time.Duration) error
 	ListClients(ctx context.Context, orgID string) ([]store.Client, error)
 	UpdateClient(ctx context.Context, c *store.Client) error
 	SetClientStatus(ctx context.Context, clientID, status string, expectedVersion int64) (int64, error)
@@ -76,6 +78,11 @@ type Server struct {
 	Caller            CallerFunc
 	Log               *slog.Logger
 	Now               func() time.Time
+	// Email sends user invites. Without it, invites return 501.
+	Email email.Sender
+	// LinkScheme and LinkPort shape invite links: https and no port,
+	// except for the local development server.
+	LinkScheme, LinkPort string
 }
 
 // maxBodyBytes bounds request bodies.

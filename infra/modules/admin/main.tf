@@ -52,7 +52,21 @@ variable "default_host_domain" {
   type        = string
 }
 
+variable "email_from" {
+  description = "Sender address of user invites."
+  type        = string
+}
+
+variable "ses_configuration_set_name" {
+  type = string
+}
+
+variable "ses_configuration_set_arn" {
+  type = string
+}
+
 data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
 
 # ---- Cursor key ----
 
@@ -95,6 +109,21 @@ data "aws_iam_policy_document" "admin" {
     }
   }
 
+  # User invites. identity/* because in the SES sandbox the recipient's
+  # identity is authorized too.
+  statement {
+    actions = ["ses:SendEmail"]
+    resources = [
+      "arn:aws:ses:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:identity/*",
+      var.ses_configuration_set_arn,
+    ]
+    condition {
+      test     = "StringEquals"
+      variable = "ses:FromAddress"
+      values   = [var.email_from]
+    }
+  }
+
   statement {
     actions   = ["kms:GenerateMac", "kms:VerifyMac"]
     resources = [aws_kms_key.cursor.arn]
@@ -122,6 +151,8 @@ module "admin" {
     LITELOGIN_SESSION_TABLE       = var.session_table_name
     LITELOGIN_CURSOR_KMS_KEY      = aws_kms_key.cursor.arn
     LITELOGIN_DEFAULT_HOST_DOMAIN = var.default_host_domain
+    LITELOGIN_EMAIL_FROM          = var.email_from
+    LITELOGIN_SES_CONFIGURATION   = var.ses_configuration_set_name
   }
 }
 

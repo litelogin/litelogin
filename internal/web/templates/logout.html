@@ -1,0 +1,7 @@
+{{define "content"}}
+<form method="post" action="/logout">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<p>Sign out of {{.Brand}} on this browser?</p>
+<button type="submit">Sign out</button>
+</form>
+{{end}}

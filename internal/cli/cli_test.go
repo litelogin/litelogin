@@ -23,6 +23,7 @@ import (
 
 	"github.com/litelogin/litelogin/internal/admin"
 	"github.com/litelogin/litelogin/internal/crypto"
+	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/platform"
 	"github.com/litelogin/litelogin/internal/store"
 )
@@ -33,6 +34,7 @@ type env struct {
 	t        *testing.T
 	endpoint string
 	store    *store.Store
+	mail     *email.Recorder
 	ids      atomic.Int64
 	config   string
 }
@@ -69,10 +71,11 @@ func newEnv(t *testing.T) *env {
 		DefaultHostDomain: "litelogin.test",
 		Caller:            func(*http.Request) (string, bool) { return "local", true },
 		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Email:             &email.Recorder{},
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return &env{t: t, endpoint: ts.URL, store: st, config: filepath.Join(t.TempDir(), "config.json")}
+	return &env{t: t, endpoint: ts.URL, store: st, mail: srv.Email.(*email.Recorder), config: filepath.Join(t.TempDir(), "config.json")}
 }
 
 // run runs a CLI command and returns stdout, failing the test if it fails.
@@ -304,9 +307,20 @@ func TestUsers(t *testing.T) {
 		t.Fatalf("short password: %q", errOut)
 	}
 	if _, errOut, code := e.try("", "user", "create", "--pool", pool, "--email", "b@acme.com", "--invite"); code == 0 ||
-		!strings.Contains(errOut, "not_implemented") {
-		t.Fatalf("invite: %q", errOut)
+		!strings.Contains(errOut, "--client") {
+		t.Fatalf("invite without client: %q", errOut)
 	}
+	var invited admin.User
+	e.json(&invited, "", "user", "create", "--pool", pool, "--email", "Invited@Acme.com", "--invite", "--client", init.Client.ID)
+	if invited.PasswordSet == nil || *invited.PasswordSet {
+		t.Fatalf("invited user: %+v", invited)
+	}
+	msgs := e.mail.Messages()
+	if len(msgs) != 1 || msgs[0].To != "invited@acme.com" ||
+		!strings.Contains(msgs[0].Text, "https://"+init.Client.DefaultHost+"/password/reset?token=") {
+		t.Fatalf("invite email: %+v", msgs)
+	}
+	e.run("", "user", "delete", invited.ID) // keep the list checks below as they are
 	if _, errOut, code := e.try("", "user", "create", "--pool", pool, "--email", "b@acme.com"); code == 0 ||
 		!strings.Contains(errOut, "password-stdin") {
 		t.Fatalf("no password and no terminal: %q", errOut)

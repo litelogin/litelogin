@@ -1,12 +1,17 @@
 package admin
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/litelogin/litelogin/internal/crypto"
+	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -161,9 +166,14 @@ type UserInput struct {
 	Password      *string `json:"password"`
 	EmailVerified *bool   `json:"email_verified"`
 	// Invite (create only) emails the user a link to set a password,
-	// instead of setting one.
-	Invite *bool `json:"invite"`
+	// instead of setting one. The link is on ClientID's default login
+	// host; the client must use the user's pool.
+	Invite   *bool   `json:"invite"`
+	ClientID *string `json:"client_id"`
 }
+
+// InviteLifetime is how long an invite link works.
+const InviteLifetime = 7 * 24 * time.Hour
 
 // MinPasswordLength is the shortest password accepted (NIST SP 800-63B).
 const MinPasswordLength = 8
@@ -195,27 +205,108 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) error {
 	switch {
 	case invite && in.Password != nil:
 		return errInvalid("send either password or invite, not both")
-	case invite:
-		return &apiError{Status: http.StatusNotImplemented, Code: "not_implemented",
-			Message: "invites need email delivery, which isn't available yet; set an initial password instead"}
-	case in.Password == nil:
+	case invite && in.ClientID == nil:
+		return errInvalid("client_id is required with invite: the invite links to its login host")
+	case !invite && in.ClientID != nil:
+		return errInvalid("client_id is only used with invite")
+	case !invite && in.Password == nil:
 		return errInvalid("password is required (or invite)")
 	}
-	email, err := store.NormalizeEmail(*in.Email)
+	addr, err := store.NormalizeEmail(*in.Email)
 	if err != nil {
 		return err
+	}
+	if invite {
+		return s.inviteUser(w, r, poolID, addr, *in.ClientID)
 	}
 	hash, err := s.hashPassword(*in.Password)
 	if err != nil {
 		return err
 	}
-	u := &store.User{ID: crypto.NewID(), PoolID: poolID, Email: email, PasswordHash: hash,
+	u := &store.User{ID: crypto.NewID(), PoolID: poolID, Email: addr, PasswordHash: hash,
 		EmailVerified: deref(in.EmailVerified), PasswordUpdatedAt: s.now().Unix()}
 	if err := s.Store.CreateUser(r.Context(), u); err != nil {
 		return err
 	}
 	writeVersioned(w, http.StatusCreated, u.Version, userJSON(u))
 	return nil
+}
+
+// inviteUser creates a user without a password and emails them a link to
+// choose one, on the client's default login host. Choosing the password
+// also verifies the email. If the email can't be sent, the user is
+// deleted again, so the request can simply be retried.
+func (s *Server) inviteUser(w http.ResponseWriter, r *http.Request, poolID, addr, clientID string) error {
+	ctx := r.Context()
+	if s.Email == nil {
+		return &apiError{Status: http.StatusNotImplemented, Code: "not_implemented", Message: "email isn't configured for this server"}
+	}
+	c, err := s.Store.GetClient(ctx, clientID)
+	if errors.Is(err, store.ErrNotFound) {
+		return errInvalid("client %s doesn't exist", clientID)
+	}
+	if err != nil {
+		return err
+	}
+	if c.UserPoolID != poolID {
+		return errInvalid("client %s doesn't use pool %s", clientID, poolID)
+	}
+	if c.Status != store.ClientActive {
+		return errInvalid("client %s is disabled", clientID)
+	}
+	hosts, err := s.Store.ListClientHosts(ctx, clientID)
+	if err != nil {
+		return err
+	}
+	host := ""
+	for _, h := range hosts {
+		if h.Type == store.HostTypeDefault && h.Status == store.HostVerified {
+			host = h.Host
+		}
+	}
+	if host == "" {
+		return errInvalid("client %s has no verified default login host", clientID)
+	}
+
+	u := &store.User{ID: crypto.NewID(), PoolID: poolID, Email: addr}
+	if err := s.Store.CreateUser(ctx, u); err != nil {
+		return err
+	}
+	token := crypto.NewToken()
+	err = s.Store.CreateOneTimeToken(ctx, &store.OneTimeToken{
+		Hash: crypto.HashToken(token), Purpose: store.PurposeResetPassword, PoolID: poolID, UserID: u.ID, Email: addr,
+	}, InviteLifetime)
+	if err == nil {
+		err = s.sendInvite(ctx, c, host, addr, token)
+	}
+	if err != nil {
+		if derr := s.Store.DeleteUser(ctx, u.ID); derr != nil {
+			s.log().ErrorContext(ctx, "delete user after failed invite", "user_id", u.ID, "error", derr)
+		}
+		return fmt.Errorf("invite: %w", err)
+	}
+	writeVersioned(w, http.StatusCreated, u.Version, userJSON(u))
+	return nil
+}
+
+func (s *Server) sendInvite(ctx context.Context, c *store.Client, host, addr, token string) error {
+	scheme, h := s.LinkScheme, host
+	if scheme == "" {
+		scheme = "https"
+	}
+	if s.LinkPort != "" {
+		h += ":" + s.LinkPort
+	}
+	link := (&url.URL{Scheme: scheme, Host: h, Path: "/password/reset", RawQuery: url.Values{"token": {token}}.Encode()}).String()
+	brand := c.Name
+	if v := c.Theme["brand_name"]; v != "" {
+		brand = v
+	}
+	m, err := email.Render(email.Invite, addr, email.Data{Brand: brand, Host: host, Link: link, Expires: "7 days"})
+	if err != nil {
+		return err
+	}
+	return s.Email.Send(ctx, m)
 }
 
 const (

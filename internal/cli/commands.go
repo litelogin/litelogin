@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -503,16 +504,23 @@ func (a *App) hostCommand() *cobra.Command {
 // ---- user ----
 
 func (a *App) userCommand() *cobra.Command {
-	var pool, email, key, prefix, cursor string
+	var pool, email, key, prefix, cursor, inviteClient string
 	var pwStdin, invite, verified, all bool
 	var limit int
 	create := &cobra.Command{
 		Use: "create", Short: "Create a user with an initial password", Args: cobra.NoArgs,
-		Example: `  echo "$PASSWORD" | litelogin user create --pool POOL --email admin@acme.com --password-stdin`,
+		Example: `  echo "$PASSWORD" | litelogin user create --pool POOL --email admin@acme.com --password-stdin
+  litelogin user create --pool POOL --email bob@acme.com --invite --client CLIENT`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			body := map[string]any{"email": email, "email_verified": verified}
+			body := map[string]any{"email": email}
+			if verified {
+				body["email_verified"] = true
+			}
+			if (inviteClient != "") != invite {
+				return errors.New("--invite and --client go together: the invite links to the client's login host")
+			}
 			if invite {
-				body["invite"] = true
+				body["invite"], body["client_id"] = true, inviteClient
 			} else {
 				pw, err := a.readPassword(pwStdin)
 				if err != nil {
@@ -526,7 +534,8 @@ func (a *App) userCommand() *cobra.Command {
 	create.Flags().StringVar(&pool, "pool", "", "user pool ID (required)")
 	create.Flags().StringVar(&email, "email", "", "email address (required)")
 	create.Flags().BoolVar(&pwStdin, "password-stdin", false, "read the initial password from stdin (otherwise you're prompted)")
-	create.Flags().BoolVar(&invite, "invite", false, "email the user a link to set their password instead")
+	create.Flags().BoolVar(&invite, "invite", false, "email the user a link to set their password instead (with --client)")
+	create.Flags().StringVar(&inviteClient, "client", "", "with --invite: the client whose login host the link is on")
 	create.Flags().BoolVar(&verified, "email-verified", false, "mark the email as already verified")
 	_ = create.MarkFlagRequired("pool")
 	_ = create.MarkFlagRequired("email")

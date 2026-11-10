@@ -1,0 +1,464 @@
+package web
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/litelogin/litelogin/internal/crypto"
+	"github.com/litelogin/litelogin/internal/email"
+	"github.com/litelogin/litelogin/internal/store"
+)
+
+// Notices shown on the login page after a redirect (?n=...).
+var notices = map[string]string{
+	"verified":   "Your email is verified. You can sign in now.",
+	"reset":      "Your password was changed. Sign in with your new password.",
+	"logged_out": "You're signed out.",
+}
+
+const msgBadLogin = "Incorrect email or password."
+
+func (s *Server) home(w http.ResponseWriter, r *http.Request, t *tenant) {
+	sess, _, err := s.currentSession(r, t)
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	if sess != nil {
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// ---- Login ----
+
+func (s *Server) loginForm(w http.ResponseWriter, r *http.Request, t *tenant) {
+	s.render(w, r, t, http.StatusOK, "login", pageData{Title: "Sign in", Notice: notices[r.URL.Query().Get("n")]})
+}
+
+// login implements "Login with email and password" (Datamodel.md). Every
+// failure shows the same message, and an unknown email costs a dummy
+// password verification so timing doesn't reveal which emails exist.
+func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
+	ctx := r.Context()
+	addr, password := strings.TrimSpace(r.PostFormValue("email")), r.PostFormValue("password")
+	bad := func() {
+		s.render(w, r, t, http.StatusUnauthorized, "login", pageData{Title: "Sign in", Email: addr, Error: msgBadLogin})
+	}
+	if len(password) > crypto.MaxPasswordLength {
+		bad()
+		return
+	}
+
+	u, err := s.Store.GetUserByEmail(ctx, t.Pool.ID, addr)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidEmail) {
+		s.Hasher.VerifyDummy(password)
+		bad()
+		return
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	now := s.now()
+	if u.LockedUntil > now.Unix() || u.PasswordHash == "" {
+		// Locked, or invited without a password yet.
+		s.Hasher.VerifyDummy(password)
+		bad()
+		return
+	}
+	ok, rehash, err := s.Hasher.Verify(password, u.PasswordHash)
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	if !ok {
+		if _, err := s.Store.RecordFailedLogin(ctx, u.ID, MaxFailedLogins, LockoutDuration); err != nil && !errors.Is(err, store.ErrNotFound) {
+			s.log().ErrorContext(ctx, "record failed login", "error", err)
+		}
+		bad()
+		return
+	}
+	if u.Status != store.UserActive {
+		bad()
+		return
+	}
+	if u.FailedLoginCount != 0 {
+		if err := s.Store.ResetFailedLogins(ctx, u.ID); err != nil {
+			s.log().WarnContext(ctx, "reset failed logins", "error", err)
+		}
+	}
+	if rehash {
+		if h, err := s.Hasher.Hash(password); err == nil {
+			if err := s.Store.UpdatePasswordHash(ctx, u.ID, u.PasswordHash, h); err != nil && !errors.Is(err, store.ErrConditionFailed) {
+				s.log().WarnContext(ctx, "rehash password", "error", err)
+			}
+		}
+	}
+	if t.Pool.RequireEmailVerified && !u.EmailVerified {
+		// The password is correct, so telling this person that the
+		// account exists reveals nothing. Send a fresh link.
+		if err := s.sendVerification(ctx, t, u); err != nil {
+			s.fail(w, r, t, err)
+			return
+		}
+		s.render(w, r, t, http.StatusOK, "check_email", pageData{
+			Title: "Verify your email", Email: u.Email,
+			Notice: "You need to verify your email before you can sign in. We sent a new link to " + u.Email + ".",
+		})
+		return
+	}
+
+	if err := s.startSession(w, r, t, u); err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	// Phase 5 continues a pending /authorize request here.
+	http.Redirect(w, r, "/account", http.StatusSeeOther)
+}
+
+// startSession creates a session and sets its cookie. The browser's
+// previous session, if any, is deleted: a new login always gets a new
+// session token (no session fixation).
+func (s *Server) startSession(w http.ResponseWriter, r *http.Request, t *tenant, u *store.User) error {
+	ctx := r.Context()
+	if c, err := r.Cookie(SessionCookie); err == nil && validToken(c.Value) {
+		if err := s.Store.DeleteSession(ctx, crypto.HashToken(c.Value)); err != nil {
+			s.log().WarnContext(ctx, "delete previous session", "error", err)
+		}
+	}
+	token := crypto.NewToken()
+	sess := &store.Session{
+		Hash: crypto.HashToken(token), OrgID: t.Org.ID, PoolID: t.Pool.ID, UserID: u.ID, ClientID: t.Client.ID,
+		LoginHost: t.Host, AuthVersion: u.AuthVersion, AMR: []string{"pwd"},
+		IP: viewerIP(r), UserAgent: truncate(r.UserAgent(), 256),
+	}
+	lifetime := time.Duration(t.Client.SessionTTL) * time.Second
+	if err := s.Store.CreateSession(ctx, sess, lifetime, time.Duration(t.Client.SessionIdleTTL)*time.Second); err != nil {
+		return err
+	}
+	s.setSessionCookie(w, token, t.Client.SessionTTL)
+	return nil
+}
+
+// viewerIP is the viewer's address from CloudFront-Viewer-Address
+// ("ip:port"), which CloudFront adds via the origin request policy. The
+// connection's own address is CloudFront's, so it isn't used.
+func viewerIP(r *http.Request) string {
+	v := r.Header.Get("CloudFront-Viewer-Address")
+	if v == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(v); err == nil {
+		return host
+	}
+	if i := strings.LastIndexByte(v, ':'); i > 0 {
+		return strings.Trim(v[:i], "[]")
+	}
+	return ""
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// ---- Registration ----
+
+func (s *Server) registerForm(w http.ResponseWriter, r *http.Request, t *tenant) {
+	if !t.Client.RegistrationEnabled {
+		s.fail(w, r, t, errUnavailable)
+		return
+	}
+	s.render(w, r, t, http.StatusOK, "register", pageData{Title: "Create an account"})
+}
+
+// register implements "Register with email and password" (Datamodel.md).
+// Whether or not the email is already registered, the response is the
+// same "check your email" page; the email says which case it was.
+func (s *Server) register(w http.ResponseWriter, r *http.Request, t *tenant) {
+	if !t.Client.RegistrationEnabled {
+		s.fail(w, r, t, errUnavailable)
+		return
+	}
+	ctx := r.Context()
+	addr, password := strings.TrimSpace(r.PostFormValue("email")), r.PostFormValue("password")
+	again := func(msg string) {
+		s.render(w, r, t, http.StatusBadRequest, "register", pageData{Title: "Create an account", Email: addr, Error: msg})
+	}
+	normalized, err := store.NormalizeEmail(addr)
+	if err != nil {
+		again("Enter a valid email address.")
+		return
+	}
+	if msg := checkPassword(password); msg != "" {
+		again(msg)
+		return
+	}
+	hash, err := s.Hasher.Hash(password)
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	u := &store.User{ID: crypto.NewID(), PoolID: t.Pool.ID, Email: normalized, PasswordHash: hash}
+	err = s.Store.CreateUser(ctx, u)
+	switch {
+	case err == nil:
+		err = s.sendVerification(ctx, t, u)
+	case errors.Is(err, store.ErrEmailTaken):
+		err = s.registeredAgain(ctx, t, normalized)
+	case errors.Is(err, store.ErrPoolNotActive):
+		err = errUnavailable
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	s.render(w, r, t, http.StatusOK, "check_email", pageData{
+		Title: "Check your email", Email: normalized,
+		Notice: "We sent a link to " + normalized + ". Open it to verify your email and finish creating your account.",
+	})
+}
+
+// registeredAgain handles registration with an email that's already
+// registered. An unverified user gets a new verification link: this is
+// the user retrying after their first attempt's email didn't arrive.
+// Otherwise the owner is told they already have an account, with a reset
+// link.
+func (s *Server) registeredAgain(ctx context.Context, t *tenant, addr string) error {
+	u, err := s.Store.GetUserByEmail(ctx, t.Pool.ID, addr)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil // deleted in the meantime
+	}
+	if err != nil {
+		return err
+	}
+	if u.Status != store.UserActive {
+		return nil
+	}
+	if !u.EmailVerified {
+		return s.sendVerification(ctx, t, u)
+	}
+	return s.sendReset(ctx, t, u, email.AlreadyRegistered)
+}
+
+func checkPassword(p string) string {
+	switch {
+	case len([]rune(p)) < MinPasswordLength:
+		return "Use at least 8 characters for your password."
+	case len(p) > crypto.MaxPasswordLength:
+		return "That password is too long."
+	}
+	return ""
+}
+
+// ---- Email links ----
+
+func (s *Server) sendVerification(ctx context.Context, t *tenant, u *store.User) error {
+	token := crypto.NewToken()
+	err := s.Store.CreateOneTimeToken(ctx, &store.OneTimeToken{
+		Hash: crypto.HashToken(token), Purpose: store.PurposeVerifyEmail, PoolID: u.PoolID, UserID: u.ID, Email: u.Email,
+	}, VerifyEmailLifetime)
+	if err != nil {
+		return err
+	}
+	return s.send(ctx, t, email.VerifyEmail, u.Email, "/verify-email", token, "24 hours")
+}
+
+func (s *Server) sendReset(ctx context.Context, t *tenant, u *store.User, kind email.Kind) error {
+	token := crypto.NewToken()
+	err := s.Store.CreateOneTimeToken(ctx, &store.OneTimeToken{
+		Hash: crypto.HashToken(token), Purpose: store.PurposeResetPassword, PoolID: u.PoolID, UserID: u.ID, Email: u.Email,
+	}, ResetPasswordLifetime)
+	if err != nil {
+		return err
+	}
+	return s.send(ctx, t, kind, u.Email, "/password/reset", token, "30 minutes")
+}
+
+func (s *Server) send(ctx context.Context, t *tenant, kind email.Kind, to, path, token, expires string) error {
+	m, err := email.Render(kind, to, email.Data{
+		Brand: t.Theme.Brand, Host: t.Host, Link: s.link(t, path, url.Values{"token": {token}}), Expires: expires,
+	})
+	if err != nil {
+		return err
+	}
+	return s.Email.Send(ctx, m)
+}
+
+// The link pages show a button that POSTs the token, rather than acting
+// on GET: mail scanners open links in emails, and that mustn't use up the
+// token.
+
+func (s *Server) verifyEmailForm(w http.ResponseWriter, r *http.Request, t *tenant) {
+	token := r.URL.Query().Get("token")
+	if !validToken(token) {
+		s.invalidLink(w, r, t)
+		return
+	}
+	s.render(w, r, t, http.StatusOK, "verify_email", pageData{Title: "Verify your email", Token: token})
+}
+
+func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request, t *tenant) {
+	token := r.PostFormValue("token")
+	if !validToken(token) {
+		s.invalidLink(w, r, t)
+		return
+	}
+	hash := crypto.HashToken(token)
+	if !s.tokenForPool(w, r, t, hash, store.PurposeVerifyEmail) {
+		return
+	}
+	if _, err := s.Store.VerifyEmail(r.Context(), hash); errors.Is(err, store.ErrNotFound) {
+		s.invalidLink(w, r, t)
+		return
+	} else if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	http.Redirect(w, r, "/login?n=verified", http.StatusSeeOther)
+}
+
+// tokenForPool checks that a one-time token exists and belongs to this
+// host's pool, so a link only works on a host of the pool it was sent
+// for. It renders the invalid-link page and returns false otherwise.
+func (s *Server) tokenForPool(w http.ResponseWriter, r *http.Request, t *tenant, hash, purpose string) bool {
+	ott, err := s.Store.GetOneTimeToken(r.Context(), hash, purpose)
+	if err == nil && ott.PoolID == t.Pool.ID {
+		return true
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.fail(w, r, t, err)
+		return false
+	}
+	s.invalidLink(w, r, t)
+	return false
+}
+
+func (s *Server) invalidLink(w http.ResponseWriter, r *http.Request, t *tenant) {
+	s.render(w, r, t, http.StatusBadRequest, "error", pageData{
+		Title: "Link invalid or expired",
+		Error: "This link is invalid or has expired. Links work once, for a limited time.",
+		Link:  "/password/forgot",
+	})
+}
+
+// ---- Password reset ----
+
+func (s *Server) forgotForm(w http.ResponseWriter, r *http.Request, t *tenant) {
+	s.render(w, r, t, http.StatusOK, "forgot", pageData{Title: "Reset your password"})
+}
+
+// forgot implements "Request password reset": the response is the same
+// whether or not the account exists.
+func (s *Server) forgot(w http.ResponseWriter, r *http.Request, t *tenant) {
+	ctx := r.Context()
+	addr := strings.TrimSpace(r.PostFormValue("email"))
+	u, err := s.Store.GetUserByEmail(ctx, t.Pool.ID, addr)
+	switch {
+	case err == nil && u.Status == store.UserActive:
+		err = s.sendReset(ctx, t, u, email.ResetPassword)
+	case err == nil, errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrInvalidEmail):
+		err = nil
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	s.render(w, r, t, http.StatusOK, "check_email", pageData{
+		Title:  "Check your email",
+		Notice: "If an account exists for " + addr + ", we sent it a link to reset the password.",
+	})
+}
+
+func (s *Server) resetForm(w http.ResponseWriter, r *http.Request, t *tenant) {
+	token := r.URL.Query().Get("token")
+	if !validToken(token) {
+		s.invalidLink(w, r, t)
+		return
+	}
+	if !s.tokenForPool(w, r, t, crypto.HashToken(token), store.PurposeResetPassword) {
+		return
+	}
+	s.render(w, r, t, http.StatusOK, "reset", pageData{Title: "Choose a new password", Token: token})
+}
+
+// reset implements "Complete password reset". It revokes every session
+// and refresh token of the user, including this browser's.
+func (s *Server) reset(w http.ResponseWriter, r *http.Request, t *tenant) {
+	ctx := r.Context()
+	token, password := r.PostFormValue("token"), r.PostFormValue("password")
+	if !validToken(token) {
+		s.invalidLink(w, r, t)
+		return
+	}
+	hash := crypto.HashToken(token)
+	if !s.tokenForPool(w, r, t, hash, store.PurposeResetPassword) {
+		return
+	}
+	if msg := checkPassword(password); msg != "" {
+		s.render(w, r, t, http.StatusBadRequest, "reset", pageData{Title: "Choose a new password", Token: token, Error: msg})
+		return
+	}
+	pw, err := s.Hasher.Hash(password)
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	userID, err := s.Store.CompletePasswordReset(ctx, hash, pw)
+	if errors.Is(err, store.ErrNotFound) {
+		s.invalidLink(w, r, t)
+		return
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	// Cleanup only: the auth_version increment already revoked everything.
+	if _, err := s.Store.CleanupUserCredentials(ctx, userID); err != nil {
+		s.log().WarnContext(ctx, "clean up credentials after reset", "error", err)
+	}
+	clearCookie(w, SessionCookie)
+	http.Redirect(w, r, "/login?n=reset", http.StatusSeeOther)
+}
+
+// ---- Logout and account ----
+
+func (s *Server) logoutForm(w http.ResponseWriter, r *http.Request, t *tenant) {
+	s.render(w, r, t, http.StatusOK, "logout", pageData{Title: "Sign out"})
+}
+
+// logout deletes this browser's session. Refresh tokens survive logout
+// (Datamodel.md, "Logout"). Phase 5 adds id_token_hint and
+// post_logout_redirect_uri.
+func (s *Server) logout(w http.ResponseWriter, r *http.Request, t *tenant) {
+	if c, err := r.Cookie(SessionCookie); err == nil && validToken(c.Value) {
+		if err := s.Store.DeleteSession(r.Context(), crypto.HashToken(c.Value)); err != nil {
+			s.fail(w, r, t, err)
+			return
+		}
+	}
+	clearCookie(w, SessionCookie)
+	http.Redirect(w, r, "/login?n=logged_out", http.StatusSeeOther)
+}
+
+func (s *Server) account(w http.ResponseWriter, r *http.Request, t *tenant) {
+	sess, u, err := s.currentSession(r, t)
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	if sess == nil {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	s.render(w, r, t, http.StatusOK, "account", pageData{Title: "Your account", Account: u})
+}
