@@ -2,6 +2,8 @@ module github.com/litelogin/litelogin
 
 go 1.26.0
 
+toolchain go1.26.11
+
 require (
 	github.com/aws/aws-lambda-go v1.55.1
 	github.com/aws/aws-sdk-go-v2 v1.47.8
