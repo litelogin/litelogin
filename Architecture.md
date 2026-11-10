@@ -277,10 +277,21 @@ The admin API is the contract between LiteLogin and every management tool, inclu
   | Auth | Read/write both tables | `Sign` on signing keys | `ses:SendEmail` |
   | Admin | Read/write Config table; on the Session table, query GSI1 and read/write `OTT` and `IDEMPOTENCY` items | None | `ses:SendEmail` |
   | Worker | Read/write both tables, including Config GSI2; read the Config table stream | None | `sqs:SendMessage`/`ReceiveMessage`/`DeleteMessage` on its continuation queue; CloudFront tenant management |
-  | Key rotation | Read/write `KEYS` items | `CreateKey`, `GetPublicKey`, `ScheduleKeyDeletion` | None |
+  | Key rotation | Read/write `KEYS` items | `CreateKey` (`RSA_2048` and `SIGN_VERIFY` only, with this environment's tags), `GetPublicKey`, `ScheduleKeyDeletion` | None |
+
+  Signing keys are created at runtime, so their ARNs aren't known to Terraform. Every key is tagged `litelogin-purpose=token-signing` and `litelogin-environment=<env>`, and the KMS permissions in this table are scoped by those tags. `kms:Sign` is also limited to `RSASSA_PKCS1_V1_5_SHA_256`.
 
 - **arm64 (Graviton).** It's cheaper per millisecond than x86.
-- **Memory sized for argon2id.** Password hashing is the most expensive operation, and Lambda CPU scales with memory. The starting parameters are m = 19 MiB, t = 2, p = 1 (the OWASP minimum). Start the Auth Lambda at 1024 MB and tune it with load tests so that a password verification takes about 50–150 ms. Each concurrent login holds one hash's memory, which easily fits in one execution environment.
+- **Memory sized for argon2id.** Password hashing is the most expensive operation, and Lambda CPU scales with memory. The starting parameters are m = 19 MiB, t = 2, p = 1 (the OWASP minimum). The target is a password verification of about 50–150 ms. Measured on arm64 with `scripts/bench-argon2.sh` (median of 20 verifications):
+
+  | Memory | 1 at a time | 4 at once |
+  | -- | -- | -- |
+  | 512 MB | 181 ms | 583 ms |
+  | 1024 MB | 76 ms | 244 ms |
+  | 1769 MB | 60 ms | 181 ms |
+  | 3008 MB | 51 ms | 110 ms |
+
+  The Auth Lambda uses 1024 MB: the cheapest size within the target (1769 MB is faster but costs about a third more per login). An execution environment handles one request at a time, so the concurrent column only matters for background work. Each login holds one hash's memory (19 MiB), which easily fits.
 - **In-memory caches,** per execution environment:
   - Config items (`LOGIN_HOST`, `ORG`, `CLIENT`, `POOL`): 30–60 seconds
   - The active signing key ID: 5 minutes. A stale value is harmless, because a retired key stays in the JWKS until every token it signed has expired.

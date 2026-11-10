@@ -43,6 +43,12 @@ variable "timeout" {
   default     = 10
 }
 
+variable "reserved_concurrency" {
+  description = "Reserved concurrent executions; -1 for none."
+  type        = number
+  default     = -1
+}
+
 variable "log_retention_days" {
   type    = number
   default = 30
@@ -108,6 +114,8 @@ resource "aws_lambda_function" "this" {
   source_code_hash = filebase64sha256(var.zip_path)
   memory_size      = var.memory_size
   timeout          = var.timeout
+
+  reserved_concurrent_executions = var.reserved_concurrency
 
   environment {
     variables = var.environment

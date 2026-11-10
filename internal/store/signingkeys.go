@@ -99,6 +99,28 @@ func (s *Store) ActivateKey(ctx context.Context, nextKID, currentKID string) err
 	return nil
 }
 
+// RetireKey retires an active key without activating another. It's used
+// only to resolve two keys activated at once by concurrent bootstraps.
+func (s *Store) RetireKey(ctx context.Context, kid string) error {
+	_, err := s.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                aws.String(s.config),
+		Key:                      signingKeyKey(kid),
+		UpdateExpression:         aws.String("SET #status = :retired, #retired_at = :now"),
+		ConditionExpression:      aws.String("#status = :active"),
+		ExpressionAttributeNames: names("status", "retired_at"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":retired": avS(KeyRetired), ":active": avS(KeyActive), ":now": avN(s.unix()),
+		},
+	})
+	if ok, _ := conditionFailed(err); ok {
+		return ErrConditionFailed
+	}
+	if err != nil {
+		return fmt.Errorf("store: retire key: %w", err)
+	}
+	return nil
+}
+
 // DeleteRetiredKey deletes a retired key's item. The caller schedules the
 // KMS key for deletion afterwards.
 func (s *Store) DeleteRetiredKey(ctx context.Context, kid string) error {

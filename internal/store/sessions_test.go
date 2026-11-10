@@ -357,6 +357,9 @@ func TestSigningKeys(t *testing.T) {
 	}
 
 	must(t, e.DeleteRetiredKey(e.ctx, "k1"))
+	must(t, e.RetireKey(e.ctx, "k2"))
+	wantErr(t, e.RetireKey(e.ctx, "k2"), ErrConditionFailed)
+	wantErr(t, e.RetireKey(e.ctx, "missing"), ErrConditionFailed)
 	keys, err = e.ListSigningKeys(e.ctx)
 	must(t, err)
 	if len(keys) != 1 {

@@ -56,9 +56,23 @@ module "tables" {
   deletion_protection = false
 }
 
+module "signing" {
+  source             = "../../modules/signing"
+  name_prefix        = local.name_prefix
+  environment        = "dev"
+  zip_path           = "${local.dist_dir}/rotate.zip"
+  config_table_name  = module.tables.config_table_name
+  config_table_arn   = module.tables.config_table_arn
+  session_table_name = module.tables.session_table_name
+  table_kms_key_arn  = module.kms.tables_key_arn
+}
+
 # Phase 0 placeholder: serves /healthz only. Phase 4 puts it behind
 # CloudFront and adds the origin secret check.
 data "aws_iam_policy_document" "auth" {
+  # Signing tokens (used from Phase 5).
+  source_policy_documents = [module.signing.sign_policy_json]
+
   statement {
     actions   = ["dynamodb:DescribeTable"]
     resources = [module.tables.config_table_arn, module.tables.session_table_arn]
@@ -85,6 +99,10 @@ output "config_table_name" {
 
 output "session_table_name" {
   value = module.tables.session_table_name
+}
+
+output "rotate_function_name" {
+  value = module.signing.rotate_function_name
 }
 
 output "auth_function_url" {

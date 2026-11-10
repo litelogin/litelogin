@@ -428,13 +428,14 @@ For admin API requests that carry an `Idempotency-Key` header:
 
 ### Rotate signing keys
 
-Runs on a schedule (e.g. every 90 days).
+Runs daily; each run takes whichever step is due. By default a key is active for 90 days, a next key is published 24 hours before it's activated, and a retired key is kept for 48 hours.
 
-1. **Prepare.** Create an asymmetric KMS key (`RSA_2048`, `SIGN_VERIFY`) and call `GetPublicKey`. Put `KEYS` / `KID#{kid}` (`status=next`, `public_jwk`, `kms_key_arn`), condition `attribute_not_exists(PK)`. The key now appears in the JWKS, but nothing is signed with it yet.
+0. **Bootstrap.** If no key is `active`, activate the oldest `next` key (or prepare one) immediately: nothing can sign until a key is active, so there's no point waiting. Two concurrent bootstraps can each activate a key; afterwards each run keeps the key activated first (ties broken by `kid`) and retires the others, so they converge on one active key.
+1. **Prepare.** 24 hours before the active key is due, create an asymmetric KMS key (`RSA_2048`, `SIGN_VERIFY`, tagged for this environment) and call `GetPublicKey`. The `kid` is the key's RFC 7638 JWK thumbprint. Put `KEYS` / `KID#{kid}` (`status=next`, `public_jwk`, `kms_key_arn`), condition `attribute_not_exists(PK)`. The key now appears in the JWKS, but nothing is signed with it yet.
 2. **Activate.** Wait at least as long as relying parties cache the JWKS (24 hours is safe), so they already trust the key. Then TransactWriteItems:
    - Update the current key SET `status=retired`, `retired_at`, condition `status = active`
    - Update the next key SET `status=active`, `activated_at`, condition `status = next`
-3. **Remove.** Once a retired key is older than the longest ID or access token lifetime plus the JWKS cache time, DeleteItem its `KEYS` item and schedule its KMS key for deletion.
+3. **Remove.** Once a retired key is older than the longest ID or access token lifetime plus the JWKS cache time, schedule its KMS key for deletion, then DeleteItem its `KEYS` item (condition `status = retired`). In that order, a failure never leaves a KMS key that nothing refers to: the next run retries.
 
 Refresh tokens are opaque and not signed, so rotation doesn't affect them.
 

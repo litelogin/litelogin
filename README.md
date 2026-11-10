@@ -62,6 +62,18 @@ The `auth_function_url` output serves `/healthz`.
 | -- | -- | -- |
 | `ci.yml` | Push to `main`, pull requests | Vet, tests (with DynamoDB Local), lint, `govulncheck`, Terraform format and validate |
 | `plan.yml` | Pull requests that touch code or infrastructure | `terraform plan` per environment with the read-only plan role; the plan is shown in the job summary |
-| `deploy.yml` | CI passing on `main`, or by hand | Applies dev and smoke-tests `/healthz` (qa and prod are added once their accounts are bootstrapped) |
+| `deploy.yml` | CI passing on `main`, or by hand | Applies dev, runs the key rotation Lambda once (which creates the first signing key in a new environment), and smoke-tests `/healthz`. qa and prod are added once their accounts are bootstrapped. |
+
+## Signing keys
+
+Token signing keys live in KMS and are created, rotated and removed by the rotation Lambda (`cmd/rotate`), which runs daily. To check that a deployed environment can sign tokens that verify against its JWKS:
+
+```sh
+AWS_PROFILE=litelogin-dev LITELOGIN_LIVE_TEST=1 \
+  LITELOGIN_CONFIG_TABLE=litelogin-dev-config LITELOGIN_SESSION_TABLE=litelogin-dev-session \
+  go test ./internal/jwt -run TestLiveKMS -v
+```
+
+`scripts/bench-argon2.sh` measures password hashing on Lambda at several memory sizes. It creates a temporary function and deletes it afterwards.
 
 Deployments use the `litelogin-deploy` role created by `scripts/bootstrap-account.sh`. No AWS credentials are stored in GitHub.

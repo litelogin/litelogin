@@ -78,6 +78,21 @@ jobs:
         working-directory: infra/envs/${{ inputs.environment }}
         run: terraform apply -input=false -auto-approve -lock-timeout=5m -var "region=${REGION}"
 
+      # Runs the rotation once: in a new environment this creates and
+      # activates the first signing key; otherwise it's a no-op unless a
+      # step is due. It also fails the deploy if rotation is broken.
+      - name: Run key rotation
+        working-directory: infra/envs/${{ inputs.environment }}
+        run: |
+          fn="$(terraform output -raw rotate_function_name)"
+          aws lambda invoke --function-name "$fn" --cli-binary-format raw-in-base64-out \
+            --payload '{}' rotate.json > invoke.json
+          cat rotate.json; echo
+          if jq -e '.FunctionError' invoke.json > /dev/null; then
+            echo "key rotation failed"; exit 1
+          fi
+          jq -e '.active != ""' rotate.json > /dev/null || { echo "no active signing key"; exit 1; }
+
       - name: Smoke test
         working-directory: infra/envs/${{ inputs.environment }}
         run: |
