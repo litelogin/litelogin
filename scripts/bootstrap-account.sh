@@ -54,7 +54,7 @@ the current AWS credentials (e.g. AWS_PROFILE=litelogin-dev).
 Options:
   --region <region>   AWS region for the state bucket (default: \$AWS_REGION)
   --repo <owner/name> GitHub repository allowed to assume the roles (default: ${REPO})
-  --github            Also create the GitHub environment and variables (needs gh)
+  --github            Also create the GitHub environment and variables
   --yes               Don't ask for confirmation
   -h, --help          Show this help
 EOF
@@ -83,15 +83,35 @@ parse_args() {
   [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "--repo must look like owner/name"
 
   command -v aws >/dev/null || die "the AWS CLI is required"
-  if [[ "$CONFIGURE_GITHUB" == true ]]; then
-    command -v gh >/dev/null || die "--github needs the GitHub CLI (gh)"
+  # gh is needed to read the repository's OIDC subject format, even without --github.
+  command -v gh >/dev/null || die "the GitHub CLI (gh) is required; run gh auth login"
+  command -v jq >/dev/null || die "jq is required"
+}
+
+# resolve_sub_prefix sets SUB_PREFIX to the start of the `sub` claim in the
+# repository's GitHub Actions OIDC tokens.
+#
+# Repositories that use immutable subjects identify the owner and repository
+# by name and numeric ID (repo:owner@123/name@456), so a deleted and
+# recreated repository can't assume the roles. Older repositories use
+# repo:owner/name. GitHub reports which one applies.
+resolve_sub_prefix() {
+  local customization
+  customization="$(gh api "repos/${REPO}/actions/oidc/customization/sub")" ||
+    die "could not read the OIDC subject settings for ${REPO} (does gh have access to it?)"
+
+  if [[ "$(jq -r '.use_default' <<<"$customization")" != "true" ]]; then
+    die "${REPO} uses a custom OIDC subject template; this script only supports the default one"
   fi
+  SUB_PREFIX="$(jq -r '.sub_claim_prefix // empty' <<<"$customization")"
+  [[ -n "$SUB_PREFIX" ]] || SUB_PREFIX="repo:${REPO}"
 }
 
 confirm_account() {
   ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
   CALLER_ARN="$(aws sts get-caller-identity --query Arn --output text)"
   STATE_BUCKET="litelogin-tofu-state-${ACCOUNT_ID}"
+  resolve_sub_prefix
 
   cat <<EOF
 
@@ -101,6 +121,7 @@ confirm_account() {
   Region:        ${REGION}
   State bucket:  ${STATE_BUCKET}
   GitHub repo:   ${REPO}
+  OIDC subject:  ${SUB_PREFIX}:...
   Configure GitHub environment: ${CONFIGURE_GITHUB}
 
 EOF
@@ -228,7 +249,7 @@ ensure_roles() {
   # which jobs can run there.
   ensure_role "$DEPLOY_ROLE" \
     "GitHub Actions deploys for ${REPO} (${ENVIRONMENT} environment)" \
-    "$(trust_policy "repo:${REPO}:environment:${ENVIRONMENT}")"
+    "$(trust_policy "${SUB_PREFIX}:environment:${ENVIRONMENT}")"
   aws iam attach-role-policy --role-name "$DEPLOY_ROLE" \
     --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
 
@@ -236,7 +257,7 @@ ensure_roles() {
   # `tofu plan` writes and deletes.
   ensure_role "$PLAN_ROLE" \
     "GitHub Actions read-only plans for ${REPO} pull requests" \
-    "$(trust_policy "repo:${REPO}:pull_request")"
+    "$(trust_policy "${SUB_PREFIX}:pull_request")"
   aws iam attach-role-policy --role-name "$PLAN_ROLE" \
     --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
   aws iam put-role-policy --role-name "$PLAN_ROLE" --policy-name state-locks --policy-document "$(cat <<EOF
@@ -338,7 +359,7 @@ In a workflow job:
     id-token: write
     contents: read
   steps:
-    - uses: aws-actions/configure-aws-credentials@v5
+    - uses: aws-actions/configure-aws-credentials@v6
       with:
         role-to-assume: \${{ vars.AWS_DEPLOY_ROLE_ARN }}
         aws-region: \${{ vars.AWS_REGION }}

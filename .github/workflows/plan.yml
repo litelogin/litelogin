@@ -61,7 +61,7 @@ jobs:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
-      - uses: aws-actions/configure-aws-credentials@v5
+      - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars[format('AWS_PLAN_ROLE_ARN_{0}', matrix.vars_suffix)] }}
           aws-region: ${{ env.REGION }}
