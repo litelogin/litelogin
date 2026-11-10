@@ -107,3 +107,17 @@ jobs:
           done
           echo "/healthz did not return 200"
           exit 1
+
+      # A signed read through the Admin API's IAM-authenticated function
+      # URL, which also checks the API can read the active signing key. An
+      # unsigned request must be refused.
+      - name: Admin API smoke test
+        working-directory: infra/envs/${{ inputs.environment }}
+        run: |
+          url="$(terraform output -raw admin_url)"
+          code="$(curl -s -o /dev/null -w '%{http_code}' "${url%/}/v1/keys")"
+          [ "$code" = 403 ] || { echo "unsigned request returned $code, want 403"; exit 1; }
+          go run ../../../cmd/litelogin keys list --endpoint "$url" -o json > keys.json
+          jq -e '[.items[] | select(.status == "active")] | length == 1' keys.json > /dev/null \
+            || { echo "want exactly one active signing key:"; cat keys.json; exit 1; }
+          jq -r '.items[] | "\(.kid) \(.status)"' keys.json

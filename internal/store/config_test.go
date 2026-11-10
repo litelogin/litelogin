@@ -18,16 +18,32 @@ func TestOrgs(t *testing.T) {
 		t.Fatalf("GetOrg = %+v", got)
 	}
 
-	must(t, e.SetOrgStatus(e.ctx, org.ID, OrgSuspended))
+	if got.Version != 1 {
+		t.Fatalf("version = %d, want 1", got.Version)
+	}
+
+	v, err := e.SetOrgStatus(e.ctx, org.ID, OrgSuspended, 1)
+	must(t, err)
 	got, err = e.GetOrg(e.ctx, org.ID)
 	must(t, err)
-	if got.Status != OrgSuspended {
-		t.Fatalf("status = %q, want suspended", got.Status)
+	if got.Status != OrgSuspended || v != 2 || got.Version != 2 {
+		t.Fatalf("after suspend: %+v (returned version %d)", got, v)
 	}
-	wantErr(t, e.SetOrgStatus(e.ctx, "missing", OrgActive), ErrNotFound)
-	if err := e.SetOrgStatus(e.ctx, org.ID, "bogus"); err == nil {
+	_, err = e.SetOrgStatus(e.ctx, org.ID, OrgActive, 1)
+	wantErr(t, err, ErrVersionMismatch)
+	_, err = e.SetOrgStatus(e.ctx, "missing", OrgActive, 1)
+	wantErr(t, err, ErrNotFound)
+	if _, err := e.SetOrgStatus(e.ctx, org.ID, "bogus", 2); err == nil {
 		t.Fatal("SetOrgStatus accepted an invalid status")
 	}
+
+	upd := &Org{ID: org.ID, Name: "Acme Corp", Description: "", Version: 2}
+	must(t, e.UpdateOrg(e.ctx, upd))
+	if upd.Name != "Acme Corp" || upd.Description != "" || upd.Version != 3 || upd.Status != OrgSuspended {
+		t.Fatalf("UpdateOrg = %+v", upd)
+	}
+	wantErr(t, e.UpdateOrg(e.ctx, &Org{ID: org.ID, Name: "x", Version: 2}), ErrVersionMismatch)
+	wantErr(t, e.UpdateOrg(e.ctx, &Org{ID: "missing", Name: "x", Version: 1}), ErrNotFound)
 	_, err = e.GetOrg(e.ctx, "missing")
 	wantErr(t, err, ErrNotFound)
 }
@@ -115,6 +131,13 @@ func TestClients(t *testing.T) {
 		t.Fatalf("version after SetClientStatus = %d, want 4", v)
 	}
 	_, err = e.SetClientStatus(e.ctx, got.ID, ClientActive, 3)
+	wantErr(t, err, ErrVersionMismatch)
+	rotated, err := e.SetClientSecretHash(e.ctx, got.ID, "new-hash", 4)
+	must(t, err)
+	if rotated.ClientSecretHash != "new-hash" || rotated.Version != 5 || rotated.ID != got.ID {
+		t.Fatalf("SetClientSecretHash = %+v", rotated)
+	}
+	_, err = e.SetClientSecretHash(e.ctx, got.ID, "newer", 4)
 	wantErr(t, err, ErrVersionMismatch)
 	_, err = e.SetClientStatus(e.ctx, "missing", ClientActive, 1)
 	wantErr(t, err, ErrNotFound)

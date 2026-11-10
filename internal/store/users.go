@@ -240,11 +240,25 @@ func (s *Store) DisableUser(ctx context.Context, userID string) (int64, error) {
 		map[string]types.AttributeValue{":disabled": avS(UserDisabled), ":now": avN(s.unix())})
 }
 
+// SetEmailVerified sets a user's email_verified flag, if the user's version
+// is still expectedVersion. It returns the updated user.
+func (s *Store) SetEmailVerified(ctx context.Context, userID string, verified bool, expectedVersion int64) (*User, error) {
+	var it userItem
+	err := s.updateVersioned(ctx, userKey(userID), expectedVersion,
+		map[string]types.AttributeValue{"email_verified": avB(verified)}, &it)
+	if err != nil {
+		return nil, err
+	}
+	it.ID = userID
+	return &it.User, nil
+}
+
 // EnableUser sets status=active. Credentials revoked when the user was
 // disabled stay revoked.
 func (s *Store) EnableUser(ctx context.Context, userID string) error {
-	return s.updateUser(ctx, userID, "SET #status = :active, #updated_at = :now", "attribute_exists(PK)",
-		names("status", "updated_at"), map[string]types.AttributeValue{":active": avS(UserActive), ":now": avN(s.unix())})
+	return s.updateUser(ctx, userID, "SET #status = :active, #updated_at = :now ADD #version :one", "attribute_exists(PK)",
+		names("status", "updated_at", "version"),
+		map[string]types.AttributeValue{":active": avS(UserActive), ":now": avN(s.unix()), ":one": avN(1)})
 }
 
 func (s *Store) bumpAuthVersion(ctx context.Context, userID, set string, nm map[string]string, vals map[string]types.AttributeValue) (int64, error) {

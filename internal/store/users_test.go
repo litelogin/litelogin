@@ -173,6 +173,16 @@ func TestRevocation(t *testing.T) {
 	_, err = e.DisableUser(e.ctx, "missing")
 	wantErr(t, err, ErrNotFound)
 	wantErr(t, e.EnableUser(e.ctx, "missing"), ErrNotFound)
+
+	cur, err := e.GetUser(e.ctx, f.user.ID)
+	must(t, err)
+	u, err = e.SetEmailVerified(e.ctx, f.user.ID, !cur.EmailVerified, cur.Version)
+	must(t, err)
+	if u.EmailVerified == cur.EmailVerified || u.Version != cur.Version+1 || u.ID != f.user.ID {
+		t.Fatalf("SetEmailVerified = %+v (was %+v)", u, cur)
+	}
+	_, err = e.SetEmailVerified(e.ctx, f.user.ID, true, cur.Version)
+	wantErr(t, err, ErrVersionMismatch)
 }
 
 func TestListUsers(t *testing.T) {

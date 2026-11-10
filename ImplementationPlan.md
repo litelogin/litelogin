@@ -138,7 +138,7 @@ Built before the login flows, so test orgs, clients and users can be created wit
 - Every resource in Architecture.md's Admin API table, built on `internal/store`.
 - Conventions:
   - `ETag` / `If-Match`
-  - signed pagination cursors (an HMAC key held in Secrets Manager)
+  - signed pagination cursors (a KMS HMAC key, so no secret is held anywhere)
   - `Idempotency-Key`
   - the error format
   - secrets returned only once
@@ -175,6 +175,7 @@ Built before the login flows, so test orgs, clients and users can be created wit
   - sessions with the `__Host-` cookie
   - CSRF tokens on every form
 - `internal/email`: SES sender and templates. `infra/modules/email` provisions the identity and configuration set. Request production SES access now, because approval takes time.
+- Admin user invites (`litelogin user create --invite`), which email a password-set link. Until then the Admin API answers `invite: true` with `501`.
 - Basic theming from the client's `theme`.
 
 **Done when:** on a default host in `dev`, a user can register, verify their email, log in, log out and reset their password. A request to the function URL that bypasses CloudFront is rejected.

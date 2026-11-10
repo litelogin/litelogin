@@ -41,6 +41,7 @@ type Org struct {
 	Status      string `dynamodbav:"status"`
 	CreatedAt   int64  `dynamodbav:"created_at"`
 	UpdatedAt   int64  `dynamodbav:"updated_at"`
+	Version     int64  `dynamodbav:"version"`
 }
 
 type orgItem struct {
@@ -144,7 +145,7 @@ type orgIndexItem struct {
 // CreateOrg creates an org. Status defaults to active.
 func (s *Store) CreateOrg(ctx context.Context, org *Org) error {
 	now := s.unix()
-	org.CreatedAt, org.UpdatedAt = now, now
+	org.CreatedAt, org.UpdatedAt, org.Version = now, now, 1
 	if org.Status == "" {
 		org.Status = OrgActive
 	}
@@ -176,26 +177,34 @@ func (s *Store) GetOrg(ctx context.Context, orgID string) (*Org, error) {
 	return &it.Org, nil
 }
 
-// SetOrgStatus suspends or reactivates an org.
-func (s *Store) SetOrgStatus(ctx context.Context, orgID, status string) error {
-	if status != OrgActive && status != OrgSuspended {
-		return fmt.Errorf("store: invalid org status %q", status)
-	}
-	_, err := s.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:                 aws.String(s.config),
-		Key:                       key(pfxOrg+orgID, skDetails),
-		UpdateExpression:          aws.String("SET #status = :status, #updated_at = :now"),
-		ConditionExpression:       aws.String("attribute_exists(PK)"),
-		ExpressionAttributeNames:  names("status", "updated_at"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{":status": avS(status), ":now": avN(s.unix())},
-	})
-	if ok, _ := conditionFailed(err); ok {
-		return ErrNotFound
-	}
+// UpdateOrg saves an org's name and description, if its version is still
+// org.Version. On success, org holds the saved values.
+func (s *Store) UpdateOrg(ctx context.Context, org *Org) error {
+	var it orgItem
+	err := s.updateVersioned(ctx, key(pfxOrg+org.ID, skDetails), org.Version, map[string]types.AttributeValue{
+		"name": avS(org.Name), "description": avS(org.Description),
+	}, &it)
 	if err != nil {
-		return fmt.Errorf("store: set org status: %w", err)
+		return err
 	}
+	it.ID = org.ID
+	*org = it.Org
 	return nil
+}
+
+// SetOrgStatus suspends or reactivates an org, if its version is still
+// expectedVersion. It returns the new version.
+func (s *Store) SetOrgStatus(ctx context.Context, orgID, status string, expectedVersion int64) (int64, error) {
+	if status != OrgActive && status != OrgSuspended {
+		return 0, fmt.Errorf("store: invalid org status %q", status)
+	}
+	var it orgItem
+	err := s.updateVersioned(ctx, key(pfxOrg+orgID, skDetails), expectedVersion,
+		map[string]types.AttributeValue{"status": avS(status)}, &it)
+	if err != nil {
+		return 0, err
+	}
+	return it.Version, nil
 }
 
 // ---- Pools ----
@@ -530,6 +539,23 @@ func (s *Store) SetClientStatus(ctx context.Context, clientID, status string, ex
 		return 0, err
 	}
 	return it.Version, nil
+}
+
+// SetClientSecretHash replaces a confidential client's secret hash, if its
+// version is still expectedVersion. The old secret stops working at once.
+// It returns the updated client.
+func (s *Store) SetClientSecretHash(ctx context.Context, clientID, secretHash string, expectedVersion int64) (*Client, error) {
+	if secretHash == "" {
+		return nil, errors.New("store: secret hash is required")
+	}
+	var it clientItem
+	err := s.updateVersioned(ctx, key(pfxClient+clientID, skDetails), expectedVersion,
+		map[string]types.AttributeValue{"client_secret_hash": avS(secretHash)}, &it)
+	if err != nil {
+		return nil, err
+	}
+	it.ID = clientID
+	return &it.Client, nil
 }
 
 // DeleteClient deletes a client and its default login host. It returns

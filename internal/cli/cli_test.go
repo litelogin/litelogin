@@ -1,0 +1,447 @@
+package cli
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+
+	"github.com/litelogin/litelogin/internal/admin"
+	"github.com/litelogin/litelogin/internal/crypto"
+	"github.com/litelogin/litelogin/internal/platform"
+	"github.com/litelogin/litelogin/internal/store"
+)
+
+// env is a local Admin API on fresh DynamoDB Local tables, and a way to
+// run CLI commands against it.
+type env struct {
+	t        *testing.T
+	endpoint string
+	store    *store.Store
+	ids      atomic.Int64
+	config   string
+}
+
+func newEnv(t *testing.T) *env {
+	t.Helper()
+	endpoint := os.Getenv(platform.EnvDynamoDBEndpoint)
+	if endpoint == "" {
+		t.Skipf("set %s to run CLI tests against DynamoDB Local", platform.EnvDynamoDBEndpoint)
+	}
+	t.Parallel()
+	ctx := context.Background()
+	db := dynamodb.New(dynamodb.Options{
+		Region: "us-east-1", BaseEndpoint: aws.String(endpoint),
+		Credentials:                     credentials.NewStaticCredentialsProvider("local", "local", ""),
+		DisableValidateResponseChecksum: true,
+	})
+	suffix := crypto.NewID()
+	configTable, sessionTable := "cli-config-"+suffix, "cli-session-"+suffix
+	if err := store.EnsureTables(ctx, db, configTable, sessionTable); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, name := range []string{configTable, sessionTable} {
+			_, _ = db.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: aws.String(name)})
+		}
+	})
+	st := store.New(db, configTable, sessionTable)
+	cursor, _ := admin.NewCursorSigner(bytes.Repeat([]byte("c"), 32))
+	srv := &admin.Server{
+		Store:             st,
+		Hasher:            crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
+		Cursor:            cursor,
+		DefaultHostDomain: "litelogin.test",
+		Caller:            func(*http.Request) (string, bool) { return "local", true },
+		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	return &env{t: t, endpoint: ts.URL, store: st, config: filepath.Join(t.TempDir(), "config.json")}
+}
+
+// run runs a CLI command and returns stdout, failing the test if it fails.
+func (e *env) run(stdin string, args ...string) string {
+	e.t.Helper()
+	out, errOut, code := e.try(stdin, args...)
+	if code != 0 {
+		e.t.Fatalf("litelogin %s: exit %d\n%s%s", strings.Join(args, " "), code, out, errOut)
+	}
+	return out
+}
+
+func (e *env) try(stdin string, args ...string) (string, string, int) {
+	var out, errOut bytes.Buffer
+	app := &App{Stdout: &out, Stderr: &errOut, Stdin: strings.NewReader(stdin), ConfigFile: e.config, NewID: func() string {
+		return fmt.Sprintf("key-%s-%d", e.t.Name(), e.ids.Add(1))
+	}}
+	code := Execute(app, append([]string{"--endpoint", e.endpoint}, args...))
+	return out.String(), errOut.String(), code
+}
+
+// json runs a command with --output json and decodes the result.
+func (e *env) json(v any, stdin string, args ...string) {
+	e.t.Helper()
+	out := e.run(stdin, append(args, "-o", "json")...)
+	if err := json.Unmarshal([]byte(out), v); err != nil {
+		e.t.Fatalf("decode %q: %v", out, err)
+	}
+}
+
+type initResult struct {
+	Org    admin.Org    `json:"org"`
+	Pool   admin.Pool   `json:"pool"`
+	Client admin.Client `json:"client"`
+}
+
+func TestInitIsIdempotent(t *testing.T) {
+	e := newEnv(t)
+	args := []string{"init", "--org", "Acme", "--client", "Acme Portal",
+		"--redirect-uri", "https://app.acme.com/callback", "--idempotency-key", "bootstrap-1"}
+	var first initResult
+	e.json(&first, "", args...)
+	if first.Client.ClientSecret == "" || first.Client.Issuer != "https://acme-portal.litelogin.test" ||
+		first.Client.UserPoolID != first.Pool.ID || first.Pool.OrgID != first.Org.ID {
+		t.Fatalf("init: %+v", first)
+	}
+	// The secret works: it's the one whose hash is stored.
+	stored, err := e.store.GetClient(context.Background(), first.Client.ID)
+	if err != nil || !crypto.TokenMatchesHash(first.Client.ClientSecret, stored.ClientSecretHash) {
+		t.Fatalf("stored client: %+v, %v", stored, err)
+	}
+
+	var second initResult
+	e.json(&second, "", args...)
+	if second.Org.ID != first.Org.ID || second.Pool.ID != first.Pool.ID || second.Client.ID != first.Client.ID {
+		t.Fatalf("second run created new resources: %+v vs %+v", second, first)
+	}
+	if second.Client.ClientSecret != "" {
+		t.Fatal("second run returned the client secret again")
+	}
+	_, errOut, code := e.try("", args...)
+	if code != 0 || !strings.Contains(errOut, "rotate-secret "+first.Client.ID) {
+		t.Fatalf("table output of a repeated init: %d %q", code, errOut)
+	}
+
+	// Without the key, init creates a second deployment; the default
+	// host is taken, so choose another label.
+	_, errOut, code = e.try("", "init", "--org", "Acme", "--client", "Acme Portal", "--redirect-uri", "https://app.acme.com/callback")
+	if code == 0 || !strings.Contains(errOut, "host_taken") {
+		t.Fatalf("init with a taken host: %d %q", code, errOut)
+	}
+	out := e.run("", "init", "--org", "Acme 2", "--client", "Acme Portal", "--host-label", "acme2",
+		"--redirect-uri", "https://app.acme.com/callback")
+	if !strings.Contains(out, "https://acme2.litelogin.test") || !strings.Contains(out, "client_secret") {
+		t.Fatalf("init table output: %s", out)
+	}
+}
+
+func TestResourceLifecycle(t *testing.T) {
+	e := newEnv(t)
+	var init initResult
+	e.json(&init, "", "init", "--org", "Acme", "--client", "Portal", "--redirect-uri", "https://app.acme.com/cb")
+	org, pool, client := init.Org.ID, init.Pool.ID, init.Client.ID
+
+	// Orgs.
+	var o admin.Org
+	e.json(&o, "", "org", "update", org, "--description", "Rockets")
+	if o.Description != "Rockets" || o.Name != "Acme" || o.Version != 2 {
+		t.Fatalf("org update: %+v", o)
+	}
+	e.json(&o, "", "org", "suspend", org)
+	if o.Status != store.OrgSuspended {
+		t.Fatalf("suspend: %+v", o)
+	}
+	e.json(&o, "", "org", "reactivate", org)
+	if o.Status != store.OrgActive {
+		t.Fatalf("reactivate: %+v", o)
+	}
+	if out := e.run("", "org", "get", org); !strings.Contains(out, "Rockets") || !strings.Contains(out, "status") {
+		t.Fatalf("org get table: %s", out)
+	}
+	if _, errOut, code := e.try("", "org", "update", org); code == 0 || !strings.Contains(errOut, "nothing to update") {
+		t.Fatalf("empty update: %q", errOut)
+	}
+
+	// Pools.
+	var p admin.Pool
+	e.json(&p, "", "pool", "create", "--org", org, "--name", "Staff", "--require-email-verified")
+	if !p.RequireEmailVerified {
+		t.Fatalf("pool create: %+v", p)
+	}
+	e.json(&p, "", "pool", "update", p.ID, "--require-email-verified=false", "--name", "Employees")
+	if p.RequireEmailVerified || p.Name != "Employees" {
+		t.Fatalf("pool update: %+v", p)
+	}
+	if out := e.run("", "pool", "list", "--org", org); !strings.Contains(out, "Employees") || !strings.Contains(out, "Default") {
+		t.Fatalf("pool list: %s", out)
+	}
+
+	// Clients.
+	var c admin.Client
+	e.json(&c, "", "client", "create", "--org", org, "--pool", pool, "--name", "Mobile app", "--type", "public",
+		"--redirect-uri", "com.acme.app:/callback", "--scopes", "openid,email")
+	if c.ClientSecret != "" || c.TokenEndpointAuthMethod != "none" || len(c.AllowedScopes) != 2 {
+		t.Fatalf("public client: %+v", c)
+	}
+	e.json(&c, "", "client", "update", c.ID, "--allowed-origin", "https://app.acme.com", "--access-token-ttl", "600",
+		"--registration=false")
+	if c.AccessTokenTTL != 600 || len(c.AllowedOrigins) != 1 || c.RegistrationEnabled || c.Version != 2 {
+		t.Fatalf("client update: %+v", c)
+	}
+	if _, errOut, code := e.try("", "client", "update", c.ID, "--redirect-uri", "http://evil.example/cb"); code == 0 ||
+		!strings.Contains(errOut, "invalid_request") {
+		t.Fatalf("invalid update: %q", errOut)
+	}
+	if _, errOut, code := e.try("", "client", "rotate-secret", c.ID); code == 0 || !strings.Contains(errOut, "public_client") {
+		t.Fatalf("rotate a public client's secret: %q", errOut)
+	}
+	e.json(&c, "", "client", "disable", c.ID)
+	if c.Status != store.ClientDisabled {
+		t.Fatalf("disable: %+v", c)
+	}
+	if out := e.run("", "client", "list", "--org", org); !strings.Contains(out, "Mobile app") || !strings.Contains(out, "disabled") {
+		t.Fatalf("client list: %s", out)
+	}
+
+	var rotated map[string]string
+	e.json(&rotated, "", "client", "rotate-secret", client)
+	stored, _ := e.store.GetClient(context.Background(), client)
+	if rotated["client_secret"] == init.Client.ClientSecret || !crypto.TokenMatchesHash(rotated["client_secret"], stored.ClientSecretHash) {
+		t.Fatal("rotate-secret didn't replace the secret")
+	}
+
+	// Hosts.
+	var h admin.Host
+	e.json(&h, "", "host", "add", "--client", client, "Login.Acme.com")
+	if h.Host != "login.acme.com" || h.Status != store.HostPending || h.Type != store.HostTypeCustom {
+		t.Fatalf("host add: %+v", h)
+	}
+	e.json(&h, "", "host", "status", "--client", client, "login.acme.com")
+	if h.Status != store.HostPending || h.WorkUpdatedAt == "" {
+		t.Fatalf("host status: %+v", h)
+	}
+	if _, errOut, code := e.try("", "host", "status", "--client", c.ID, "login.acme.com"); code == 0 || !strings.Contains(errOut, "not_found") {
+		t.Fatalf("another client's host: %q", errOut)
+	}
+	if _, errOut, code := e.try("", "host", "add", "--client", client, "x.litelogin.test"); code == 0 || !strings.Contains(errOut, "default hosts") {
+		t.Fatalf("custom host under the default domain: %q", errOut)
+	}
+	if out := e.run("", "host", "list", "--client", client); !strings.Contains(out, "portal.litelogin.test") || !strings.Contains(out, "login.acme.com") {
+		t.Fatalf("host list: %s", out)
+	}
+	if _, errOut, code := e.try("", "client", "delete", client); code == 0 || !strings.Contains(errOut, "has_custom_hosts") {
+		t.Fatalf("delete a client with custom hosts: %q", errOut)
+	}
+	if out := e.run("", "host", "remove", "--client", client, "login.acme.com"); !strings.Contains(out, "background") {
+		t.Fatalf("remove custom host: %s", out)
+	}
+
+	// Keys (none in a fresh table).
+	if out := e.run("", "keys", "list"); !strings.Contains(out, "KID") {
+		t.Fatalf("keys list: %s", out)
+	}
+
+	// Pool deletion is refused while a client uses the pool.
+	if _, errOut, code := e.try("", "pool", "delete", pool); code == 0 || !strings.Contains(errOut, "pool_in_use") {
+		t.Fatalf("delete a pool in use: %q", errOut)
+	}
+	if out := e.run("", "client", "delete", c.ID); !strings.Contains(out, "deleted client") {
+		t.Fatalf("client delete: %s", out)
+	}
+	if out := e.run("", "pool", "delete", p.ID); !strings.Contains(out, "background") {
+		t.Fatalf("pool delete: %s", out)
+	}
+	e.json(&p, "", "pool", "get", p.ID)
+	if p.Status != store.PoolDeleting {
+		t.Fatalf("deleted pool: %+v", p)
+	}
+}
+
+func TestUsers(t *testing.T) {
+	e := newEnv(t)
+	var init initResult
+	e.json(&init, "", "init", "--org", "Acme", "--client", "Portal", "--redirect-uri", "https://app.acme.com/cb")
+	pool := init.Pool.ID
+
+	var u admin.User
+	e.json(&u, "correct horse battery\n", "user", "create", "--pool", pool, "--email", "Admin@Acme.com", "--password-stdin")
+	if u.Email != "admin@acme.com" || u.EmailVerified || u.PasswordSet == nil || !*u.PasswordSet {
+		t.Fatalf("user create: %+v", u)
+	}
+	stored, _ := e.store.GetUser(context.Background(), u.ID)
+	if ok, _, _ := crypto.NewPasswordHasher(crypto.DefaultArgon2Params).Verify("correct horse battery", stored.PasswordHash); !ok {
+		t.Fatal("stored password hash doesn't match")
+	}
+	if strings.Contains(e.run("", "user", "get", u.ID, "-o", "json"), "argon2") {
+		t.Fatal("password hash returned")
+	}
+	for _, bad := range [][]string{
+		{"user", "create", "--pool", pool, "--email", "admin@acme.com", "--password-stdin"},
+		{"user", "create", "--pool", pool, "--email", "not-an-email", "--password-stdin"},
+	} {
+		if _, _, code := e.try("long enough pw\n", bad...); code == 0 {
+			t.Fatalf("%v succeeded", bad)
+		}
+	}
+	if _, errOut, code := e.try("short\n", "user", "create", "--pool", pool, "--email", "b@acme.com", "--password-stdin"); code == 0 ||
+		!strings.Contains(errOut, "at least 8") {
+		t.Fatalf("short password: %q", errOut)
+	}
+	if _, errOut, code := e.try("", "user", "create", "--pool", pool, "--email", "b@acme.com", "--invite"); code == 0 ||
+		!strings.Contains(errOut, "not_implemented") {
+		t.Fatalf("invite: %q", errOut)
+	}
+	if _, errOut, code := e.try("", "user", "create", "--pool", pool, "--email", "b@acme.com"); code == 0 ||
+		!strings.Contains(errOut, "password-stdin") {
+		t.Fatalf("no password and no terminal: %q", errOut)
+	}
+
+	for _, email := range []string{"bob@acme.com", "bea@acme.com", "carol@other.com"} {
+		e.run("password123\n", "user", "create", "--pool", pool, "--email", email, "--password-stdin")
+	}
+
+	// Paging: three pages of two (GSI1 is eventually consistent, but
+	// DynamoDB Local is immediate).
+	var page struct {
+		Items      []admin.User `json:"items"`
+		NextCursor string       `json:"next_cursor"`
+	}
+	e.json(&page, "", "user", "list", "--pool", pool, "--limit", "2")
+	if len(page.Items) != 2 || page.Items[0].Email != "admin@acme.com" || page.NextCursor == "" {
+		t.Fatalf("page 1: %+v", page)
+	}
+	e.json(&page, "", "user", "list", "--pool", pool, "--limit", "2", "--cursor", page.NextCursor)
+	if len(page.Items) != 2 || page.Items[0].Email != "bob@acme.com" {
+		t.Fatalf("page 2: %+v", page)
+	}
+	page.NextCursor = "" // omitted from the last page
+	e.json(&page, "", "user", "list", "--pool", pool, "--limit", "3", "--all")
+	if len(page.Items) != 4 || page.NextCursor != "" {
+		t.Fatalf("--all: %+v", page)
+	}
+	e.json(&page, "", "user", "list", "--pool", pool, "--email-prefix", "B")
+	if len(page.Items) != 2 || page.Items[0].Email != "bea@acme.com" {
+		t.Fatalf("prefix search: %+v", page)
+	}
+
+	e.json(&u, "", "user", "update", u.ID, "--email-verified")
+	if !u.EmailVerified {
+		t.Fatalf("update: %+v", u)
+	}
+	before := stored.AuthVersion
+	e.json(&u, "new password!\n", "user", "update", u.ID, "--password-stdin")
+	stored, _ = e.store.GetUser(context.Background(), u.ID)
+	if stored.AuthVersion != before+1 || !u.EmailVerified {
+		t.Fatalf("password change didn't revoke: %+v", stored)
+	}
+	e.json(&u, "", "user", "disable", u.ID)
+	if u.Status != store.UserDisabled {
+		t.Fatalf("disable: %+v", u)
+	}
+	e.json(&u, "", "user", "enable", u.ID)
+	if u.Status != store.UserActive {
+		t.Fatalf("enable: %+v", u)
+	}
+	if out := e.run("", "user", "revoke-sessions", u.ID); !strings.Contains(out, "revoked") {
+		t.Fatalf("revoke: %s", out)
+	}
+	if out := e.run("", "user", "sessions", u.ID); !strings.Contains(out, "CLIENT_ID") {
+		t.Fatalf("sessions: %s", out)
+	}
+	e.run("", "user", "delete", u.ID)
+	if _, errOut, code := e.try("", "user", "get", u.ID); code == 0 || !strings.Contains(errOut, "not_found") {
+		t.Fatalf("deleted user: %q", errOut)
+	}
+}
+
+func TestConfigureAndEndpointResolution(t *testing.T) {
+	e := newEnv(t)
+	var out, errOut bytes.Buffer
+	app := &App{Stdout: &out, Stderr: &errOut, Stdin: strings.NewReader(""), NewID: crypto.NewID, ConfigFile: e.config}
+	if code := Execute(app, []string{"keys", "list", "--profile", "acme"}); code == 0 || !strings.Contains(errOut.String(), "litelogin configure") {
+		t.Fatalf("no endpoint: %q", errOut.String())
+	}
+	e.run("", "configure", "--profile", "acme")
+	app = &App{Stdout: &out, Stderr: &errOut, Stdin: strings.NewReader(""), NewID: crypto.NewID, ConfigFile: e.config}
+	out.Reset()
+	if code := Execute(app, []string{"keys", "list", "--profile", "acme"}); code != 0 || !strings.Contains(out.String(), "KID") {
+		t.Fatalf("configured profile: %q %q", out.String(), errOut.String())
+	}
+	if _, errOut, code := e.try("", "keys", "list", "-o", "yaml"); code == 0 || !strings.Contains(errOut, "--output") {
+		t.Fatalf("bad output format: %q", errOut)
+	}
+}
+
+func TestSigning(t *testing.T) {
+	var auth, sha atomic.Value
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth.Store(r.Header.Get("Authorization"))
+		sha.Store(r.Header.Get("X-Amz-Content-Sha256"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[]}`))
+	}))
+	defer ts.Close()
+	u, _ := url.Parse(ts.URL)
+	c := &Client{Endpoint: u, HTTP: ts.Client(), Region: "eu-west-1",
+		Credentials: credentials.NewStaticCredentialsProvider("AKIDEXAMPLE", "secret", "token")}
+	if _, err := c.Do(context.Background(), Request{Method: http.MethodPost, Path: "/v1/orgs", Body: map[string]string{"name": "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	a := auth.Load().(string)
+	if !strings.HasPrefix(a, "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/") || !strings.Contains(a, "/eu-west-1/lambda/aws4_request") ||
+		!strings.Contains(a, "x-amz-content-sha256") || len(sha.Load().(string)) != 64 {
+		t.Fatalf("Authorization = %q", a)
+	}
+
+	lambdaURL, _ := url.Parse("https://abc123.lambda-url.us-east-1.on.aws/")
+	if RegionFromEndpoint(lambdaURL) != "us-east-1" || RegionFromEndpoint(u) != "" {
+		t.Fatal("RegionFromEndpoint")
+	}
+	for raw, local := range map[string]bool{
+		"http://localhost:8081": true, "http://127.0.0.1:1": true, "https://localhost": false, "http://example.com": false,
+	} {
+		u, _ := url.Parse(raw)
+		if IsLocalEndpoint(u) != local {
+			t.Errorf("IsLocalEndpoint(%s) = %v", raw, !local)
+		}
+	}
+}
+
+func TestRetries(t *testing.T) {
+	var calls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) < 3 {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"request_in_progress","message":"busy"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer ts.Close()
+	u, _ := url.Parse(ts.URL)
+	c := &Client{Endpoint: u, Retries: 3, Sleep: func(time.Duration) {}}
+
+	if _, err := c.Do(context.Background(), Request{Method: http.MethodPost, Path: "/v1/orgs", IdempotencyKey: "k"}); err != nil || calls.Load() != 3 {
+		t.Fatalf("idempotent POST: %v after %d calls", err, calls.Load())
+	}
+	calls.Store(0)
+	if _, err := c.Do(context.Background(), Request{Method: http.MethodPost, Path: "/v1/orgs"}); err == nil || calls.Load() != 1 {
+		t.Fatalf("a POST without a key was retried: %v after %d calls", err, calls.Load())
+	}
+}

@@ -1,7 +1,7 @@
 # LiteLogin build, test and deploy targets. Run `make help` for a list.
 
 # Lambda functions to build. Each one is ./cmd/<name>, packaged as dist/<name>.zip.
-FUNCTIONS := auth rotate
+FUNCTIONS := auth rotate admin
 
 # Terraform-compatible CLI: OpenTofu if installed, otherwise Terraform. Override with TF=...
 TF ?= $(shell command -v tofu >/dev/null 2>&1 && echo tofu || echo terraform)
@@ -87,6 +87,14 @@ local-tables: ## Create the tables in DynamoDB Local
 .PHONY: run-auth
 run-auth: ## Run the Auth Lambda as a local HTTP server on localhost:8080
 	$(LOCAL_ENV) go run ./cmd/auth
+
+.PHONY: run-admin
+run-admin: ## Run the Admin API as a local HTTP server on localhost:8081 (no auth: use --endpoint http://localhost:8081)
+	$(LOCAL_ENV) LITELOGIN_DEFAULT_HOST_DOMAIN=litelogin.localhost go run ./cmd/admin
+
+.PHONY: cli
+cli: ## Build the litelogin CLI for this machine as dist/litelogin
+	go build -trimpath -o dist/litelogin ./cmd/litelogin
 
 .PHONY: clean
 clean: ## Remove build output

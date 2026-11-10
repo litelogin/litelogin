@@ -138,7 +138,7 @@ erDiagram
 
 | PK | SK | Attributes |
 | -- | -- | -- |
-| ORG#{org} | DETAILS | name=LiteLogin, description, status=active\|suspended, created_at, updated_at |
+| ORG#{org} | DETAILS | name=LiteLogin, description, status=active\|suspended, created_at, updated_at, version |
 | ORG#{org} | CLIENT#{client} |  |
 | ORG#{org} | POOL#{pool} |  |
 | POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, created_at, updated_at, version, (while deleting) GSI2PK=WORK, GSI2SK=pool_deletion#{pool}, work_attempts, work_updated_at |
@@ -389,13 +389,15 @@ Access tokens that were already issued stay valid until they expire, which is wh
 | Pattern | Operation |
 | -- | -- |
 | Get org | GetItem `ORG#{org}` / `DETAILS` |
-| Suspend or reactivate org | UpdateItem `ORG#{org}` / `DETAILS` SET `status=suspended\|active`. Takes effect within the config cache time (30–60 seconds). |
+| Update org | UpdateItem `ORG#{org}` / `DETAILS` SET `name`, `description`, condition `version = :expected` |
+| Suspend or reactivate org | UpdateItem `ORG#{org}` / `DETAILS` SET `status=suspended\|active`, condition `version = :expected`. Takes effect within the config cache time (30–60 seconds). |
 | Disable or enable client | UpdateItem `CLIENT#{client}` / `DETAILS` SET `status=disabled\|active`, condition `version = :expected`. Takes effect within the config cache time; the client's refresh tokens stop working while it's disabled. |
 | List clients in org | Query `PK=ORG#{org}`, `begins_with(SK, "CLIENT#")`, then BatchGetItem `CLIENT#{client}` / `DETAILS` |
 | List pools in org | Query `PK=ORG#{org}`, `begins_with(SK, "POOL#")`, then BatchGetItem `POOL#{pool}` / `DETAILS` |
 | Create pool | TransactWriteItems: Put `POOL#{pool}` / `DETAILS` + Put `ORG#{org}` / `POOL#{pool}` |
 | Create client | TransactWriteItems: Put `CLIENT#{client}` / `DETAILS`, Put `ORG#{org}` / `CLIENT#{client}`, Put the default login host (both items, below), ConditionCheck `POOL#{pool}` / `DETAILS` `status = active AND org_id = :org` (a client can only use a pool in its own org), ConditionCheck `ORG#{org}` / `DETAILS` exists. Changing a client's pool runs the same pool check. |
 | Update client | UpdateItem `CLIENT#{client}` / `DETAILS`, condition `version = :expected` |
+| Rotate client secret | UpdateItem `CLIENT#{client}` / `DETAILS` SET `client_secret_hash`, condition `version = :expected`. The old secret stops working at once. |
 | Delete client | Query `PK=CLIENT#{client}`, `begins_with(SK, "LOGIN_HOST#")`. If any custom hosts exist, remove them first ("Remove host") and reject the delete until they're gone, so their CloudFront tenants are cleaned up. Then TransactWriteItems deleting the client item, the org index item, and both items for the default host. |
 | List users in pool | Query config GSI1 `GSI1PK=POOL#{pool}` (sorted by email, paginated) |
 | Search users by email prefix | Query config GSI1 `GSI1PK=POOL#{pool}`, `begins_with(GSI1SK, "EMAIL#{prefix}")` |

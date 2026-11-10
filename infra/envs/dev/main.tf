@@ -26,6 +26,12 @@ variable "region" {
   type        = string
 }
 
+variable "default_host_domain" {
+  description = "Parent domain of default login hosts ({label}.{domain}). Login hosts are served from Phase 4."
+  type        = string
+  default     = "dev.litelogin.com"
+}
+
 locals {
   name_prefix = "litelogin-dev"
   dist_dir    = "${path.root}/../../../dist"
@@ -93,6 +99,18 @@ module "auth" {
   }
 }
 
+module "admin" {
+  source              = "../../modules/admin"
+  name_prefix         = local.name_prefix
+  zip_path            = "${local.dist_dir}/admin.zip"
+  config_table_name   = module.tables.config_table_name
+  config_table_arn    = module.tables.config_table_arn
+  session_table_name  = module.tables.session_table_name
+  session_table_arn   = module.tables.session_table_arn
+  table_kms_key_arn   = module.kms.tables_key_arn
+  default_host_domain = var.default_host_domain
+}
+
 output "config_table_name" {
   value = module.tables.config_table_name
 }
@@ -107,4 +125,13 @@ output "rotate_function_name" {
 
 output "auth_function_url" {
   value = module.auth.function_url
+}
+
+output "admin_function_name" {
+  value = module.admin.function_name
+}
+
+output "admin_url" {
+  description = "Admin API endpoint (AWS_IAM auth). Use with: litelogin --endpoint <url>, or litelogin configure --environment dev."
+  value       = module.admin.function_url
 }

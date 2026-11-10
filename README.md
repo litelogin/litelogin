@@ -20,6 +20,10 @@ make local-up       # start DynamoDB Local on localhost:18000
 make local-tables   # create the Config and Session tables
 make run-auth       # run the Auth Lambda on http://localhost:8080
 curl localhost:8080/healthz
+make run-admin      # run the Admin API on http://localhost:8081 (no authentication; localhost only)
+make cli            # build the CLI as dist/litelogin
+dist/litelogin --endpoint http://localhost:8081 init --org Acme --client "Acme Portal" \
+  --redirect-uri http://localhost:3000/callback
 ```
 
 Run the tests:
@@ -62,7 +66,25 @@ The `auth_function_url` output serves `/healthz`.
 | -- | -- | -- |
 | `ci.yml` | Push to `main`, pull requests | Vet, tests (with DynamoDB Local), lint, `govulncheck`, Terraform format and validate |
 | `plan.yml` | Pull requests that touch code or infrastructure | `terraform plan` per environment with the read-only plan role; the plan is shown in the job summary |
-| `deploy.yml` | CI passing on `main`, or by hand | Applies dev, runs the key rotation Lambda once (which creates the first signing key in a new environment), and smoke-tests `/healthz`. qa and prod are added once their accounts are bootstrapped. |
+| `deploy.yml` | CI passing on `main`, or by hand | Applies dev, runs the key rotation Lambda once (which creates the first signing key in a new environment), smoke-tests `/healthz`, and makes a signed Admin API call (an unsigned one must get `403`). qa and prod are added once their accounts are bootstrapped. |
+
+## The litelogin CLI
+
+`litelogin` manages a deployment through the Admin API, signing each request with your AWS credentials. Any IAM principal allowed `lambda:InvokeFunctionUrl` on the Admin Lambda can manage every org, so grant it only to operators.
+
+```sh
+make cli
+aws sso login --profile litelogin-dev
+dist/litelogin configure --profile litelogin-dev --environment dev   # look up and save the endpoint
+
+export AWS_PROFILE=litelogin-dev
+dist/litelogin init --org "Acme" --client "Acme Portal" --redirect-uri https://app.acme.com/callback
+dist/litelogin client list --org ORG
+echo "$PASSWORD" | dist/litelogin user create --pool POOL --email admin@acme.com --password-stdin
+dist/litelogin keys list
+```
+
+`init` prints an idempotency key; running it again with `--idempotency-key` returns the same org, pool and client instead of creating new ones. The client secret is shown only once; `litelogin client rotate-secret CLIENT` issues a new one. Every command takes `-o json`. Run `litelogin help` for the full list.
 
 ## Signing keys
 
