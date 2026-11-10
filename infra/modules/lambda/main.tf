@@ -21,9 +21,8 @@ variable "zip_path" {
 }
 
 variable "policy_json" {
-  description = "IAM policy document with the function's permissions, beyond writing its own logs."
+  description = "IAM policy document with the function's permissions, beyond writing its own logs. Required: it's usually only known at apply time, so it can't decide whether the policy exists."
   type        = string
-  default     = null
 }
 
 variable "environment" {
@@ -94,7 +93,6 @@ resource "aws_iam_role_policy" "logs" {
 }
 
 resource "aws_iam_role_policy" "permissions" {
-  count  = var.policy_json == null ? 0 : 1
   name   = "permissions"
   role   = aws_iam_role.this.id
   policy = var.policy_json
