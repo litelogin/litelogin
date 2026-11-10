@@ -3,8 +3,8 @@
 # Lambda functions to build. Each one is ./cmd/<name>, packaged as dist/<name>.zip.
 FUNCTIONS := auth
 
-# Terraform-compatible CLI: OpenTofu by default.
-TF ?= tofu
+# Terraform-compatible CLI: OpenTofu if installed, otherwise Terraform. Override with TF=...
+TF ?= $(shell command -v tofu >/dev/null 2>&1 && echo tofu || echo terraform)
 COMPOSE ?= docker compose
 
 # Local development settings.

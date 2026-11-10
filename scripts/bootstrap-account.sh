@@ -18,7 +18,9 @@
 #   - a GitHub environment named after the LiteLogin environment, limited to
 #     the main branch; prod also requires approval by the user running the script
 #   - environment variables AWS_DEPLOY_ROLE_ARN, AWS_REGION, TF_STATE_BUCKET
-#   - repository variable AWS_PLAN_ROLE_ARN_<ENV>
+#   - repository variables AWS_PLAN_ROLE_ARN_<ENV>, AWS_REGION_<ENV> and
+#     TF_STATE_BUCKET_<ENV>, for pull request plans (which don't run in an
+#     environment, so can't read environment variables)
 #
 # Usage:
 #   AWS_PROFILE=litelogin-dev scripts/bootstrap-account.sh dev --region us-east-1 --github
@@ -309,6 +311,8 @@ configure_github() {
   local upper_env
   upper_env="$(printf '%s' "$ENVIRONMENT" | tr '[:lower:]' '[:upper:]')"
   gh variable set "AWS_PLAN_ROLE_ARN_${upper_env}" --repo "$REPO" --body "$PLAN_ROLE_ARN"
+  gh variable set "AWS_REGION_${upper_env}" --repo "$REPO" --body "$REGION"
+  gh variable set "TF_STATE_BUCKET_${upper_env}" --repo "$REPO" --body "$STATE_BUCKET"
   log "  variables set"
 }
 

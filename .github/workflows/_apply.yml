@@ -1,0 +1,94 @@
+# Reusable: build, apply and smoke-test one environment.
+#
+# Runs in the GitHub environment named by `environment`. Only jobs in that
+# environment can assume the account's litelogin-deploy role, and the
+# environment's protection rules (main branch only; approval for prod)
+# decide whether the job may run.
+
+name: Apply
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: dev, qa or prod
+        required: true
+        type: string
+      ref:
+        description: Commit to deploy
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TERRAFORM_VERSION: "1.17.1"
+  TF_IN_AUTOMATION: "1"
+
+jobs:
+  apply:
+    name: Apply ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+      STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - name: Check inputs
+        run: |
+          [[ "$ENVIRONMENT" =~ ^(dev|qa|prod)$ ]] || { echo "unknown environment: $ENVIRONMENT"; exit 1; }
+          [[ -n "$STATE_BUCKET" && -n "$REGION" ]] || { echo "environment variables are missing; run scripts/bootstrap-account.sh --github"; exit 1; }
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Build Lambda packages
+        run: make package
+
+      - name: Terraform init
+        working-directory: infra/envs/${{ inputs.environment }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${STATE_BUCKET}" \
+            -backend-config="key=litelogin/${ENVIRONMENT}/terraform.tfstate" \
+            -backend-config="region=${REGION}"
+
+      - name: Terraform apply
+        working-directory: infra/envs/${{ inputs.environment }}
+        run: terraform apply -input=false -auto-approve -lock-timeout=5m -var "region=${REGION}"
+
+      - name: Smoke test
+        working-directory: infra/envs/${{ inputs.environment }}
+        run: |
+          url="$(terraform output -raw auth_function_url)"
+          for attempt in 1 2 3 4 5; do
+            if curl -fsS "${url%/}/healthz"; then
+              echo
+              exit 0
+            fi
+            echo "attempt ${attempt} failed; retrying"
+            sleep 5
+          done
+          echo "/healthz did not return 200"
+          exit 1

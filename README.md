@@ -55,3 +55,13 @@ It also writes `infra/envs/<env>/backend.hcl`. With `--github`, it creates the G
 3. With AWS credentials for the dev account, run `make deploy-dev`.
 
 The `auth_function_url` output serves `/healthz`.
+
+## CI/CD
+
+| Workflow | Trigger | What it does |
+| -- | -- | -- |
+| `ci.yml` | Push to `main`, pull requests | Vet, tests (with DynamoDB Local), lint, `govulncheck`, Terraform format and validate |
+| `plan.yml` | Pull requests that touch code or infrastructure | `terraform plan` per environment with the read-only plan role; the plan is shown in the job summary |
+| `deploy.yml` | CI passing on `main`, or by hand | Applies dev and smoke-tests `/healthz` (qa and prod are added once their accounts are bootstrapped) |
+
+Deployments use the `litelogin-deploy` role created by `scripts/bootstrap-account.sh`. No AWS credentials are stored in GitHub.

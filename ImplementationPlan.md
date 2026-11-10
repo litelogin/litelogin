@@ -57,7 +57,7 @@ infra/
     email/       SES identity and configuration set
     monitoring/  Alarms, dashboard, Synthetics canary
   envs/
-    dev/  staging/  prod/
+    dev/  qa/  prod/
 test/
   e2e/           End-to-end tests against a deployed environment
   load/          Load test scripts
@@ -236,12 +236,12 @@ Built before the login flows, so test orgs, clients and users can be created wit
   - dependency and supply chain checks: `govulncheck`, pinned module and provider versions, signed release artifacts
   - an external penetration test before launch
 - Deployment:
-  - `staging` and `prod` environments
-  - promotion from staging to prod in the pipeline
+  - `qa` and `prod` environments
+  - promotion from qa to prod in the pipeline
   - Lambda aliases with gradual traffic shifting and alarm-based rollback
 - Documentation for self-hosting: prerequisites, `tofu apply`, `litelogin init`, adding a custom domain, upgrading.
 
-**Done when:** load tests meet the latency targets with no throttling, the canary has been green in staging for a week, and the self-hosting guide has been followed from scratch by someone who didn't write it.
+**Done when:** load tests meet the latency targets with no throttling, the canary has been green in qa for a week, and the self-hosting guide has been followed from scratch by someone who didn't write it.
 
 ## Testing strategy
 
@@ -252,8 +252,8 @@ Built before the login flows, so test orgs, clients and users can be created wit
 | Store integration | Every access pattern, including failure and race cases | DynamoDB Local in CI |
 | End-to-end | Full browser and OIDC flows against `dev` | `test/e2e`, run after each deploy to `dev` |
 | Conformance | OpenID Foundation conformance suite | Against `dev` before each release |
-| Load | Peak login, token and refresh rates | `test/load` against `staging` |
-| Synthetic | Full flow every 5 minutes | CloudWatch Synthetics in `staging` and `prod` |
+| Load | Peak login, token and refresh rates | `test/load` against `qa` |
+| Synthetic | Full flow every 5 minutes | CloudWatch Synthetics in `qa` and `prod` |
 
 ## Risks
 
@@ -270,5 +270,5 @@ Built before the login flows, so test orgs, clients and users can be created wit
 
 These carry over from Architecture.md. None of them block Phases 0–3.
 
-1. **Production region.** Needed before the first `staging` deployment.
+1. **Production region.** Needed before the first `qa` deployment.
 2. **Expected tenant scale.** Needed before Phase 7. It decides whether CloudFront multi-tenant distributions fit, and whether listing orgs needs an index.

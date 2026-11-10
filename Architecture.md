@@ -396,8 +396,8 @@ If a deployment needs instant client or org disablement, shorten the cache time 
 
 ## Environments and deployment
 
-- Separate AWS accounts for `dev`, `staging` and `prod`.
-- All infrastructure as code. A CI pipeline runs tests, deploys to staging, runs smoke tests against the OIDC endpoints, then promotes to prod.
+- Separate AWS accounts for `dev`, `qa` and `prod`, in one AWS Organization. People sign in through IAM Identity Center; CI deploys through GitHub OIDC roles created by `scripts/bootstrap-account.sh`.
+- All infrastructure as code. A CI pipeline runs tests, deploys to qa, runs smoke tests against the OIDC endpoints, then promotes to prod.
 - Lambda versions and aliases, with gradual deployment (e.g. CodeDeploy linear traffic shifting) and automatic rollback on alarms.
 
 ## Open decisions
