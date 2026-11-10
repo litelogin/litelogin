@@ -1,0 +1,16 @@
+# Build output
+/dist/
+
+# Terraform / OpenTofu
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+backend.hcl
+terraform.tfvars
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store

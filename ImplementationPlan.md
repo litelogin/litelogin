@@ -78,7 +78,7 @@ Set up the repo, tooling and an empty deployable environment.
 - CI pipeline with the checks listed under Technology.
 - Terraform state: an S3 backend with native lockfiles, one state per environment.
 - `infra/modules/tables` and `infra/modules/kms`, deployed to the `dev` account.
-- `infra/modules/lambda`: function, arm64, function URL, log group with retention, and an IAM role passed in by the caller.
+- `infra/modules/lambda`: function, arm64, function URL, log group with retention, and an IAM role whose permissions are passed in by the caller.
 - A placeholder Auth Lambda deployed behind its function URL, returning `200`.
 - Local development:
   - `docker compose` with DynamoDB Local
@@ -212,7 +212,7 @@ Built before the login flows, so test orgs, clients and users can be created wit
 
 ### Phase 7: Custom domains and pool deletion
 
-- Verify that CloudFront multi-tenant distributions (SaaS Manager) are supported by the Terraform AWS provider and SDK. The fallback is to manage the distribution with the `awscc` provider and only create tenants at runtime.
+- Terraform support was confirmed in Phase 0: AWS provider 6.72 has `aws_cloudfront_multitenant_distribution`, `aws_cloudfront_distribution_tenant` and `aws_cloudfront_connection_group`. Terraform manages the multi-tenant distribution; the Worker creates and deletes tenants at runtime through the SDK.
 - Custom domain jobs in the Worker:
   - onboarding: create the tenant and its managed certificate
   - verification: certificate issued and CNAME resolves
@@ -259,7 +259,7 @@ Built before the login flows, so test orgs, clients and users can be created wit
 
 | Risk | Mitigation |
 | -- | -- |
-| Terraform support for CloudFront multi-tenant distributions is incomplete | Check it in Phase 0. Fall back to the `awscc` provider, with tenants created at runtime by the Worker. |
+| Terraform support for CloudFront multi-tenant distributions is incomplete | Checked in Phase 0: supported by AWS provider 6.72. Tenants are created at runtime by the Worker in any case. |
 | KMS `Sign` latency or throughput limits token issuance | Measure in Phase 2 and load-test in Phase 8. Request a quota increase early. |
 | argon2id cost on Lambda is higher than expected | Benchmark in Phase 2 and tune the memory setting. The parameters can be raised later through rehash on login. |
 | SES production access is delayed | Request it at the start of Phase 4 |
