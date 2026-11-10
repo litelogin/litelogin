@@ -186,6 +186,7 @@ Holds short-lived authentication state: browser sessions, authorization codes, r
 - Every item has `expires_at` (epoch seconds), and DynamoDB TTL is enabled on that attribute. TTL deletion can lag by up to ~48 hours, so every read must also check `expires_at > now`.
 - Every secret (session cookie, authorization code, refresh token, one-time token) is a 256-bit random value. Only its SHA-256 hash is stored, so a leaked table or backup can't be replayed. `{..._hash}` below means that hash, hex encoded.
 - All base-table reads are strongly consistent. GSI1 reads can't be (DynamoDB only offers eventually consistent reads on a GSI), so GSI1 is never used to decide whether a credential is valid. That decision always comes from base-table reads and `auth_version`.
+- **Transaction conflicts.** When two transactions touch the same item at once, DynamoDB may cancel one with `TransactionConflict` instead of evaluating its conditions. Such transactions are retried with backoff. Once the other transaction commits, the retry fails on its condition (or succeeds), so the loser of a race always ends with a condition failure and the reuse checks below behave the same.
 
 | PK | SK | Attributes |
 | -- | -- | -- |
@@ -256,7 +257,7 @@ Steps 1, 3, 4 and 6 read configuration that rarely changes, so they can be cache
 4. Reject if `locked_until > now`. Verify the password. Reject unless `status=active`, and unless `email_verified` is true when the pool's `require_email_verified` is true. Use the same error message for every failure.
    - Wrong password: UpdateItem ADD `failed_login_count 1`. If the new count reaches the limit (e.g. 5), SET `locked_until = now + 15 min` and reset the count.
    - Correct password with a non-zero count: UpdateItem SET `failed_login_count = 0`.
-5. If the hash uses outdated parameters, rehash and UpdateItem `password_hash`.
+5. If the hash uses outdated parameters, rehash and UpdateItem `password_hash`, condition `password_hash = :old`, so a concurrent password change is never overwritten.
 6. Put `SESSION#{session_hash}` / `DETAILS` with `auth_time=now`, the user's current `auth_version`, and GSI1 keys. Set the session cookie (`HttpOnly`, `Secure`, `SameSite=Lax`).
 7. Continue the pending `/authorize` request.
 
@@ -364,7 +365,7 @@ Access tokens that were already issued stay valid until they expire, which is wh
 1. Hash the new password.
 2. TransactWriteItems:
    - Delete `OTT#{token_hash}` / `DETAILS`, condition `purpose = reset_password AND expires_at > :now`
-   - Update `USER#{user}` / `DETAILS` SET `password_hash`, `password_updated_at`, `email_verified = true` (the user just proved they own the email), `failed_login_count = 0`, REMOVE `locked_until`, ADD `auth_version 1`
+   - Update `USER#{user}` / `DETAILS` SET `password_hash`, `password_updated_at`, `email_verified = true` (the user just proved they own the email), `failed_login_count = 0`, REMOVE `locked_until`, ADD `auth_version 1`, condition `email = :ott_email`. A reset link sent to an address the user no longer has is useless.
 3. Run the cleanup step of "Revoke everything for the user". The `auth_version` increment in step 2 has already revoked everything.
 
 ### Change password (signed in)
@@ -393,7 +394,7 @@ Access tokens that were already issued stay valid until they expire, which is wh
 | List clients in org | Query `PK=ORG#{org}`, `begins_with(SK, "CLIENT#")`, then BatchGetItem `CLIENT#{client}` / `DETAILS` |
 | List pools in org | Query `PK=ORG#{org}`, `begins_with(SK, "POOL#")`, then BatchGetItem `POOL#{pool}` / `DETAILS` |
 | Create pool | TransactWriteItems: Put `POOL#{pool}` / `DETAILS` + Put `ORG#{org}` / `POOL#{pool}` |
-| Create client | TransactWriteItems: Put `CLIENT#{client}` / `DETAILS`, Put `ORG#{org}` / `CLIENT#{client}`, Put the default login host (both items, below), ConditionCheck `POOL#{pool}` / `DETAILS` `status = active` |
+| Create client | TransactWriteItems: Put `CLIENT#{client}` / `DETAILS`, Put `ORG#{org}` / `CLIENT#{client}`, Put the default login host (both items, below), ConditionCheck `POOL#{pool}` / `DETAILS` `status = active AND org_id = :org` (a client can only use a pool in its own org), ConditionCheck `ORG#{org}` / `DETAILS` exists. Changing a client's pool runs the same pool check. |
 | Update client | UpdateItem `CLIENT#{client}` / `DETAILS`, condition `version = :expected` |
 | Delete client | Query `PK=CLIENT#{client}`, `begins_with(SK, "LOGIN_HOST#")`. If any custom hosts exist, remove them first ("Remove host") and reject the delete until they're gone, so their CloudFront tenants are cleaned up. Then TransactWriteItems deleting the client item, the org index item, and both items for the default host. |
 | List users in pool | Query config GSI1 `GSI1PK=POOL#{pool}` (sorted by email, paginated) |
@@ -417,12 +418,13 @@ Access tokens that were already issued stay valid until they expire, which is wh
 
 For admin API requests that carry an `Idempotency-Key` header:
 
-1. Put `IDEMPOTENCY#{caller_hash}#{key}` / `DETAILS` (`request_hash` = SHA-256 of method, path and body; `status=in_progress`), condition `attribute_not_exists(PK)`.
+1. Put `IDEMPOTENCY#{caller_hash}#{key}` / `DETAILS` (`request_hash` = SHA-256 of method, path and body; `status=in_progress`), condition `attribute_not_exists(PK) OR expires_at <= :now`, so an expired record TTL hasn't deleted yet is replaced.
 2. If the put succeeds, process the request, then UpdateItem SET `status=completed`, `response_status`, `response_body` (without secrets).
 3. If the item already exists:
    - `request_hash` differs: return `422`. The key was reused for a different request.
    - `status=in_progress`: return `409`. The original request is still running.
    - `status=completed`: return the stored response.
+4. If processing fails before anything changed, DeleteItem the record (condition `status = in_progress`), so the caller can retry with the same key.
 
 ### Rotate signing keys
 
