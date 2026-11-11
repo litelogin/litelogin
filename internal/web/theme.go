@@ -24,15 +24,19 @@ var hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
 // Theme is a client's validated theme.
 type Theme struct {
-	Brand      string
-	Primary    string
+	Brand   string
+	Primary string
+	// Background is a solid page color the client chose. When it's empty,
+	// pages use the default multi-color gradient with a frosted-glass
+	// card; with it, a plain light card (dark text stays readable on any
+	// color the client picks).
 	Background string
 	LogoURL    string
 }
 
 // DefaultTheme is used where no client is known.
 func DefaultTheme() Theme {
-	return Theme{Brand: "LiteLogin", Primary: "#18181b", Background: "#f4f4f5"}
+	return Theme{Brand: "LiteLogin", Primary: "#2d2b55"}
 }
 
 // ValidColor reports whether v is a #rrggbb color.
