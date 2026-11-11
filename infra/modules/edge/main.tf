@@ -308,8 +308,9 @@ resource "aws_route53_record" "wildcard" {
 
 # Common rule set rules that a loopback redirect_uri trips, and the labels
 # they add (see the "loopback-redirects" rule), and the paths that carry
-# one: /authorize and /logout in the query, the sign-in form (its pending
-# authorization request) and the logout confirmation in the body.
+# one: /authorize and /logout in the query; in the body, the sign-in form
+# (its pending authorization request), the logout confirmation, and the
+# code exchange at /token (whose redirect_uri must repeat the request's).
 locals {
   loopback_rules = {
     EC2MetaDataSSRF_QUERYARGUMENTS = "awswaf:managed:aws:core-rule-set:EC2MetaDataSSRF_QueryArguments"
@@ -317,7 +318,7 @@ locals {
     EC2MetaDataSSRF_BODY           = "awswaf:managed:aws:core-rule-set:EC2MetaDataSSRF_Body"
     GenericRFI_BODY                = "awswaf:managed:aws:core-rule-set:GenericRFI_Body"
   }
-  loopback_paths = ["/authorize", "/login", "/logout"]
+  loopback_paths = ["/authorize", "/login", "/logout", "/token"]
 }
 
 resource "aws_wafv2_web_acl" "this" {
