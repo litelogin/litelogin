@@ -222,7 +222,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	code := crypto.NewToken()
 	err = s.Store.CreateCode(r.Context(), &store.AuthCode{
 		Hash: crypto.HashToken(code), Iss: s.issuer(t), ClientID: t.Client.ID, RedirectURI: redirectURI,
-		Scope: req.Scope, Nonce: req.Nonce, CodeChallenge: req.CodeChallenge, CodeChallengeMethod: store.CodeChallengeS256,
+		Scope: req.Scope, Nonce: req.Nonce, CodeChallenge: req.CodeChallenge, CodeChallengeMethod: challengeMethod(req.CodeChallenge),
 		PoolID: t.Pool.ID, UserID: u.ID, SessionHash: sess.Hash, AuthVersion: sess.AuthVersion, AuthTime: sess.AuthTime,
 	}, CodeLifetime)
 	if err != nil {
@@ -230,6 +230,13 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.redirectAuthz(w, r, t, redirectURI, req.State, url.Values{"code": {code}})
+}
+
+func challengeMethod(challenge string) string {
+	if challenge == "" {
+		return ""
+	}
+	return store.CodeChallengeS256
 }
 
 func parseAuthz(q url.Values, t *tenant) (*authzRequest, *authzError) {
@@ -269,10 +276,19 @@ func parseAuthz(q url.Values, t *tenant) (*authzRequest, *authzError) {
 		return nil, &authzError{"invalid_scope", "the openid scope is required"}
 	}
 	req.Scope = strings.Join(granted, " ")
+	if err := parsePrompt(q, req); err != nil {
+		return nil, err
+	}
 
-	// PKCE S256 is required for every client; plain is never accepted.
+	// PKCE S256 is required unless a confidential client has opted out
+	// (OAuth 2.1, RFC 9700). Whenever PKCE is sent it's checked, and plain
+	// is never accepted.
 	method, challenge := q.Get("code_challenge_method"), q.Get("code_challenge")
 	switch {
+	case challenge == "" && method != "":
+		return nil, &authzError{"invalid_request", "code_challenge_method was sent without code_challenge"}
+	case challenge == "" && pkceOptional(t.Client):
+		return req, nil
 	case challenge == "":
 		return nil, &authzError{"invalid_request", "code_challenge is required (PKCE with S256)"}
 	case method != store.CodeChallengeS256:
@@ -281,22 +297,32 @@ func parseAuthz(q url.Values, t *tenant) (*authzRequest, *authzError) {
 		return nil, &authzError{"invalid_request", "code_challenge is malformed"}
 	}
 	req.CodeChallenge = challenge
+	return req, nil
+}
 
+// pkceOptional reports whether a client may omit PKCE: only a confidential
+// client that opted out.
+func pkceOptional(c *store.Client) bool {
+	return c.ClientType == clientConfidential && c.PKCEOptional
+}
+
+// parsePrompt reads prompt and max_age.
+func parsePrompt(q url.Values, req *authzRequest) *authzError {
 	req.Prompt = map[string]bool{}
 	for _, p := range strings.Fields(q.Get("prompt")) {
 		req.Prompt[p] = true
 	}
 	if req.Prompt["none"] && len(req.Prompt) > 1 {
-		return nil, &authzError{"invalid_request", "prompt=none can't be combined with other values"}
+		return &authzError{"invalid_request", "prompt=none can't be combined with other values"}
 	}
 	if v := q.Get("max_age"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n < 0 {
-			return nil, &authzError{"invalid_request", "max_age must be a non-negative integer"}
+			return &authzError{"invalid_request", "max_age must be a non-negative integer"}
 		}
 		req.MaxAge = n
 	}
-	return req, nil
+	return nil
 }
 
 // badAuthz shows an authorization error that can't be sent to the client.
@@ -473,8 +499,8 @@ func (s *Server) exchangeCode(r *http.Request, t *tenant) (*tokenResponse, error
 	if raw == "" || f.Get("redirect_uri") == "" {
 		return nil, &tokenError{http.StatusBadRequest, "invalid_request", "code and redirect_uri are required"}
 	}
-	if !pkceVerifier.MatchString(verifier) {
-		return nil, &tokenError{http.StatusBadRequest, "invalid_grant", "code_verifier is missing or malformed"}
+	if verifier != "" && !pkceVerifier.MatchString(verifier) {
+		return nil, &tokenError{http.StatusBadRequest, "invalid_grant", "code_verifier is malformed"}
 	}
 	if !validToken(raw) {
 		return nil, errInvalidGrant
@@ -496,10 +522,8 @@ func (s *Server) exchangeCode(r *http.Request, t *tenant) (*tokenResponse, error
 		s.log().WarnContext(ctx, "authorization code reused", "client_id", t.Client.ID)
 		return nil, errInvalidGrant
 	}
-	sum := sha256.Sum256([]byte(verifier))
-	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 	if code.ClientID != t.Client.ID || code.RedirectURI != f.Get("redirect_uri") || code.Iss != s.issuer(t) ||
-		subtle.ConstantTimeCompare([]byte(challenge), []byte(code.CodeChallenge)) != 1 {
+		!pkceMatches(code.CodeChallenge, verifier) {
 		return nil, errInvalidGrant
 	}
 	u, err := s.Store.GetUser(ctx, code.UserID)
@@ -529,6 +553,22 @@ func (s *Server) exchangeCode(r *http.Request, t *tenant) (*tokenResponse, error
 		return nil, err
 	}
 	return s.issue(r, t, u, code.Iss, code.Scope, code.AuthTime, code.Nonce, refresh)
+}
+
+// pkceMatches checks the code_verifier against the code's challenge. A code
+// issued with PKCE needs the matching verifier. A code issued without it
+// rejects any verifier: accepting one would let an attacker who injects a
+// code from a non-PKCE request pass it off as protected (RFC 9700 §2.1.1).
+func pkceMatches(challenge, verifier string) bool {
+	if challenge == "" {
+		return verifier == ""
+	}
+	if verifier == "" {
+		return false
+	}
+	sum := sha256.Sum256([]byte(verifier))
+	got := base64.RawURLEncoding.EncodeToString(sum[:])
+	return subtle.ConstantTimeCompare([]byte(got), []byte(challenge)) == 1
 }
 
 // refresh implements "Refresh tokens": the token is rotated on every use,

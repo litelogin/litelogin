@@ -70,31 +70,35 @@ type poolItem struct {
 
 // Client is an OAuth client: CLIENT#{client} / DETAILS.
 type Client struct {
-	ID                      string            `dynamodbav:"-"`
-	OrgID                   string            `dynamodbav:"org_id"`
-	Name                    string            `dynamodbav:"name"`
-	Description             string            `dynamodbav:"description,omitempty"`
-	Status                  string            `dynamodbav:"status"`
-	ClientType              string            `dynamodbav:"client_type"`
-	ClientSecretHash        string            `dynamodbav:"client_secret_hash,omitempty"`
-	TokenEndpointAuthMethod string            `dynamodbav:"token_endpoint_auth_method"`
-	GrantTypes              []string          `dynamodbav:"grant_types,omitempty"`
-	RedirectURIs            []string          `dynamodbav:"redirect_uris,omitempty"`
-	PostLogoutRedirectURIs  []string          `dynamodbav:"post_logout_redirect_uris,omitempty"`
-	AllowedOrigins          []string          `dynamodbav:"allowed_origins,omitempty"`
-	AllowedScopes           []string          `dynamodbav:"allowed_scopes,omitempty"`
-	UserPoolID              string            `dynamodbav:"user_pool_id"`
-	RegistrationEnabled     bool              `dynamodbav:"registration_enabled"`
-	Theme                   map[string]string `dynamodbav:"theme,omitempty"`
-	AccessTokenTTL          int64             `dynamodbav:"access_token_ttl"`
-	IDTokenTTL              int64             `dynamodbav:"id_token_ttl"`
-	RefreshTokenTTL         int64             `dynamodbav:"refresh_token_ttl"`
-	RefreshFamilyTTL        int64             `dynamodbav:"refresh_family_ttl"`
-	SessionTTL              int64             `dynamodbav:"session_ttl"`
-	SessionIdleTTL          int64             `dynamodbav:"session_idle_ttl"`
-	CreatedAt               int64             `dynamodbav:"created_at"`
-	UpdatedAt               int64             `dynamodbav:"updated_at"`
-	Version                 int64             `dynamodbav:"version"`
+	ID                      string   `dynamodbav:"-"`
+	OrgID                   string   `dynamodbav:"org_id"`
+	Name                    string   `dynamodbav:"name"`
+	Description             string   `dynamodbav:"description,omitempty"`
+	Status                  string   `dynamodbav:"status"`
+	ClientType              string   `dynamodbav:"client_type"`
+	ClientSecretHash        string   `dynamodbav:"client_secret_hash,omitempty"`
+	TokenEndpointAuthMethod string   `dynamodbav:"token_endpoint_auth_method"`
+	GrantTypes              []string `dynamodbav:"grant_types,omitempty"`
+	RedirectURIs            []string `dynamodbav:"redirect_uris,omitempty"`
+	PostLogoutRedirectURIs  []string `dynamodbav:"post_logout_redirect_uris,omitempty"`
+	AllowedOrigins          []string `dynamodbav:"allowed_origins,omitempty"`
+	AllowedScopes           []string `dynamodbav:"allowed_scopes,omitempty"`
+	UserPoolID              string   `dynamodbav:"user_pool_id"`
+	RegistrationEnabled     bool     `dynamodbav:"registration_enabled"`
+	// PKCEOptional lets a confidential client send authorization requests
+	// without PKCE. Absent (false) means PKCE is required, so clients
+	// created before the setting existed keep requiring it.
+	PKCEOptional     bool              `dynamodbav:"pkce_optional,omitempty"`
+	Theme            map[string]string `dynamodbav:"theme,omitempty"`
+	AccessTokenTTL   int64             `dynamodbav:"access_token_ttl"`
+	IDTokenTTL       int64             `dynamodbav:"id_token_ttl"`
+	RefreshTokenTTL  int64             `dynamodbav:"refresh_token_ttl"`
+	RefreshFamilyTTL int64             `dynamodbav:"refresh_family_ttl"`
+	SessionTTL       int64             `dynamodbav:"session_ttl"`
+	SessionIdleTTL   int64             `dynamodbav:"session_idle_ttl"`
+	CreatedAt        int64             `dynamodbav:"created_at"`
+	UpdatedAt        int64             `dynamodbav:"updated_at"`
+	Version          int64             `dynamodbav:"version"`
 }
 
 type clientItem struct {

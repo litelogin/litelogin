@@ -28,6 +28,7 @@ erDiagram
         array allowed_scopes
         string user_pool_id
         boolean registration_enabled
+        boolean pkce_optional
         object theme
         number access_token_ttl
         number id_token_ttl
@@ -145,7 +146,7 @@ erDiagram
 | POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, created_at, updated_at, version, (while deleting) GSI2PK=WORK, GSI2SK=pool_deletion#{pool}, work_attempts, work_updated_at |
 | USER#{user} | DETAILS | pool_id, email=example@example.com, password_hash="$argon2id$v=19$m=19456,t=2,p=1$...", email_verified=true, status=active\|disabled, auth_version=1, failed_login_count, locked_until, password_updated_at, created_at, updated_at, version, GSI1PK=POOL#{pool}, GSI1SK=EMAIL#{email} |
 | POOL#{pool}#EMAIL#{email} | EMAIL | user_id |
-| CLIENT#{client} | DETAILS | org_id, name=LiteLogin, description, status=active\|disabled, client_type=public\|confidential, client_secret_hash, token_endpoint_auth_method=none\|client_secret_basic\|client_secret_post, grant_types=[authorization_code, refresh_token], redirect_uris=[https://login.microsoftonline.com/common/oauth2/nativeclient], post_logout_redirect_uris=[], allowed_origins=[https://app.acme.com], allowed_scopes=[openid, email, offline_access], user_pool_id={pool}, registration_enabled=true, theme={...}, access_token_ttl=900, id_token_ttl=900, refresh_token_ttl=2592000, refresh_family_ttl=7776000, session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version |
+| CLIENT#{client} | DETAILS | org_id, name=LiteLogin, description, status=active\|disabled, client_type=public\|confidential, client_secret_hash, token_endpoint_auth_method=none\|client_secret_basic\|client_secret_post, grant_types=[authorization_code, refresh_token], redirect_uris=[https://login.microsoftonline.com/common/oauth2/nativeclient], post_logout_redirect_uris=[], allowed_origins=[https://app.acme.com], allowed_scopes=[openid, email, offline_access], user_pool_id={pool}, registration_enabled=true, pkce_optional (absent = PKCE required; only on confidential clients), theme={...}, access_token_ttl=900, id_token_ttl=900, refresh_token_ttl=2592000, refresh_family_ttl=7776000, session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version |
 | CLIENT#{client} | LOGIN_HOST#{login_host} | type=default\|custom, status=pending\|verified\|removing |
 | LOGIN_HOST#{login_host} | CLIENT | client_id, org_id, type=default\|custom, status=pending\|verified\|removing, (while pending or removing) GSI2PK=WORK, GSI2SK=custom_domain#{login_host}, work_attempts, work_updated_at, work_last_error |
 | KEYS | KID#{kid} | status=next\|active\|retired, alg=RS256, kms_key_arn, public_jwk, created_at, activated_at, retired_at |
@@ -264,7 +265,7 @@ Steps 1, 3, 4 and 6 read configuration that rarely changes, so they can be cache
 
 ### Authorize (`/authorize`)
 
-1. Resolve client. Validate `response_type=code` and `scope` ⊆ `allowed_scopes`. Reject unless `code_challenge` is present with `code_challenge_method=S256`; a missing challenge or `plain` is always rejected.
+1. Resolve client. Validate `response_type=code` and `scope` ⊆ `allowed_scopes`. Reject unless `code_challenge` is present with `code_challenge_method=S256`. The one exception: a confidential client with `pkce_optional` may omit PKCE entirely. `plain` is always rejected, and PKCE that is sent is always checked.
 2. If there is a session cookie, GetItem `SESSION#{session_hash}` / `DETAILS`, then GetItem `USER#{user}` / `DETAILS` (strongly consistent) → `status`, `auth_version`. The session is usable only if:
    - `expires_at` and `idle_expires_at` are in the future
    - its `pool_id` equals the client's `user_pool_id`
@@ -286,7 +287,7 @@ Everything is validated before the code is consumed, so a wrong `code_verifier` 
    - If `used_at` is already set, the code is being reused. If it has a `family_id`, DeleteItem `REFRESH_FAMILY#{family_id}`. Return `invalid_grant`.
 3. Verify all of the following, and return `invalid_grant` without consuming the code if any fails:
    - `client_id` and `redirect_uri` match the code
-   - SHA-256 of `code_verifier` matches `code_challenge`
+   - SHA-256 of `code_verifier` matches `code_challenge`. A code issued without a challenge rejects any `code_verifier`, so a code from a request without PKCE can't pass as a protected one (RFC 9700 §2.1.1).
    - this request's host matches the code's `iss`
 4. GetItem `USER#{user}` / `DETAILS` → `status`, `auth_version`. Return `invalid_grant` unless `status=active` and the user's `auth_version` equals the code's.
 5. TransactWriteItems:
@@ -458,7 +459,7 @@ KMS `Sign` requests count against a per-account, per-region quota. Request a quo
    - Consequence: relying parties identify users by `iss` + `sub`. If a client moves from its default host to a custom host, the RP sees a new issuer and must be reconfigured, and RPs that key users on `iss` + `sub` will treat existing users as new ones. Document this for customers adding a custom domain.
 4. **Signing keys live in KMS.** One global key set signs tokens for every org and host, and DynamoDB holds only the public keys and the rotation state. Per-org keys would limit the impact of a compromised key, but aren't needed for v1.
 5. **RS256 for token signing.** It's the algorithm relying parties most widely support, and KMS RSA signatures can go into a JWT without conversion.
-6. **PKCE (S256) is required for every client.** This follows OAuth 2.1. Before onboarding a relying party, confirm that it sends PKCE.
+6. **PKCE (S256) is required by default.** Public clients always need it. A confidential client can opt out (`require_pkce=false` in the Admin API, stored as `pkce_optional`): OAuth 2.1 and RFC 9700 allow this, because a confidential client authenticates at the token endpoint and, with OpenID Connect, the `nonce` also guards against injected codes. The opt-out exists for OpenID certification: the conformance suite's Basic OP plan doesn't send PKCE. Keep PKCE required for every client that can send it.
 7. **Revocation is `auth_version`, not deletion.** Logout everywhere, password changes, password resets and disabling a user all increment the user's `auth_version`, which invalidates every session, code and refresh family immediately. Deleting those items through GSI1 is cleanup only, because GSI reads are eventually consistent.
 8. **No cross-client SSO in v1.** Each login host belongs to one client, and session cookies are host-only, so each client has its own browser sessions even when clients share a pool. That's why session lifetimes are set per client. Cross-client SSO would need a shared login host per org or pool, with session lifetimes and `iss` at that level. It can be added later without changing the other tables.
 9. **Background work is recorded on the item itself.** A host that is `pending` or `removing`, or a pool that is `deleting`, carries GSI2 attributes until its work finishes. The stream starts the work and the reconciler retries it, so there is no separate job entity.

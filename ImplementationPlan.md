@@ -185,7 +185,7 @@ Built before the login flows, so test orgs, clients and users can be created wit
 
 - Discovery and JWKS, with an issuer per host.
 - `/authorize`:
-  - PKCE `S256` required
+  - PKCE `S256` required, except for confidential clients that opt out (`require_pkce=false`, for OpenID certification)
   - session reuse, with the `auth_version` and user status checks
   - `prompt` and `max_age`
   - `state` and `nonce`

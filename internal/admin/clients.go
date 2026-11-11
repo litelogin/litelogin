@@ -73,6 +73,7 @@ type Client struct {
 	AllowedScopes           []string          `json:"allowed_scopes"`
 	UserPoolID              string            `json:"user_pool_id"`
 	RegistrationEnabled     bool              `json:"registration_enabled"`
+	RequirePKCE             bool              `json:"require_pkce"`
 	Theme                   map[string]string `json:"theme"`
 	AccessTokenTTL          int64             `json:"access_token_ttl"`
 	IDTokenTTL              int64             `json:"id_token_ttl"`
@@ -107,7 +108,7 @@ func clientJSON(c *store.Client) Client {
 		GrantTypes: nonNil(c.GrantTypes), RedirectURIs: nonNil(c.RedirectURIs),
 		PostLogoutRedirectURIs: nonNil(c.PostLogoutRedirectURIs), AllowedOrigins: nonNil(c.AllowedOrigins),
 		AllowedScopes: nonNil(c.AllowedScopes), UserPoolID: c.UserPoolID, RegistrationEnabled: c.RegistrationEnabled,
-		Theme: theme, AccessTokenTTL: c.AccessTokenTTL, IDTokenTTL: c.IDTokenTTL, RefreshTokenTTL: c.RefreshTokenTTL,
+		RequirePKCE: !c.PKCEOptional, Theme: theme, AccessTokenTTL: c.AccessTokenTTL, IDTokenTTL: c.IDTokenTTL, RefreshTokenTTL: c.RefreshTokenTTL,
 		RefreshFamilyTTL: c.RefreshFamilyTTL, SessionTTL: c.SessionTTL, SessionIdleTTL: c.SessionIdleTTL,
 		CreatedAt: timestamp(c.CreatedAt), UpdatedAt: timestamp(c.UpdatedAt), Version: c.Version,
 	}
@@ -116,24 +117,28 @@ func clientJSON(c *store.Client) Client {
 // ClientInput is the body of create and update client requests. Omitted
 // fields keep their current value (update) or default (create).
 type ClientInput struct {
-	Name                    *string            `json:"name"`
-	Description             *string            `json:"description"`
-	ClientType              *string            `json:"client_type"`
-	TokenEndpointAuthMethod *string            `json:"token_endpoint_auth_method"`
-	GrantTypes              *[]string          `json:"grant_types"`
-	RedirectURIs            *[]string          `json:"redirect_uris"`
-	PostLogoutRedirectURIs  *[]string          `json:"post_logout_redirect_uris"`
-	AllowedOrigins          *[]string          `json:"allowed_origins"`
-	AllowedScopes           *[]string          `json:"allowed_scopes"`
-	UserPoolID              *string            `json:"user_pool_id"`
-	RegistrationEnabled     *bool              `json:"registration_enabled"`
-	Theme                   *map[string]string `json:"theme"`
-	AccessTokenTTL          *int64             `json:"access_token_ttl"`
-	IDTokenTTL              *int64             `json:"id_token_ttl"`
-	RefreshTokenTTL         *int64             `json:"refresh_token_ttl"`
-	RefreshFamilyTTL        *int64             `json:"refresh_family_ttl"`
-	SessionTTL              *int64             `json:"session_ttl"`
-	SessionIdleTTL          *int64             `json:"session_idle_ttl"`
+	Name                    *string   `json:"name"`
+	Description             *string   `json:"description"`
+	ClientType              *string   `json:"client_type"`
+	TokenEndpointAuthMethod *string   `json:"token_endpoint_auth_method"`
+	GrantTypes              *[]string `json:"grant_types"`
+	RedirectURIs            *[]string `json:"redirect_uris"`
+	PostLogoutRedirectURIs  *[]string `json:"post_logout_redirect_uris"`
+	AllowedOrigins          *[]string `json:"allowed_origins"`
+	AllowedScopes           *[]string `json:"allowed_scopes"`
+	UserPoolID              *string   `json:"user_pool_id"`
+	RegistrationEnabled     *bool     `json:"registration_enabled"`
+	// RequirePKCE (default true) can be false only for a confidential
+	// client: its authorization requests may then omit PKCE (OAuth 2.1,
+	// RFC 9700). A request that sends PKCE is always checked.
+	RequirePKCE      *bool              `json:"require_pkce"`
+	Theme            *map[string]string `json:"theme"`
+	AccessTokenTTL   *int64             `json:"access_token_ttl"`
+	IDTokenTTL       *int64             `json:"id_token_ttl"`
+	RefreshTokenTTL  *int64             `json:"refresh_token_ttl"`
+	RefreshFamilyTTL *int64             `json:"refresh_family_ttl"`
+	SessionTTL       *int64             `json:"session_ttl"`
+	SessionIdleTTL   *int64             `json:"session_idle_ttl"`
 
 	// DefaultHostLabel (create only) names the default login host:
 	// {label}.{default host domain}. It defaults to the client name in
@@ -193,6 +198,9 @@ func (in *ClientInput) apply(c *store.Client) error {
 	if in.RegistrationEnabled != nil {
 		c.RegistrationEnabled = *in.RegistrationEnabled
 	}
+	if in.RequirePKCE != nil {
+		c.PKCEOptional = !*in.RequirePKCE
+	}
 	if in.Theme != nil {
 		c.Theme = *in.Theme
 	}
@@ -209,6 +217,9 @@ func validateClient(c *store.Client) error {
 	case ClientPublic:
 		if c.TokenEndpointAuthMethod != AuthNone {
 			return errInvalid("a public client's token_endpoint_auth_method must be none")
+		}
+		if c.PKCEOptional {
+			return errInvalid("require_pkce can't be false for a public client: PKCE is its only protection for authorization codes")
 		}
 	case ClientConfidential:
 		if c.TokenEndpointAuthMethod != AuthSecretBasic && c.TokenEndpointAuthMethod != AuthSecretPost {

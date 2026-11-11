@@ -318,7 +318,7 @@ type clientFlags struct {
 	name, desc, pool, clientType, authMethod, label string
 	redirects, logoutRedirects, origins, scopes     []string
 	grants                                          []string
-	registration                                    bool
+	registration, requirePKCE                       bool
 	accessTTL, idTTL, refreshTTL, familyTTL         int64
 	sessionTTL, idleTTL                             int64
 }
@@ -335,6 +335,7 @@ func (f *clientFlags) register(cmd *cobra.Command, create bool) {
 	fl.StringSliceVar(&f.scopes, "scopes", nil, "allowed scopes, comma-separated (default: openid,email,offline_access)")
 	fl.StringSliceVar(&f.grants, "grant-types", nil, "grant types, comma-separated (default: authorization_code,refresh_token)")
 	fl.BoolVar(&f.registration, "registration", true, "allow users to register on the login pages")
+	fl.BoolVar(&f.requirePKCE, "require-pkce", true, "require PKCE in authorization requests (only confidential clients can set false)")
 	fl.Int64Var(&f.accessTTL, "access-token-ttl", 0, "access token lifetime in seconds")
 	fl.Int64Var(&f.idTTL, "id-token-ttl", 0, "ID token lifetime in seconds")
 	fl.Int64Var(&f.refreshTTL, "refresh-token-ttl", 0, "refresh token lifetime in seconds")
@@ -352,7 +353,7 @@ func (f *clientFlags) body(cmd *cobra.Command) map[string]any {
 		"name": &f.name, "description": &f.desc, "token-endpoint-auth-method": &f.authMethod,
 		"redirect-uri": &f.redirects, "post-logout-redirect-uri": &f.logoutRedirects, "allowed-origin": &f.origins,
 		"scopes": &f.scopes, "grant-types": &f.grants, "registration": &f.registration,
-		"access-token-ttl": &f.accessTTL, "id-token-ttl": &f.idTTL, "refresh-token-ttl": &f.refreshTTL,
+		"require-pkce": &f.requirePKCE, "access-token-ttl": &f.accessTTL, "id-token-ttl": &f.idTTL, "refresh-token-ttl": &f.refreshTTL,
 		"refresh-family-ttl": &f.familyTTL, "session-ttl": &f.sessionTTL, "session-idle-ttl": &f.idleTTL,
 		"type": &f.clientType, "host-label": &f.label, "pool": &f.pool,
 	})

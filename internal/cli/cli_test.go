@@ -199,9 +199,20 @@ func TestResourceLifecycle(t *testing.T) {
 	var c admin.Client
 	e.json(&c, "", "client", "create", "--org", org, "--pool", pool, "--name", "Mobile app", "--type", "public",
 		"--redirect-uri", "com.acme.app:/callback", "--scopes", "openid,email")
-	if c.ClientSecret != "" || c.TokenEndpointAuthMethod != "none" || len(c.AllowedScopes) != 2 {
+	if c.ClientSecret != "" || c.TokenEndpointAuthMethod != "none" || len(c.AllowedScopes) != 2 || !c.RequirePKCE {
 		t.Fatalf("public client: %+v", c)
 	}
+	if _, errOut, code := e.try("", "client", "update", c.ID, "--require-pkce=false"); code == 0 ||
+		!strings.Contains(errOut, "public client") {
+		t.Fatalf("public client without PKCE: %q", errOut)
+	}
+	var conf admin.Client
+	e.json(&conf, "", "client", "create", "--org", org, "--pool", pool, "--name", "Server app",
+		"--redirect-uri", "https://server.acme.com/cb", "--require-pkce=false")
+	if conf.RequirePKCE || conf.ClientType != "confidential" {
+		t.Fatalf("confidential client without PKCE: %+v", conf)
+	}
+	e.run("", "client", "delete", conf.ID)
 	e.json(&c, "", "client", "update", c.ID, "--allowed-origin", "https://app.acme.com", "--access-token-ttl", "600",
 		"--registration=false")
 	if c.AccessTokenTTL != 600 || len(c.AllowedOrigins) != 1 || c.RegistrationEnabled || c.Version != 2 {

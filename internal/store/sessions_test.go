@@ -72,6 +72,16 @@ func TestCodeExchange(t *testing.T) {
 	if err := e.CreateCode(e.ctx, plain, time.Minute); err == nil {
 		t.Fatal("CreateCode accepted a plain PKCE challenge")
 	}
+	half := &AuthCode{Hash: newHash(), Iss: "https://x", UserID: f.user.ID, AuthVersion: 1, CodeChallengeMethod: CodeChallengeS256}
+	if err := e.CreateCode(e.ctx, half, time.Minute); err == nil {
+		t.Fatal("CreateCode accepted a method without a challenge")
+	}
+	// A confidential client that opted out of PKCE gets codes without one.
+	none := &AuthCode{Hash: newHash(), Iss: "https://x", UserID: f.user.ID, AuthVersion: 1}
+	must(t, e.CreateCode(e.ctx, none, time.Minute))
+	if got, err := e.GetCode(e.ctx, none.Hash); err != nil || got.CodeChallenge != "" || got.CodeChallengeMethod != "" {
+		t.Fatalf("code without PKCE: %+v, %v", got, err)
+	}
 
 	code := e.newCode(t, f)
 	got, err := e.GetCode(e.ctx, code.Hash)

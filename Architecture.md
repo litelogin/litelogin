@@ -154,7 +154,7 @@ LiteLogin implements the OAuth 2.1 authorization code flow and OpenID Connect Co
 
 | Requirement | Public client | Confidential client |
 | -- | -- | -- |
-| PKCE (`S256`) | Required | Required |
+| PKCE (`S256`) | Required | Required, unless the client opts out (`require_pkce=false`) |
 | Client secret | None | Required (`client_secret_basic` or `client_secret_post`) |
 | Redirect URI matching | Exact string match | Exact string match |
 | Authorization code | Single use, 60-second lifetime | Single use, 60-second lifetime |

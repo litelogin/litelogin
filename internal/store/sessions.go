@@ -53,8 +53,8 @@ type AuthCode struct {
 	RedirectURI         string `dynamodbav:"redirect_uri"`
 	Scope               string `dynamodbav:"scope"`
 	Nonce               string `dynamodbav:"nonce,omitempty"`
-	CodeChallenge       string `dynamodbav:"code_challenge"`
-	CodeChallengeMethod string `dynamodbav:"code_challenge_method"`
+	CodeChallenge       string `dynamodbav:"code_challenge,omitempty"` // empty: issued without PKCE
+	CodeChallengeMethod string `dynamodbav:"code_challenge_method,omitempty"`
 	PoolID              string `dynamodbav:"pool_id"`
 	UserID              string `dynamodbav:"user_id"`
 	SessionHash         string `dynamodbav:"session_hash"`
@@ -200,10 +200,12 @@ func (s *Store) DeleteSession(ctx context.Context, hash string) error {
 // ---- Authorization codes ----
 
 // CreateCode stores an authorization code that expires after lifetime. The
-// code's AuthVersion must be the session's. Only S256 PKCE is accepted.
+// code's AuthVersion must be the session's. A code has either an S256 code
+// challenge or, for a confidential client that allows it, none at all.
 func (s *Store) CreateCode(ctx context.Context, c *AuthCode, lifetime time.Duration) error {
-	if c.CodeChallengeMethod != CodeChallengeS256 || c.CodeChallenge == "" {
-		return errors.New("store: authorization codes require an S256 code challenge")
+	if (c.CodeChallenge == "") != (c.CodeChallengeMethod == "") ||
+		(c.CodeChallengeMethod != "" && c.CodeChallengeMethod != CodeChallengeS256) {
+		return errors.New("store: an authorization code's challenge must be S256, or absent")
 	}
 	if c.Hash == "" || c.UserID == "" || c.AuthVersion == 0 || c.Iss == "" {
 		return errors.New("store: code hash, iss, user ID and auth_version are required")

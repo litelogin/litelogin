@@ -413,3 +413,93 @@ func TestRPInitiatedLogout(t *testing.T) {
 	q.Set("post_logout_redirect_uri", "https://evil.example/")
 	expect(t, b.get("/logout?"+q.Encode()), 400, "")
 }
+
+// optOutOfPKCE makes the test client confidential (client_secret_post) with
+// PKCE optional, and returns its secret.
+func (e *env) optOutOfPKCE(t *testing.T, public bool) string {
+	t.Helper()
+	ctx := context.Background()
+	c, _ := e.st.GetClient(ctx, e.client.ID)
+	c.PKCEOptional = true
+	if !public {
+		c.ClientType, c.TokenEndpointAuthMethod = "confidential", "client_secret_post"
+	}
+	if err := e.st.UpdateClient(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	secret := crypto.NewToken()
+	if _, err := e.st.SetClientSecretHash(ctx, c.ID, crypto.HashToken(secret), c.Version); err != nil {
+		t.Fatal(err)
+	}
+	return secret
+}
+
+func TestPKCEOptionalForConfidentialClient(t *testing.T) {
+	e := newEnv(t, false)
+	secret := e.optOutOfPKCE(t, false)
+	e.newUser()
+	b := e.browser()
+	exchange := func(code, verifier string) tokenResp {
+		f := url.Values{
+			"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirectURI},
+			"client_id": {e.client.ID}, "client_secret": {secret},
+		}
+		if verifier != "" {
+			f.Set("code_verifier", verifier)
+		}
+		return e.tokenRequest(f, "", "")
+	}
+	withoutPKCE := func() url.Values {
+		q := e.authzQuery("")
+		q.Del("code_challenge")
+		q.Del("code_challenge_method")
+		return q
+	}
+
+	// Without PKCE: the code works without a verifier.
+	code := b.authorize(withoutPKCE()).Query().Get("code")
+	if r := exchange(code, ""); r.status != 200 || r.body["id_token"] == nil {
+		t.Fatalf("exchange without PKCE: %d %v", r.status, r.body)
+	}
+
+	// A code issued without PKCE refuses a verifier (downgrade protection),
+	// and that failure doesn't use up the code.
+	code = b.authorize(withoutPKCE()).Query().Get("code")
+	v, _ := pkce()
+	expectTokenError(t, exchange(code, v), 400, "invalid_grant")
+	if r := exchange(code, ""); r.status != 200 {
+		t.Fatalf("exchange after a refused verifier: %v", r.body)
+	}
+
+	// PKCE that is sent is still checked.
+	v, ch := pkce()
+	code = b.authorize(e.authzQuery(ch)).Query().Get("code")
+	expectTokenError(t, exchange(code, ""), 400, "invalid_grant")
+	other, _ := pkce()
+	expectTokenError(t, exchange(code, other), 400, "invalid_grant")
+	if r := exchange(code, v); r.status != 200 {
+		t.Fatalf("exchange with PKCE: %v", r.body)
+	}
+
+	// plain is still refused, and so is a method without a challenge.
+	for _, q := range []url.Values{e.authzQuery(ch), withoutPKCE()} {
+		q.Set("code_challenge_method", "plain")
+		p := b.get("/authorize?" + q.Encode())
+		if u, _ := url.Parse(p.location); u == nil || u.Query().Get("error") != "invalid_request" {
+			t.Errorf("plain PKCE: %d %q", p.status, p.location)
+		}
+	}
+}
+
+func TestPKCEAlwaysRequiredForPublicClient(t *testing.T) {
+	e := newEnv(t, false)
+	e.optOutOfPKCE(t, true) // set directly in the store; the Admin API refuses this
+	b := e.browser()
+	q := e.authzQuery("")
+	q.Del("code_challenge")
+	q.Del("code_challenge_method")
+	p := b.get("/authorize?" + q.Encode())
+	if u, _ := url.Parse(p.location); u == nil || u.Query().Get("error") != "invalid_request" {
+		t.Fatalf("public client without PKCE: %d %q", p.status, p.location)
+	}
+}
