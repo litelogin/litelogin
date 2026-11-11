@@ -404,8 +404,9 @@ func (s *Store) poolInUse(ctx context.Context, orgID, poolID string) (bool, erro
 }
 
 // DeletePoolUsers deletes up to limit users from a pool that is being
-// deleted, including their credentials. It returns how many were deleted;
-// zero means none are left.
+// deleted; the Worker's revocation cleanup then deletes their credentials.
+// It returns how many users it listed, counting any already deleted (the
+// index lags behind deletions): zero means none are left.
 func (s *Store) DeletePoolUsers(ctx context.Context, poolID string, limit int32) (int, error) {
 	pool, err := s.GetPool(ctx, poolID)
 	if err != nil {
@@ -426,6 +427,7 @@ func (s *Store) DeletePoolUsers(ctx context.Context, poolID string, limit int32)
 			deleted++
 		case errors.Is(err, ErrNotFound):
 			// Already deleted; the index hasn't caught up yet.
+			deleted++
 		default:
 			return deleted, err
 		}

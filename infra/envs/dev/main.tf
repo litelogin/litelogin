@@ -173,6 +173,7 @@ module "admin" {
   email_from                 = module.email.from_address
   ses_configuration_set_name = module.email.configuration_set_name
   ses_configuration_set_arn  = module.email.configuration_set_arn
+  custom_host_target         = module.edge.routing_endpoint
 }
 
 module "jobs" {
@@ -185,6 +186,14 @@ module "jobs" {
   session_table_name = module.tables.session_table_name
   session_table_arn  = module.tables.session_table_arn
   table_kms_key_arn  = module.kms.tables_key_arn
+
+  custom_hosts = {
+    distribution_id      = module.edge.tenant_distribution_id
+    distribution_arn     = module.edge.tenant_distribution_arn
+    connection_group_id  = module.edge.connection_group_id
+    connection_group_arn = module.edge.connection_group_arn
+    routing_endpoint     = module.edge.routing_endpoint
+  }
 }
 
 output "dns_name_servers" {
@@ -225,4 +234,9 @@ output "admin_url" {
 
 output "worker_function_name" {
   value = module.jobs.worker_function_name
+}
+
+output "custom_host_cname_target" {
+  description = "Where custom login hosts' CNAME records point."
+  value       = module.edge.routing_endpoint
 }

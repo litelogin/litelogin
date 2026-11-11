@@ -36,6 +36,7 @@ import (
 const (
 	envCursorKey         = "LITELOGIN_CURSOR_KMS_KEY"      // Lambda: KMS HMAC key that signs pagination cursors
 	envDefaultHostDomain = "LITELOGIN_DEFAULT_HOST_DOMAIN" // parent domain of default login hosts
+	envRoutingEndpoint   = "LITELOGIN_ROUTING_ENDPOINT"    // where custom hosts' CNAMEs point (unset: no custom hosts)
 )
 
 const (
@@ -94,6 +95,7 @@ func run(logger *slog.Logger) error {
 		Hasher:            crypto.NewPasswordHasher(crypto.DefaultArgon2Params),
 		Cursor:            cursor,
 		DefaultHostDomain: domain,
+		CustomHostTarget:  os.Getenv(envRoutingEndpoint),
 		Caller:            admin.FunctionURLCaller,
 		Log:               logger,
 	}

@@ -231,6 +231,8 @@ Built: the account pages (`internal/web/account.go`); the Worker (`cmd/worker`, 
 
 **Done when:** a custom domain can be added, verified, used to log in and removed in `dev`, with no orphaned CloudFront resources. Killing the Worker partway through any job only delays it until the reconciler runs.
 
+Built: `internal/domains` (tenants with CloudFront-managed, HTTP-validated certificates, and the DNS check); the custom domain and pool deletion jobs and the reconciler in `internal/worker`; the multi-tenant distribution and its connection group in `infra/modules/edge/tenants.tf`; and the reconcile schedule, stream filters and CloudFront permissions in `infra/modules/jobs`. The admin API shows a custom host's `cname_target`, and while it's pending, `work_last_error` says what it's waiting for. Pool deletion records an attempt each run, so the reconciler restarts a run that died.
+
 ### Phase 8: Production readiness
 
 - Observability:

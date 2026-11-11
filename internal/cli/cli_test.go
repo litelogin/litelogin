@@ -69,6 +69,7 @@ func newEnv(t *testing.T) *env {
 		Hasher:            crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
 		Cursor:            cursor,
 		DefaultHostDomain: "litelogin.test",
+		CustomHostTarget:  "d1.cloudfront.test",
 		Caller:            func(*http.Request) (string, bool) { return "local", true },
 		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Email:             &email.Recorder{},
@@ -257,7 +258,7 @@ func TestResourceLifecycle(t *testing.T) {
 		t.Fatalf("host add: %+v", h)
 	}
 	e.json(&h, "", "host", "status", "login.acme.com")
-	if h.Status != store.HostPending || h.WorkUpdatedAt == "" {
+	if h.Status != store.HostPending || h.WorkUpdatedAt == "" || h.CNAMETarget != "d1.cloudfront.test" {
 		t.Fatalf("host status: %+v", h)
 	}
 	if _, errOut, code := e.try("", "host", "add", "--org", org, "x.litelogin.test"); code == 0 || !strings.Contains(errOut, "default hosts") {

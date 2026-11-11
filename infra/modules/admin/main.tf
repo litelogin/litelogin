@@ -52,6 +52,12 @@ variable "default_host_domain" {
   type        = string
 }
 
+variable "custom_host_target" {
+  description = "Where custom hosts' CNAME records point (the connection group's routing endpoint). Empty: custom hosts aren't supported."
+  type        = string
+  default     = ""
+}
+
 variable "email_from" {
   description = "Sender address of user invites."
   type        = string
@@ -151,6 +157,7 @@ module "admin" {
     LITELOGIN_SESSION_TABLE       = var.session_table_name
     LITELOGIN_CURSOR_KMS_KEY      = aws_kms_key.cursor.arn
     LITELOGIN_DEFAULT_HOST_DOMAIN = var.default_host_domain
+    LITELOGIN_ROUTING_ENDPOINT    = var.custom_host_target
     LITELOGIN_EMAIL_FROM          = var.email_from
     LITELOGIN_SES_CONFIGURATION   = var.ses_configuration_set_name
   }

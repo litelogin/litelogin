@@ -79,9 +79,13 @@ type Server struct {
 	// DefaultHostDomain is the parent domain of default login hosts, e.g.
 	// litelogin.com: an org's default host is {label}.{domain}.
 	DefaultHostDomain string
-	Caller            CallerFunc
-	Log               *slog.Logger
-	Now               func() time.Time
+	// CustomHostTarget is where custom hosts' CNAME records point: the
+	// routing endpoint of the connection group serving them. Empty means
+	// custom hosts aren't supported, and adding one returns 501.
+	CustomHostTarget string
+	Caller           CallerFunc
+	Log              *slog.Logger
+	Now              func() time.Time
 	// Email sends user invites. Without it, invites return 501.
 	Email email.Sender
 	// LinkScheme and LinkPort shape invite links: https and no port,

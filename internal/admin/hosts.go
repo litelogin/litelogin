@@ -37,13 +37,18 @@ type Host struct {
 	UpdatedAt           string            `json:"updated_at"`
 	Version             int64             `json:"version"`
 
-	// Set while a custom host is being provisioned or removed.
+	// CNAMETarget is where a custom host's DNS must point: the customer
+	// creates a CNAME record from the host to it.
+	CNAMETarget string `json:"cname_target,omitempty"`
+
+	// Set while a custom host is being provisioned or removed. While it's
+	// pending, WorkLastError says what it's waiting for.
 	WorkAttempts  int64  `json:"work_attempts,omitempty"`
 	WorkUpdatedAt string `json:"work_updated_at,omitempty"`
 	WorkLastError string `json:"work_last_error,omitempty"`
 }
 
-func hostJSON(h *store.LoginHost) Host {
+func (s *Server) hostJSON(h *store.LoginHost) Host {
 	theme := h.Theme
 	if theme == nil {
 		theme = map[string]string{}
@@ -51,7 +56,15 @@ func hostJSON(h *store.LoginHost) Host {
 	return Host{Host: h.Host, OrgID: h.OrgID, UserPoolID: h.PoolID, Type: h.Type, Status: h.Status, Issuer: "https://" + h.Host,
 		Theme: theme, RegistrationEnabled: h.RegistrationEnabled, SessionTTL: h.SessionTTL, SessionIdleTTL: h.SessionIdleTTL,
 		CreatedAt: timestamp(h.CreatedAt), UpdatedAt: timestamp(h.UpdatedAt), Version: h.Version,
-		WorkAttempts: h.WorkAttempts, WorkUpdatedAt: timestamp(h.WorkUpdatedAt), WorkLastError: h.WorkLastError}
+		WorkAttempts: h.WorkAttempts, WorkUpdatedAt: timestamp(h.WorkUpdatedAt), WorkLastError: h.WorkLastError,
+		CNAMETarget: s.customHostTarget(h)}
+}
+
+func (s *Server) customHostTarget(h *store.LoginHost) string {
+	if h.Type != store.HostTypeCustom {
+		return ""
+	}
+	return s.CustomHostTarget
 }
 
 // HostSettingsInput holds a login host's settings in create and update
@@ -121,14 +134,14 @@ func (s *Server) listOrgHosts(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	writeHosts(w, hosts)
+	s.writeHosts(w, hosts)
 	return nil
 }
 
-func writeHosts(w http.ResponseWriter, hosts []store.LoginHost) {
+func (s *Server) writeHosts(w http.ResponseWriter, hosts []store.LoginHost) {
 	out := list[Host]{Items: make([]Host, 0, len(hosts))}
 	for i := range hosts {
-		out.Items = append(out.Items, hostJSON(&hosts[i]))
+		out.Items = append(out.Items, s.hostJSON(&hosts[i]))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -149,6 +162,9 @@ func (s *Server) addHost(w http.ResponseWriter, r *http.Request) error {
 	orgID, err := pathValue(r, "org")
 	if err != nil {
 		return err
+	}
+	if s.CustomHostTarget == "" {
+		return &apiError{Status: http.StatusNotImplemented, Code: "not_implemented", Message: "custom hosts aren't configured for this server"}
 	}
 	var in AddHostInput
 	if err := decode(r, &in); err != nil {
@@ -184,7 +200,7 @@ func (s *Server) addHost(w http.ResponseWriter, r *http.Request) error {
 	if err := s.Store.CreateHost(r.Context(), h); err != nil {
 		return err
 	}
-	writeVersioned(w, http.StatusCreated, h.Version, hostJSON(h))
+	writeVersioned(w, http.StatusCreated, h.Version, s.hostJSON(h))
 	return nil
 }
 
@@ -206,7 +222,7 @@ func (s *Server) getHost(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	writeVersioned(w, http.StatusOK, h.Version, hostJSON(h))
+	writeVersioned(w, http.StatusOK, h.Version, s.hostJSON(h))
 	return nil
 }
 
@@ -232,7 +248,7 @@ func (s *Server) updateHost(w http.ResponseWriter, r *http.Request) error {
 	if err := s.Store.UpdateHostSettings(r.Context(), h); err != nil {
 		return err
 	}
-	writeVersioned(w, http.StatusOK, h.Version, hostJSON(h))
+	writeVersioned(w, http.StatusOK, h.Version, s.hostJSON(h))
 	return nil
 }
 
@@ -248,7 +264,7 @@ func (s *Server) removeHost(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	h.Status = store.HostRemoving
-	writeJSON(w, http.StatusAccepted, hostJSON(h))
+	writeJSON(w, http.StatusAccepted, s.hostJSON(h))
 	return nil
 }
 
@@ -334,6 +350,6 @@ func (s *Server) listClientHosts(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	writeHosts(w, hosts)
+	s.writeHosts(w, hosts)
 	return nil
 }

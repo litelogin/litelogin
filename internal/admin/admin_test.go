@@ -63,6 +63,27 @@ func (f *fakeStore) CreateOrgWithHost(_ context.Context, o *store.Org, p *store.
 	return nil
 }
 
+func (f *fakeStore) CreateHost(_ context.Context, h *store.LoginHost) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.hosts[h.Host]; ok {
+		return store.ErrHostTaken
+	}
+	h.Status, h.Version = store.HostPending, 1
+	f.hosts[h.Host] = *h
+	return nil
+}
+
+func (f *fakeStore) GetLoginHost(_ context.Context, host string) (*store.LoginHost, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	h, ok := f.hosts[host]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return &h, nil
+}
+
 func (f *fakeStore) GetOrg(_ context.Context, id string) (*store.Org, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -168,7 +189,7 @@ func newRig(t *testing.T) *rig {
 	logs := &bytes.Buffer{}
 	srv := &Server{
 		Store: fs, Hasher: crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
-		Cursor: cursor, DefaultHostDomain: "litelogin.test",
+		Cursor: cursor, DefaultHostDomain: "litelogin.test", CustomHostTarget: "d1.cloudfront.test",
 		Caller: func(r *http.Request) (string, bool) {
 			c := r.Header.Get("X-Test-Caller")
 			return c, c != ""
@@ -288,6 +309,27 @@ func TestCreateOrgDefaultHost(t *testing.T) {
 	if h := r.store.hosts["y.litelogin.test"]; h.RegistrationEnabled || h.Theme["brand_name"] != "Y" || h.SessionTTL != 604800 {
 		t.Errorf("host_settings not applied: %+v", h)
 	}
+}
+
+// A custom host shows where its CNAME must point; without a routing
+// endpoint, custom hosts aren't supported.
+func TestAddCustomHost(t *testing.T) {
+	r := newRig(t)
+	org := r.call("POST", "/v1/orgs", `{"name":"Acme"}`)
+	wantCode(t, org, 201, "")
+	path := "/v1/orgs/" + org.body["id"].(string) + "/hosts"
+	res := r.call("POST", path, `{"host":"Login.Acme.com"}`)
+	wantCode(t, res, 201, "")
+	if res.body["host"] != "login.acme.com" || res.body["status"] != "pending" || res.body["cname_target"] != "d1.cloudfront.test" {
+		t.Fatalf("host = %s", res.raw)
+	}
+	wantCode(t, r.call("POST", path, `{"host":"other.litelogin.test"}`), 400, "")
+	if def := r.call("GET", "/v1/hosts/acme.litelogin.test", ""); def.body["cname_target"] != nil {
+		t.Errorf("default host has a CNAME target: %s", def.raw)
+	}
+
+	r.srv.CustomHostTarget = ""
+	wantCode(t, r.call("POST", path, `{"host":"login2.acme.com"}`), 501, "not_implemented")
 }
 
 const clientBody = `{"name":"Acme Portal","host":"acme.litelogin.test","redirect_uris":["https://app.acme.com/callback"]}`

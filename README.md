@@ -97,6 +97,17 @@ dist/litelogin client test CLIENT --logout   # also RP-initiated logout (registe
 
 LiteLogin accepts a loopback redirect URI on any port, so the command listens on a free one.
 
+To serve an org on its own domain, add a custom host and create the CNAME record it shows (`cname_target`). LiteLogin requests the certificate and verifies the host once the certificate is issued and the CNAME resolves; `host status` shows what it's waiting for. Then move clients onto it:
+
+```sh
+dist/litelogin host add --org ORG login.acme.com
+dist/litelogin host status login.acme.com     # pending until verified; see work_last_error
+dist/litelogin host add-client login.acme.com CLIENT
+dist/litelogin host remove login.acme.com     # once it has no clients
+```
+
+A client on the new host gets a new issuer (`https://login.acme.com`), so its app must be reconfigured, and apps that key users on `iss` + `sub` see existing users as new.
+
 `init` prints an idempotency key; running it again with `--idempotency-key` returns the same org, pool and client instead of creating new ones. The client secret is shown only once; `litelogin client rotate-secret CLIENT` issues a new one. Every command takes `-o json`. Run `litelogin help` for the full list.
 
 ## Signing keys

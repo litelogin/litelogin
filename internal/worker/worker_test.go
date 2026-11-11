@@ -18,6 +18,12 @@ type fakeStore struct {
 	calls     []string // "user cursor"
 	remaining map[string]int
 	fail      map[string]bool
+
+	hosts     map[string]string // host: status
+	pools     map[string]string // pool: status
+	users     map[string]int    // pool: users left
+	hostInUse bool
+	attempts  []string
 }
 
 func (f *fakeStore) CleanupUserCredentials(_ context.Context, userID, cursor string, limit int) (int, string, error) {

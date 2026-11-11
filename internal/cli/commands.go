@@ -523,8 +523,12 @@ func (a *App) hostCommand() *cobra.Command {
 	var addSettings hostSettingsFlags
 	add := &cobra.Command{
 		Use: "add HOST", Short: "Add a custom login host to an org", Args: cobra.ExactArgs(1),
-		Long: `Add a custom login host to an org. It's verified in the background; then
-add clients to it with "litelogin host add-client".`,
+		Long: `Add a custom login host to an org. It starts pending: create a CNAME record
+from the host to its cname_target (shown here and by "litelogin host get").
+LiteLogin then requests its certificate, and verifies the host once the
+certificate is issued and the CNAME resolves, which usually takes a few
+minutes; until then, work_last_error says what it's waiting for. Then add
+clients to it with "litelogin host add-client".`,
 		Example: "  litelogin host add --org ORG login.acme.com",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			body := addSettings.body(cmd)

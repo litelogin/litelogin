@@ -47,6 +47,24 @@ variable "table_kms_key_arn" {
   type        = string
 }
 
+variable "custom_hosts" {
+  description = "The multi-tenant distribution and connection group serving custom hosts (from the edge module). Null: no custom hosts."
+  type = object({
+    distribution_id      = string
+    distribution_arn     = string
+    connection_group_id  = string
+    connection_group_arn = string
+    routing_endpoint     = string
+  })
+  default = null
+}
+
+variable "reconcile_schedule" {
+  description = "How often the reconciler retries stalled custom host and pool deletion work."
+  type        = string
+  default     = "rate(5 minutes)"
+}
+
 variable "alarm_actions" {
   description = "ARNs (e.g. SNS topics) notified when a dead-letter queue receives a message."
   type        = list(string)
@@ -63,6 +81,8 @@ locals {
 }
 
 data "aws_region" "current" {}
+
+data "aws_caller_identity" "current" {}
 
 # ---- Queues ----
 
@@ -113,6 +133,16 @@ data "aws_iam_policy_document" "worker" {
     resources = [var.session_table_arn]
   }
 
+  # Custom hosts and pool deletion: hosts, pools and their org index items,
+  # outstanding work (GSI2), a pool's users (GSI1) and their memberships.
+  statement {
+    actions = [
+      "dynamodb:Query", "dynamodb:BatchGetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem",
+      "dynamodb:ConditionCheckItem",
+    ]
+    resources = [var.config_table_arn, "${var.config_table_arn}/index/*"]
+  }
+
   # Reading the Config table stream (by the event source mapping, with the
   # function's role).
   statement {
@@ -149,6 +179,34 @@ data "aws_iam_policy_document" "worker" {
     actions   = ["sqs:SendMessage"]
     resources = [aws_sqs_queue.stream_dlq.arn]
   }
+
+  # Custom hosts: tenants of the multi-tenant distribution, with
+  # CloudFront-managed certificates (which CloudFront requests from ACM
+  # with the caller's permissions).
+  dynamic "statement" {
+    for_each = var.custom_hosts == null ? [] : [var.custom_hosts]
+    content {
+      actions = [
+        "cloudfront:CreateDistributionTenant", "cloudfront:UpdateDistributionTenant",
+        "cloudfront:DeleteDistributionTenant",
+      ]
+      resources = [
+        statement.value.distribution_arn, statement.value.connection_group_arn,
+        "arn:aws:cloudfront::${data.aws_caller_identity.current.account_id}:distribution-tenant/*",
+      ]
+    }
+  }
+  dynamic "statement" {
+    for_each = var.custom_hosts == null ? [] : [var.custom_hosts]
+    content {
+      actions = [
+        "cloudfront:GetDistributionTenant", "cloudfront:GetDistributionTenantByDomain",
+        "cloudfront:GetManagedCertificateDetails", "cloudfront:GetConnectionGroup",
+        "acm:RequestCertificate", "acm:DescribeCertificate", "acm:DeleteCertificate",
+      ]
+      resources = ["*"]
+    }
+  }
 }
 
 module "worker" {
@@ -163,14 +221,18 @@ module "worker" {
     LITELOGIN_CONFIG_TABLE           = var.config_table_name
     LITELOGIN_SESSION_TABLE          = var.session_table_name
     LITELOGIN_CONTINUATION_QUEUE_URL = aws_sqs_queue.continuation.url
+    LITELOGIN_TENANT_DISTRIBUTION_ID = try(var.custom_hosts.distribution_id, "")
+    LITELOGIN_CONNECTION_GROUP_ID    = try(var.custom_hosts.connection_group_id, "")
+    LITELOGIN_ROUTING_ENDPOINT       = try(var.custom_hosts.routing_endpoint, "")
   }
 }
 
 # ---- Triggers ----
 
-# Only the changes that start a job invoke the Worker: for now, a user
-# item modified (the Worker checks whether auth_version increased) or
-# removed.
+# Only the changes that might start a job invoke the Worker (it checks
+# each record further): a user modified (auth_version increased?) or
+# removed; a login host created or modified (pending, removing?); a pool
+# modified (deleting?).
 resource "aws_lambda_event_source_mapping" "stream" {
   function_name     = module.worker.function_arn
   event_source_arn  = var.config_stream_arn
@@ -184,16 +246,23 @@ resource "aws_lambda_event_source_mapping" "stream" {
   function_response_types            = ["ReportBatchItemFailures"]
 
   filter_criteria {
-    filter {
-      pattern = jsonencode({
-        eventName = ["MODIFY", "REMOVE"]
-        dynamodb = {
-          Keys = {
-            PK = { S = [{ prefix = "USER#" }] }
-            SK = { S = ["DETAILS"] }
+    dynamic "filter" {
+      for_each = {
+        "USER#"       = ["MODIFY", "REMOVE"]
+        "LOGIN_HOST#" = ["INSERT", "MODIFY"]
+        "POOL#"       = ["MODIFY"]
+      }
+      content {
+        pattern = jsonencode({
+          eventName = filter.value
+          dynamodb = {
+            Keys = {
+              PK = { S = [{ prefix = filter.key }] }
+              SK = { S = ["DETAILS"] }
+            }
           }
-        }
-      })
+        })
+      }
     }
   }
 
@@ -211,6 +280,52 @@ resource "aws_lambda_event_source_mapping" "continuation" {
   event_source_arn        = aws_sqs_queue.continuation.arn
   batch_size              = 10
   function_response_types = ["ReportBatchItemFailures"]
+}
+
+# The reconciler: retries custom host and pool deletion work that hasn't
+# progressed (a host waiting for DNS, a tenant being disabled).
+resource "aws_scheduler_schedule" "reconcile" {
+  name                = "${var.name_prefix}-reconcile"
+  schedule_expression = var.reconcile_schedule
+  flexible_time_window {
+    mode = "OFF"
+  }
+  target {
+    arn      = module.worker.function_arn
+    role_arn = aws_iam_role.scheduler.arn
+    input    = jsonencode({ type = "reconcile" })
+    retry_policy {
+      maximum_retry_attempts = 0 # the next run retries
+    }
+  }
+}
+
+data "aws_iam_policy_document" "scheduler_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["scheduler.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_iam_role" "scheduler" {
+  name               = "${var.name_prefix}-reconcile-scheduler"
+  assume_role_policy = data.aws_iam_policy_document.scheduler_assume.json
+}
+
+resource "aws_iam_role_policy" "scheduler" {
+  role = aws_iam_role.scheduler.id
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = "lambda:InvokeFunction", Resource = module.worker.function_arn }]
+  })
 }
 
 # ---- Alarms ----

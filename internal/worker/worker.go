@@ -3,10 +3,19 @@
 // a job too large for one invocation carries on through the SQS
 // continuation queue.
 //
-// The job so far is revocation cleanup: when a user's auth_version
-// increases, or the user is deleted, it deletes the sessions and refresh
-// families the change revoked. They already fail validation, so the
-// cleanup only saves storage and keeps the user's session list short.
+// The jobs:
+//   - revocation cleanup: when a user's auth_version increases, or the user
+//     is deleted, it deletes the sessions and refresh families the change
+//     revoked. They already fail validation, so the cleanup only saves
+//     storage and keeps the user's session list short.
+//   - custom domains: a custom login host added (pending) gets a CloudFront
+//     tenant and certificate, and is verified once they're ready; one being
+//     removed has its tenant deleted, then its items.
+//   - pool deletion: a pool being deleted has its users deleted, then itself.
+//
+// A scheduled reconciler retries custom domain and pool deletion work that
+// hasn't progressed: verification waits on the customer's DNS, and removal
+// on CloudFront disabling the tenant.
 package worker
 
 import (
@@ -20,11 +29,30 @@ import (
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
+
+	"github.com/litelogin/litelogin/internal/domains"
+	"github.com/litelogin/litelogin/internal/store"
 )
 
 // Store is the part of *store.Store the Worker uses.
 type Store interface {
 	CleanupUserCredentials(ctx context.Context, userID, cursor string, limit int) (int, string, error)
+
+	GetLoginHost(ctx context.Context, host string) (*store.LoginHost, error)
+	VerifyHost(ctx context.Context, host string) error
+	DeleteRemovedHost(ctx context.Context, host string) error
+
+	DeletePoolUsers(ctx context.Context, poolID string, limit int32) (int, error)
+	DeletePool(ctx context.Context, poolID string) error
+
+	ListStaleWork(ctx context.Context, olderThan time.Duration) ([]store.WorkItem, error)
+	RecordWorkAttempt(ctx context.Context, workType, id, lastError string) error
+}
+
+// Domains provisions custom hosts on CloudFront (*domains.CloudFront).
+type Domains interface {
+	Ensure(ctx context.Context, host string) (*domains.Status, error)
+	Remove(ctx context.Context, host string) (bool, error)
 }
 
 // Queue sends a message to the continuation queue.
@@ -35,12 +63,18 @@ type Queue interface {
 // Job types.
 const (
 	JobRevocationCleanup = "revocation_cleanup"
+	JobCustomDomain      = store.WorkCustomDomain
+	JobPoolDeletion      = store.WorkPoolDeletion
+	// JobReconcile retries stalled work; the schedule sends it.
+	JobReconcile = "reconcile"
 )
 
 // Job is a unit of background work, as carried on the continuation queue.
 type Job struct {
 	Type   string `json:"type"`
 	UserID string `json:"user_id,omitempty"`
+	Host   string `json:"host,omitempty"`
+	PoolID string `json:"pool_id,omitempty"`
 	// Cursor is where a job that ran out of time carries on.
 	Cursor string `json:"cursor,omitempty"`
 }
@@ -49,6 +83,9 @@ type Job struct {
 const (
 	DefaultBatchSize  = 500
 	DefaultMaxBatches = 20
+	// DefaultReconcileAfter is how long work goes without an attempt
+	// before the reconciler retries it.
+	DefaultReconcileAfter = 4 * time.Minute
 	// timeMargin is how much of the invocation's time is kept back for
 	// handing a job on to the continuation queue.
 	timeMargin = 10 * time.Second
@@ -59,6 +96,15 @@ type Worker struct {
 	Store Store
 	Queue Queue
 	Log   *slog.Logger
+	// Domains provisions custom hosts; nil means custom hosts aren't
+	// supported, and their work fails.
+	Domains Domains
+	// RoutingEndpoint is where custom hosts' CNAMEs point, for the
+	// instructions recorded while a host waits for DNS.
+	RoutingEndpoint string
+	// ReconcileAfter is how long work goes without an attempt before the
+	// reconciler retries it. Zero means DefaultReconcileAfter.
+	ReconcileAfter time.Duration
 
 	// BatchSize is how many items one cleanup batch deletes, and
 	// MaxBatches how many batches a job runs before it's handed on to the
@@ -87,7 +133,12 @@ func (w *Worker) Handle(ctx context.Context, raw json.RawMessage) (any, error) {
 		return nil, fmt.Errorf("worker: unrecognized event: %w", err)
 	}
 	if len(probe.Records) == 0 {
-		return nil, nil
+		// The schedule sends a job directly.
+		var job Job
+		if err := json.Unmarshal(raw, &job); err != nil || job.Type == "" {
+			return nil, errors.New("worker: unrecognized event")
+		}
+		return nil, w.Run(ctx, &job)
 	}
 	switch src := probe.Records[0].EventSource; src {
 	case "aws:dynamodb":
@@ -119,7 +170,7 @@ func (w *Worker) HandleStream(ctx context.Context, ev events.DynamoDBEvent) even
 		}
 		if err := w.Run(ctx, job); err != nil {
 			w.log().ErrorContext(ctx, "stream job failed", "job", job.Type, "user_id", job.UserID,
-				"sequence", rec.Change.SequenceNumber, "error", err)
+				"host", job.Host, "pool_id", job.PoolID, "sequence", rec.Change.SequenceNumber, "error", err)
 			for _, r := range ev.Records[i:] {
 				resp.BatchItemFailures = append(resp.BatchItemFailures, events.DynamoDBBatchItemFailure{
 					ItemIdentifier: r.Change.SequenceNumber,
@@ -144,19 +195,40 @@ func (w *Worker) HandleQueue(ctx context.Context, ev events.SQSEvent) events.SQS
 		}
 		if err != nil {
 			w.log().ErrorContext(ctx, "queued job failed", "message_id", msg.MessageId, "job", job.Type,
-				"user_id", job.UserID, "error", err)
+				"user_id", job.UserID, "host", job.Host, "pool_id", job.PoolID, "error", err)
 			resp.BatchItemFailures = append(resp.BatchItemFailures, events.SQSBatchItemFailure{ItemIdentifier: msg.MessageId})
 		}
 	}
 	return resp
 }
 
-// JobFromStream returns the job a Config table change starts, or nil.
-// A user item starts revocation cleanup when its auth_version increases
-// or it's deleted; anything else starts nothing.
+// JobFromStream returns the job a Config table change starts, or nil:
+//   - a user whose auth_version increased, or who was deleted: revocation
+//     cleanup
+//   - a login host created pending, or set to removing: custom domain work
+//   - a pool set to deleting: pool deletion
 func JobFromStream(rec events.DynamoDBEventRecord) *Job {
 	pk, sk := stringAttr(rec.Change.Keys, "PK"), stringAttr(rec.Change.Keys, "SK")
-	if !strings.HasPrefix(pk, "USER#") || sk != "DETAILS" {
+	if sk != "DETAILS" {
+		return nil
+	}
+	became := func(status string) bool {
+		return stringAttr(rec.Change.NewImage, "status") == status && stringAttr(rec.Change.OldImage, "status") != status
+	}
+	switch {
+	case strings.HasPrefix(pk, "LOGIN_HOST#"):
+		host := &Job{Type: JobCustomDomain, Host: strings.TrimPrefix(pk, "LOGIN_HOST#")}
+		if (rec.EventName == string(events.DynamoDBOperationTypeInsert) && became(store.HostPending)) ||
+			(rec.EventName == string(events.DynamoDBOperationTypeModify) && became(store.HostRemoving)) {
+			return host
+		}
+		return nil
+	case strings.HasPrefix(pk, "POOL#"):
+		if rec.EventName == string(events.DynamoDBOperationTypeModify) && became(store.PoolDeleting) {
+			return &Job{Type: JobPoolDeletion, PoolID: strings.TrimPrefix(pk, "POOL#")}
+		}
+		return nil
+	case !strings.HasPrefix(pk, "USER#"):
 		return nil
 	}
 	job := &Job{Type: JobRevocationCleanup, UserID: strings.TrimPrefix(pk, "USER#")}
@@ -195,22 +267,33 @@ func (w *Worker) Run(ctx context.Context, job *Job) error {
 	switch job.Type {
 	case JobRevocationCleanup:
 		return w.cleanup(ctx, job)
+	case JobCustomDomain:
+		return w.customDomain(ctx, job.Host)
+	case JobPoolDeletion:
+		return w.deletePool(ctx, job.PoolID)
+	case JobReconcile:
+		return w.reconcile(ctx)
 	default:
 		return fmt.Errorf("worker: unknown job type %q", job.Type)
 	}
 }
 
-func (w *Worker) cleanup(ctx context.Context, job *Job) error {
-	if job.UserID == "" {
-		return errors.New("worker: revocation cleanup without a user")
-	}
-	size, maxBatches := w.BatchSize, w.MaxBatches
+func (w *Worker) limits() (size, maxBatches int) {
+	size, maxBatches = w.BatchSize, w.MaxBatches
 	if size <= 0 {
 		size = DefaultBatchSize
 	}
 	if maxBatches <= 0 {
 		maxBatches = DefaultMaxBatches
 	}
+	return size, maxBatches
+}
+
+func (w *Worker) cleanup(ctx context.Context, job *Job) error {
+	if job.UserID == "" {
+		return errors.New("worker: revocation cleanup without a user")
+	}
+	size, maxBatches := w.limits()
 	cursor, deleted := job.Cursor, 0
 	for range maxBatches {
 		if !timeLeft(ctx) {
