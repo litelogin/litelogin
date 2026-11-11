@@ -193,7 +193,7 @@ func TestOnboarding(t *testing.T) {
 	}
 	d.err = nil
 
-	d.status["login.acme.com"] = &domains.Status{Certificate: "issued", DNS: true}
+	d.status["login.acme.com"] = &domains.Status{Certificate: "issued", DNS: true, Active: true}
 	if err := w.Run(ctx, job); err != nil || st.hosts["login.acme.com"] != store.HostVerified {
 		t.Fatalf("err %v, status %q", err, st.hosts["login.acme.com"])
 	}
@@ -287,7 +287,7 @@ func TestReconcile(t *testing.T) {
 	st.hosts["dns.acme.com"] = store.HostPending
 	st.hosts["old.acme.com"] = store.HostRemoving
 	st.pools["p1"], st.users["p1"] = store.PoolDeleting, 5
-	d.status["ready.acme.com"] = &domains.Status{Certificate: "issued", DNS: true}
+	d.status["ready.acme.com"] = &domains.Status{Certificate: "issued", DNS: true, Active: true}
 	d.status["dns.acme.com"] = &domains.Status{Certificate: "pending-validation"}
 	d.removeCalls = 1
 

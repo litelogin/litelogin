@@ -23,6 +23,8 @@ import (
 
 // API is the part of the CloudFront client used here.
 type API interface {
+	GetDistributionTenant(ctx context.Context, in *cloudfront.GetDistributionTenantInput,
+		opts ...func(*cloudfront.Options)) (*cloudfront.GetDistributionTenantOutput, error)
 	GetDistributionTenantByDomain(ctx context.Context, in *cloudfront.GetDistributionTenantByDomainInput,
 		opts ...func(*cloudfront.Options)) (*cloudfront.GetDistributionTenantByDomainOutput, error)
 	CreateDistributionTenant(ctx context.Context, in *cloudfront.CreateDistributionTenantInput,
@@ -62,13 +64,16 @@ type Status struct {
 	Certificate string
 	// DNS reports whether the host resolves to the routing endpoint.
 	DNS bool
+	// Active reports whether CloudFront serves the host: its domain on the
+	// tenant is active, which takes the issued certificate attached.
+	Active bool
 }
 
 // Ready reports whether the host can be served: its certificate is issued
-// and its DNS points to LiteLogin. A certificate alone doesn't prove that
-// traffic routes to LiteLogin.
+// and in use, and its DNS points to LiteLogin. A certificate alone doesn't
+// prove that traffic routes to LiteLogin.
 func (s *Status) Ready() bool {
-	return s.Certificate == string(types.ManagedCertificateStatusIssued) && s.DNS
+	return s.Certificate == string(types.ManagedCertificateStatusIssued) && s.Active && s.DNS
 }
 
 // Waiting describes what the host is waiting for, for operators.
@@ -79,8 +84,15 @@ func (s *Status) Waiting(host, target string) string {
 	}
 	switch s.Certificate {
 	case string(types.ManagedCertificateStatusIssued):
+		if !s.Active {
+			parts = append(parts, "certificate: issued; CloudFront is putting it in use")
+		}
 	case string(types.ManagedCertificateStatusPendingValidation), "":
-		parts = append(parts, "certificate: pending validation (it's issued once the CNAME is in place)")
+		if s.DNS {
+			parts = append(parts, "certificate: pending validation (usually a few minutes)")
+		} else {
+			parts = append(parts, "certificate: pending validation (it's issued once the CNAME is in place)")
+		}
 	default:
 		parts = append(parts, "certificate: "+s.Certificate+" (remove the host and add it again to request a new one)")
 	}
@@ -91,29 +103,51 @@ func (s *Status) Waiting(host, target string) string {
 // another distribution: it's in use elsewhere in this AWS account.
 var ErrOtherDistribution = errors.New("domains: the host is a tenant of another distribution")
 
+// tenant returns the host's tenant and its ETag, or nil if it has none.
+// Tenants are named after their host, so it looks the tenant up by name:
+// looking it up by domain finds it only once the domain is active, after
+// its certificate has been issued. A tenant by another name that has the
+// domain (created outside LiteLogin) is found by domain.
 func (c *CloudFront) tenant(ctx context.Context, host string) (*types.DistributionTenant, string, error) {
-	out, err := c.API.GetDistributionTenantByDomain(ctx, &cloudfront.GetDistributionTenantByDomainInput{Domain: aws.String(host)})
 	var nf *types.EntityNotFound
-	if errors.As(err, &nf) {
-		return nil, "", nil
+	var t *types.DistributionTenant
+	var etag string
+	byName, err := c.API.GetDistributionTenant(ctx, &cloudfront.GetDistributionTenantInput{Identifier: aws.String(host)})
+	switch {
+	case err == nil:
+		t, etag = byName.DistributionTenant, aws.ToString(byName.ETag)
+	case !errors.As(err, &nf):
+		return nil, "", fmt.Errorf("domains: get tenant %s: %w", host, err)
+	default:
+		byDomain, err := c.API.GetDistributionTenantByDomain(ctx, &cloudfront.GetDistributionTenantByDomainInput{Domain: aws.String(host)})
+		if errors.As(err, &nf) {
+			return nil, "", nil
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("domains: get tenant for %s: %w", host, err)
+		}
+		t, etag = byDomain.DistributionTenant, aws.ToString(byDomain.ETag)
 	}
-	if err != nil {
-		return nil, "", fmt.Errorf("domains: get tenant for %s: %w", host, err)
-	}
-	t := out.DistributionTenant
 	if aws.ToString(t.DistributionId) != c.DistributionID {
 		return nil, "", ErrOtherDistribution
 	}
-	return t, aws.ToString(out.ETag), nil
+	return t, etag, nil
 }
 
 // Ensure creates the host's tenant, with a managed certificate request, if
 // it doesn't exist yet, and returns the host's status. It's safe to call
 // again: an existing tenant is reused.
+//
+// CloudFront creates a tenant whose certificate it validates only once the
+// domain points to CloudFront, so until the host's CNAME resolves, Ensure
+// creates nothing and reports that it's waiting for DNS.
 func (c *CloudFront) Ensure(ctx context.Context, host string) (*Status, error) {
-	t, _, err := c.tenant(ctx, host)
+	t, etag, err := c.tenant(ctx, host)
 	if err != nil {
 		return nil, err
+	}
+	if t == nil && !c.pointsHere(ctx, host) {
+		return &Status{}, nil
 	}
 	if t == nil {
 		out, err := c.API.CreateDistributionTenant(ctx, &cloudfront.CreateDistributionTenantInput{
@@ -129,15 +163,16 @@ func (c *CloudFront) Ensure(ctx context.Context, host string) (*Status, error) {
 			},
 		})
 		var exists *types.EntityAlreadyExists
-		if errors.As(err, &exists) {
+		var cname *types.CNAMEAlreadyExists
+		if errors.As(err, &exists) || errors.As(err, &cname) {
 			// Created concurrently: look it up again.
-			if t, _, err = c.tenant(ctx, host); err != nil {
+			if t, etag, err = c.tenant(ctx, host); err != nil {
 				return nil, err
 			}
 		} else if err != nil {
 			return nil, fmt.Errorf("domains: create tenant for %s: %w", host, err)
 		} else {
-			t = out.DistributionTenant
+			t, etag = out.DistributionTenant, aws.ToString(out.ETag)
 		}
 		if t == nil {
 			return nil, fmt.Errorf("domains: tenant for %s not found after creating it", host)
@@ -155,7 +190,47 @@ func (c *CloudFront) Ensure(ctx context.Context, host string) (*Status, error) {
 		st.Certificate = string(cert.ManagedCertificateDetails.CertificateStatus)
 	}
 	st.DNS = c.pointsHere(ctx, host)
+	st.Active = slices.ContainsFunc(t.Domains, func(d types.DomainResult) bool {
+		return strings.EqualFold(aws.ToString(d.Domain), host) && d.Status == types.DomainStatusActive
+	})
+	if st.Certificate == string(types.ManagedCertificateStatusIssued) {
+		if err := c.useCertificate(ctx, t, etag, aws.ToString(cert.ManagedCertificateDetails.CertificateArn)); err != nil {
+			return nil, err
+		}
+	}
 	return st, nil
+}
+
+// useCertificate attaches an issued managed certificate to the tenant, if
+// it isn't already: CloudFront serves the domain only once it is.
+func (c *CloudFront) useCertificate(ctx context.Context, t *types.DistributionTenant, etag, arn string) error {
+	if arn == "" {
+		return errors.New("domains: issued certificate without an ARN")
+	}
+	cust := types.Customizations{}
+	if t.Customizations != nil {
+		cust = *t.Customizations
+	}
+	if cust.Certificate != nil && aws.ToString(cust.Certificate.Arn) == arn {
+		return nil
+	}
+	cust.Certificate = &types.Certificate{Arn: aws.String(arn)}
+	_, err := c.API.UpdateDistributionTenant(ctx, &cloudfront.UpdateDistributionTenantInput{
+		Id: t.Id, IfMatch: aws.String(etag), DistributionId: t.DistributionId, ConnectionGroupId: t.ConnectionGroupId,
+		Domains: domainItems(t), Enabled: t.Enabled, Customizations: &cust,
+	})
+	if err != nil {
+		return fmt.Errorf("domains: attach certificate to tenant %s: %w", aws.ToString(t.Name), err)
+	}
+	return nil
+}
+
+func domainItems(t *types.DistributionTenant) []types.DomainItem {
+	domains := make([]types.DomainItem, 0, len(t.Domains))
+	for _, d := range t.Domains {
+		domains = append(domains, types.DomainItem{Domain: d.Domain})
+	}
+	return domains
 }
 
 // pointsHere reports whether host resolves to the routing endpoint: by
@@ -199,13 +274,9 @@ func (c *CloudFront) Remove(ctx context.Context, host string) (bool, error) {
 		return t == nil && err == nil, err
 	}
 	if aws.ToBool(t.Enabled) {
-		domains := make([]types.DomainItem, 0, len(t.Domains))
-		for _, d := range t.Domains {
-			domains = append(domains, types.DomainItem{Domain: d.Domain})
-		}
 		_, err := c.API.UpdateDistributionTenant(ctx, &cloudfront.UpdateDistributionTenantInput{
-			Id: t.Id, IfMatch: aws.String(etag), Enabled: aws.Bool(false),
-			DistributionId: t.DistributionId, ConnectionGroupId: t.ConnectionGroupId, Domains: domains,
+			Id: t.Id, IfMatch: aws.String(etag), Enabled: aws.Bool(false), Customizations: t.Customizations,
+			DistributionId: t.DistributionId, ConnectionGroupId: t.ConnectionGroupId, Domains: domainItems(t),
 		})
 		if err != nil {
 			return false, fmt.Errorf("domains: disable tenant for %s: %w", host, err)
