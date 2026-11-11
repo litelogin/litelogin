@@ -388,6 +388,18 @@ resource "aws_wafv2_web_acl" "this" {
         managed_rule_group_statement {
           vendor_name = "AWS"
           name        = rule.key
+
+          # Counted here, blocked by the next rule outside sign-in and
+          # logout (see "loopback-redirects").
+          dynamic "rule_action_override" {
+            for_each = rule.key == "AWSManagedRulesCommonRuleSet" ? ["EC2MetaDataSSRF_QUERYARGUMENTS"] : []
+            content {
+              name = rule_action_override.value
+              action_to_use {
+                count {}
+              }
+            }
+          }
         }
       }
       visibility_config {
@@ -395,6 +407,58 @@ resource "aws_wafv2_web_acl" "this" {
         metric_name                = "${var.name_prefix}-${rule.key}"
         sampled_requests_enabled   = true
       }
+    }
+  }
+
+  # EC2MetaDataSSRF_QUERYARGUMENTS blocks loopback addresses in the query
+  # string, which a native app's or CLI's loopback redirect_uri always
+  # has (http://127.0.0.1:{port}/callback, RFC 8252 section 7.3). LiteLogin
+  # never fetches a redirect URI, only redirects the browser to one, so
+  # the rule is relaxed for /authorize and /logout and blocks elsewhere.
+  rule {
+    name     = "loopback-redirects"
+    priority = 13
+    action {
+      block {}
+    }
+    statement {
+      and_statement {
+        statement {
+          label_match_statement {
+            scope = "LABEL"
+            key   = "awswaf:managed:aws:core-rule-set:EC2MetaDataSSRF_QueryArguments"
+          }
+        }
+        statement {
+          not_statement {
+            statement {
+              or_statement {
+                dynamic "statement" {
+                  for_each = ["/authorize", "/logout"]
+                  content {
+                    byte_match_statement {
+                      search_string         = statement.value
+                      positional_constraint = "EXACTLY"
+                      field_to_match {
+                        uri_path {}
+                      }
+                      text_transformation {
+                        priority = 0
+                        type     = "NONE"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.name_prefix}-loopback-redirects"
+      sampled_requests_enabled   = true
     }
   }
 
