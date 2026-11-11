@@ -11,7 +11,7 @@
   --primary:{{.Theme.Primary}};
   --text:#fff;--muted:rgba(255,255,255,.72);--link:#fff;
   --card:rgba(255,255,255,.10);--card-line:rgba(255,255,255,.22);--card-shadow:0 24px 60px rgba(8,10,40,.35);
-  --field:rgba(255,255,255,.90);--field-text:#1d1f3a;--field-line:transparent;
+  --field:rgb(255 255 255 / 14%);--field-text:#dedfe8;--field-line:transparent;
   --err-bg:rgba(220,38,38,.22);--err:#fff;--ok-bg:rgba(34,197,94,.22);--ok:#fff;
   --avatar:rgba(255,255,255,.22);--avatar-fg:rgba(255,255,255,.92);
 }
@@ -24,9 +24,9 @@ body{
   background-color:#1a2366;
   background-image:
     radial-gradient(ellipse 70% 60% at 100% 0%,#0a0f4a 0%,transparent 70%),
-    radial-gradient(ellipse 60% 55% at 0% 38%,#1b9aa5 0%,transparent 70%),
-    radial-gradient(ellipse 65% 50% at 0% 100%,#e0728f 0%,transparent 70%),
-    radial-gradient(ellipse 55% 45% at 100% 100%,#f7c46c 0%,transparent 70%),
+    radial-gradient(ellipse 60% 55% at 0% 38%,#1b9aa5 0%,transparent 90%),
+    radial-gradient(ellipse 65% 50% at 0% 100%,#e0728f 0%,transparent 90%),
+    radial-gradient(ellipse 55% 45% at 100% 100%,#8f6f39 0%,transparent 90%),
     radial-gradient(ellipse 60% 50% at 50% 75%,#5a4b8a 0%,transparent 75%),
     linear-gradient(160deg,#16206a 0%,#232b6e 55%,#6b4d7d 100%);
   background-attachment:fixed;
@@ -42,7 +42,7 @@ body{
 body{background:{{.Theme.Background}}}
 {{end}}
 main{
-  width:100%;max-width:400px;padding:40px 32px 32px;border-radius:20px;
+  width:100%;max-width:400px;padding:40px 32px 32px;border-radius:.5em;
   background:var(--card);border:1px solid var(--card-line);box-shadow:var(--card-shadow);
   -webkit-backdrop-filter:blur(24px) saturate(140%);backdrop-filter:blur(24px) saturate(140%);
 }
@@ -54,13 +54,13 @@ h1{font-size:22px;font-weight:600;text-align:center;margin:0 0 24px}
 label{display:block;font-size:13px;font-weight:500;color:var(--muted);margin:16px 0 6px}
 input[type=email],input[type=password]{
   width:100%;padding:12px 14px;font:inherit;color:var(--field-text);
-  background:var(--field);border:1px solid var(--field-line);border-radius:10px;
+  background:var(--field);border:1px solid var(--field-line);border-radius:.25em;
   transition:box-shadow .15s ease;
 }
 input:focus{outline:none;box-shadow:0 0 0 3px rgba(255,255,255,.45),0 0 0 5px var(--primary)}
 button{
   width:100%;margin-top:28px;padding:12px;font:inherit;font-weight:600;letter-spacing:.02em;color:#fff;
-  background:var(--primary);border:0;border-radius:10px;cursor:pointer;
+  background:var(--primary);border:0;border-radius:.25em;cursor:pointer;
   box-shadow:0 8px 20px rgba(10,12,40,.25);transition:filter .15s ease,transform .15s ease;
 }
 button:hover{filter:brightness(1.15)}
