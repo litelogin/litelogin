@@ -333,19 +333,26 @@ func TestCSRF(t *testing.T) {
 	f := creds("x@example.com", "password1")
 	f.Set("csrf", crypto.NewToken())
 	expect(t, b.do(http.MethodPost, "/login", f), 403, "")
-	// A cross-site Origin, even with a valid token.
+	// A cross-site or opaque Origin is refused, even with a valid token;
+	// the login host's own origin, as a browser sends it, is accepted.
 	p := b.get("/login")
 	f.Set("csrf", csrfRE.FindStringSubmatch(p.body)[1])
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, e.srv.URL+"/login", strings.NewReader(f.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Origin", "https://evil.example")
-	resp, err := b.c.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("cross-origin POST: %d, want 403", resp.StatusCode)
+	for origin, want := range map[string]int{
+		"https://evil.example": http.StatusForbidden,
+		"null":                 http.StatusForbidden,
+		"https://" + loginHost: http.StatusUnauthorized, // past the CSRF check: wrong password
+	} {
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPost, e.srv.URL+"/login", strings.NewReader(f.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", origin)
+		resp, err := b.c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("POST with Origin %s: %d, want %d", origin, resp.StatusCode, want)
+		}
 	}
 }
 

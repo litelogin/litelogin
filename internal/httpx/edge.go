@@ -87,14 +87,18 @@ func WithLoginHost(r *http.Request, host string) *http.Request {
 }
 
 // SecurityHeaders adds the headers every response gets: HSTS, no MIME
-// sniffing, no referrer leaks (URLs can carry one-time tokens), and no
-// framing.
+// sniffing, no referrer sent to other sites (URLs can carry one-time
+// tokens), and no framing.
+//
+// The referrer policy is same-origin, not no-referrer: under no-referrer,
+// browsers send "Origin: null" on every form POST, even to the same site,
+// and the login pages' CSRF check rejects that.
 func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Referrer-Policy", "same-origin")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Cross-Origin-Opener-Policy", "same-origin")
 		next.ServeHTTP(w, r)

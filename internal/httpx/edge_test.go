@@ -53,4 +53,8 @@ func TestSecurityHeaders(t *testing.T) {
 			t.Errorf("missing %s", h)
 		}
 	}
+	// no-referrer would make browsers send "Origin: null" on our own forms.
+	if got := rec.Header().Get("Referrer-Policy"); got != "same-origin" {
+		t.Errorf("Referrer-Policy = %q, want same-origin", got)
+	}
 }
