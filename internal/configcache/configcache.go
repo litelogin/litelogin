@@ -1,5 +1,5 @@
-// Package configcache caches configuration items (login hosts, orgs,
-// clients, pools) in the Lambda's memory, per the configuration caching
+// Package configcache caches configuration items (login hosts and their
+// clients, orgs, clients, pools) in the Lambda's memory, per the configuration caching
 // policy in Architecture.md: a change takes effect within the TTL.
 //
 // It is a performance optimization with a bounded delay, not a security
@@ -26,6 +26,8 @@ type Store interface {
 	GetOrg(ctx context.Context, orgID string) (*store.Org, error)
 	GetClient(ctx context.Context, clientID string) (*store.Client, error)
 	GetPool(ctx context.Context, poolID string) (*store.Pool, error)
+	GetHostClient(ctx context.Context, host, clientID string) (*store.HostClient, error)
+	ListHostClients(ctx context.Context, host string) ([]string, error)
 }
 
 // Cache caches the config items in Store.
@@ -38,7 +40,11 @@ type Cache struct {
 	orgs    table[store.Org]
 	clients table[store.Client]
 	pools   table[store.Pool]
+	members table[store.HostClient]
+	lists   table[memberList]
 }
+
+type memberList struct{ ids []string }
 
 // New returns a cache with the given TTL (DefaultTTL if zero).
 func New(s Store, ttl time.Duration) *Cache {
@@ -72,6 +78,30 @@ func (c *Cache) Client(ctx context.Context, id string) (*store.Client, error) {
 // Pool returns a pool.
 func (c *Cache) Pool(ctx context.Context, id string) (*store.Pool, error) {
 	return c.pools.get(c, id, func() (*store.Pool, error) { return c.store.GetPool(ctx, id) })
+}
+
+// HostClient returns a client's membership of a login host, or
+// store.ErrNotFound if the client isn't on it.
+func (c *Cache) HostClient(ctx context.Context, host, clientID string) (*store.HostClient, error) {
+	return c.members.get(c, host+" "+clientID, func() (*store.HostClient, error) {
+		return c.store.GetHostClient(ctx, host, clientID)
+	})
+}
+
+// HostClients returns the IDs of the clients on a login host. The slice is
+// shared: don't change it.
+func (c *Cache) HostClients(ctx context.Context, host string) ([]string, error) {
+	l, err := c.lists.get(c, host, func() (*memberList, error) {
+		ids, err := c.store.ListHostClients(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		return &memberList{ids: ids}, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return l.ids, nil
 }
 
 // maxEntries bounds each table, so requests for many unknown hosts can't

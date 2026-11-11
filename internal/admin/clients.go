@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/store"
@@ -44,8 +43,6 @@ var ttlRules = []struct {
 	{"id_token_ttl", func(c *store.Client) *int64 { return &c.IDTokenTTL }, 900, 60, 86400},
 	{"refresh_token_ttl", func(c *store.Client) *int64 { return &c.RefreshTokenTTL }, 2592000, 300, 31536000},
 	{"refresh_family_ttl", func(c *store.Client) *int64 { return &c.RefreshFamilyTTL }, 7776000, 300, 31536000},
-	{"session_ttl", func(c *store.Client) *int64 { return &c.SessionTTL }, 604800, 300, 31536000},
-	{"session_idle_ttl", func(c *store.Client) *int64 { return &c.SessionIdleTTL }, 86400, 60, 31536000},
 }
 
 const (
@@ -57,35 +54,33 @@ const (
 )
 
 // Client is the API representation of a client. ClientSecret is set only
-// in create and rotate responses; DefaultHost and Issuer only in create.
+// in create and rotate responses; Host and Issuer (the login host it was
+// created on) only in create.
 type Client struct {
-	ID                      string            `json:"id"`
-	OrgID                   string            `json:"org_id"`
-	Name                    string            `json:"name"`
-	Description             string            `json:"description"`
-	Status                  string            `json:"status"`
-	ClientType              string            `json:"client_type"`
-	TokenEndpointAuthMethod string            `json:"token_endpoint_auth_method"`
-	GrantTypes              []string          `json:"grant_types"`
-	RedirectURIs            []string          `json:"redirect_uris"`
-	PostLogoutRedirectURIs  []string          `json:"post_logout_redirect_uris"`
-	AllowedOrigins          []string          `json:"allowed_origins"`
-	AllowedScopes           []string          `json:"allowed_scopes"`
-	UserPoolID              string            `json:"user_pool_id"`
-	RegistrationEnabled     bool              `json:"registration_enabled"`
-	RequirePKCE             bool              `json:"require_pkce"`
-	Theme                   map[string]string `json:"theme"`
-	AccessTokenTTL          int64             `json:"access_token_ttl"`
-	IDTokenTTL              int64             `json:"id_token_ttl"`
-	RefreshTokenTTL         int64             `json:"refresh_token_ttl"`
-	RefreshFamilyTTL        int64             `json:"refresh_family_ttl"`
-	SessionTTL              int64             `json:"session_ttl"`
-	SessionIdleTTL          int64             `json:"session_idle_ttl"`
-	CreatedAt               string            `json:"created_at"`
-	UpdatedAt               string            `json:"updated_at"`
-	Version                 int64             `json:"version"`
+	ID                      string   `json:"id"`
+	OrgID                   string   `json:"org_id"`
+	Name                    string   `json:"name"`
+	Description             string   `json:"description"`
+	Status                  string   `json:"status"`
+	ClientType              string   `json:"client_type"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+	GrantTypes              []string `json:"grant_types"`
+	RedirectURIs            []string `json:"redirect_uris"`
+	PostLogoutRedirectURIs  []string `json:"post_logout_redirect_uris"`
+	AllowedOrigins          []string `json:"allowed_origins"`
+	AllowedScopes           []string `json:"allowed_scopes"`
+	UserPoolID              string   `json:"user_pool_id"`
+	RequirePKCE             bool     `json:"require_pkce"`
+	AccessTokenTTL          int64    `json:"access_token_ttl"`
+	IDTokenTTL              int64    `json:"id_token_ttl"`
+	RefreshTokenTTL         int64    `json:"refresh_token_ttl"`
+	RefreshFamilyTTL        int64    `json:"refresh_family_ttl"`
+	HostCount               int64    `json:"host_count"`
+	CreatedAt               string   `json:"created_at"`
+	UpdatedAt               string   `json:"updated_at"`
+	Version                 int64    `json:"version"`
 
-	DefaultHost  string `json:"default_host,omitempty"`
+	Host         string `json:"host,omitempty"`
 	Issuer       string `json:"issuer,omitempty"`
 	ClientSecret string `json:"client_secret,omitempty"`
 }
@@ -98,18 +93,14 @@ func nonNil[T any](s []T) []T {
 }
 
 func clientJSON(c *store.Client) Client {
-	theme := c.Theme
-	if theme == nil {
-		theme = map[string]string{}
-	}
 	return Client{
 		ID: c.ID, OrgID: c.OrgID, Name: c.Name, Description: c.Description, Status: c.Status,
 		ClientType: c.ClientType, TokenEndpointAuthMethod: c.TokenEndpointAuthMethod,
 		GrantTypes: nonNil(c.GrantTypes), RedirectURIs: nonNil(c.RedirectURIs),
 		PostLogoutRedirectURIs: nonNil(c.PostLogoutRedirectURIs), AllowedOrigins: nonNil(c.AllowedOrigins),
-		AllowedScopes: nonNil(c.AllowedScopes), UserPoolID: c.UserPoolID, RegistrationEnabled: c.RegistrationEnabled,
-		RequirePKCE: !c.PKCEOptional, Theme: theme, AccessTokenTTL: c.AccessTokenTTL, IDTokenTTL: c.IDTokenTTL, RefreshTokenTTL: c.RefreshTokenTTL,
-		RefreshFamilyTTL: c.RefreshFamilyTTL, SessionTTL: c.SessionTTL, SessionIdleTTL: c.SessionIdleTTL,
+		AllowedScopes: nonNil(c.AllowedScopes), UserPoolID: c.UserPoolID, RequirePKCE: !c.PKCEOptional,
+		AccessTokenTTL: c.AccessTokenTTL, IDTokenTTL: c.IDTokenTTL, RefreshTokenTTL: c.RefreshTokenTTL,
+		RefreshFamilyTTL: c.RefreshFamilyTTL, HostCount: c.HostCount,
 		CreatedAt: timestamp(c.CreatedAt), UpdatedAt: timestamp(c.UpdatedAt), Version: c.Version,
 	}
 }
@@ -126,24 +117,19 @@ type ClientInput struct {
 	PostLogoutRedirectURIs  *[]string `json:"post_logout_redirect_uris"`
 	AllowedOrigins          *[]string `json:"allowed_origins"`
 	AllowedScopes           *[]string `json:"allowed_scopes"`
-	UserPoolID              *string   `json:"user_pool_id"`
-	RegistrationEnabled     *bool     `json:"registration_enabled"`
 	// RequirePKCE (default true) can be false only for a confidential
-	// client: its authorization requests may then omit PKCE (OAuth 2.1,
-	// RFC 9700). A request that sends PKCE is always checked.
-	RequirePKCE      *bool              `json:"require_pkce"`
-	Theme            *map[string]string `json:"theme"`
-	AccessTokenTTL   *int64             `json:"access_token_ttl"`
-	IDTokenTTL       *int64             `json:"id_token_ttl"`
-	RefreshTokenTTL  *int64             `json:"refresh_token_ttl"`
-	RefreshFamilyTTL *int64             `json:"refresh_family_ttl"`
-	SessionTTL       *int64             `json:"session_ttl"`
-	SessionIdleTTL   *int64             `json:"session_idle_ttl"`
+	// client: PKCE is then not required when the client authenticates
+	// (Datamodel.md, Decision 6). A request that sends PKCE is always
+	// checked.
+	RequirePKCE      *bool  `json:"require_pkce"`
+	AccessTokenTTL   *int64 `json:"access_token_ttl"`
+	IDTokenTTL       *int64 `json:"id_token_ttl"`
+	RefreshTokenTTL  *int64 `json:"refresh_token_ttl"`
+	RefreshFamilyTTL *int64 `json:"refresh_family_ttl"`
 
-	// DefaultHostLabel (create only) names the default login host:
-	// {label}.{default host domain}. It defaults to the client name in
-	// lowercase, with other characters replaced by hyphens.
-	DefaultHostLabel *string `json:"default_host_label"`
+	// Host (create only, required) is an existing login host of the org
+	// the client is created on. The client's user pool is the host's.
+	Host *string `json:"host"`
 }
 
 func (in *ClientInput) ttl(field string) *int64 {
@@ -156,10 +142,6 @@ func (in *ClientInput) ttl(field string) *int64 {
 		return in.RefreshTokenTTL
 	case "refresh_family_ttl":
 		return in.RefreshFamilyTTL
-	case "session_ttl":
-		return in.SessionTTL
-	case "session_idle_ttl":
-		return in.SessionIdleTTL
 	}
 	return nil
 }
@@ -192,17 +174,8 @@ func (in *ClientInput) apply(c *store.Client) error {
 			*f.out = slices.Clone(*f.in)
 		}
 	}
-	if in.UserPoolID != nil {
-		c.UserPoolID = strings.TrimSpace(*in.UserPoolID)
-	}
-	if in.RegistrationEnabled != nil {
-		c.RegistrationEnabled = *in.RegistrationEnabled
-	}
 	if in.RequirePKCE != nil {
 		c.PKCEOptional = !*in.RequirePKCE
-	}
-	if in.Theme != nil {
-		c.Theme = *in.Theme
 	}
 	for _, rule := range ttlRules {
 		if v := in.ttl(rule.field); v != nil {
@@ -252,17 +225,6 @@ func validateClient(c *store.Client) error {
 	if err := validURIs("allowed_origins", c.AllowedOrigins, validOrigin); err != nil {
 		return err
 	}
-	if c.UserPoolID == "" {
-		return errInvalid("user_pool_id is required")
-	}
-	if len(c.Theme) > maxThemeKeys {
-		return errInvalid("theme has more than %d entries", maxThemeKeys)
-	}
-	for k, v := range c.Theme {
-		if k == "" || len(k) > maxThemeKeyLen || len(v) > maxThemeValLen || !utf8.ValidString(k) || !utf8.ValidString(v) {
-			return errInvalid("theme keys must be 1-%d bytes and values at most %d bytes", maxThemeKeyLen, maxThemeValLen)
-		}
-	}
 	for _, rule := range ttlRules {
 		v := *rule.get(c)
 		if v < rule.min || v > rule.max {
@@ -271,9 +233,6 @@ func validateClient(c *store.Client) error {
 	}
 	if c.RefreshFamilyTTL < c.RefreshTokenTTL {
 		return errInvalid("refresh_family_ttl must be at least refresh_token_ttl")
-	}
-	if c.SessionIdleTTL > c.SessionTTL {
-		return errInvalid("session_idle_ttl must be at most session_ttl")
 	}
 	return nil
 }
@@ -376,7 +335,7 @@ func isLoopback(host string) bool {
 
 var hostLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// defaultLabel derives a host label from a client name.
+// defaultLabel derives a host label from an org name.
 func defaultLabel(name string) string {
 	var b strings.Builder
 	hyphen := false
@@ -398,10 +357,9 @@ func defaultLabel(name string) string {
 
 func newClient(in *ClientInput) *store.Client {
 	c := &store.Client{
-		ClientType:          ClientConfidential,
-		GrantTypes:          slices.Clone(supportedGrants),
-		AllowedScopes:       slices.Clone(supportedScopes),
-		RegistrationEnabled: true,
+		ClientType:    ClientConfidential,
+		GrantTypes:    slices.Clone(supportedGrants),
+		AllowedScopes: slices.Clone(supportedScopes),
 	}
 	if in.ClientType != nil {
 		c.ClientType = *in.ClientType
@@ -431,17 +389,16 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) error {
 	if in.Name == nil {
 		return errInvalid("name is required")
 	}
+	if in.Host == nil {
+		return errInvalid("host is required: the login host the client is on (an org's default host is in its default_host)")
+	}
+	host, err := store.NormalizeHost(*in.Host)
+	if err != nil {
+		return err
+	}
 	if err := in.apply(c); err != nil {
 		return err
 	}
-	label := defaultLabel(c.Name)
-	if in.DefaultHostLabel != nil {
-		label = strings.ToLower(strings.TrimSpace(*in.DefaultHostLabel))
-	}
-	if !hostLabel.MatchString(label) {
-		return errInvalid("default_host_label must be 1-63 letters, digits and hyphens, not starting or ending with a hyphen")
-	}
-	host := label + "." + s.DefaultHostDomain
 
 	var secret string
 	if c.ClientType == ClientConfidential {
@@ -449,13 +406,16 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) error {
 		c.ClientSecretHash = crypto.HashToken(secret)
 	}
 	if err := s.Store.CreateClient(r.Context(), c, host); err != nil {
-		if errors.Is(err, store.ErrHostTaken) {
-			return errConflict("host_taken", fmt.Sprintf("the default host %s is taken: choose another default_host_label", host))
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			return errInvalid("login host %s doesn't exist", host)
+		case errors.Is(err, store.ErrWrongPool):
+			return errInvalid("login host %s belongs to another org", host)
 		}
 		return err
 	}
 	out := clientJSON(c)
-	out.DefaultHost, out.Issuer = host, "https://"+host
+	out.Host, out.Issuer = host, "https://"+host
 	redacted := out
 	out.ClientSecret = secret
 	writeWithSecret(w, http.StatusCreated, c.Version, out, redacted)
@@ -511,8 +471,8 @@ func (s *Server) updateClient(w http.ResponseWriter, r *http.Request) error {
 	if in.ClientType != nil {
 		return errInvalid("client_type can't be changed: create a new client instead")
 	}
-	if in.DefaultHostLabel != nil {
-		return errInvalid("default_host_label can only be set when creating a client")
+	if in.Host != nil {
+		return errInvalid("host can only be set when creating a client; use PUT /v1/hosts/{host}/clients/{client} to add it to another host")
 	}
 	c, err := s.Store.GetClient(r.Context(), id)
 	if err != nil {

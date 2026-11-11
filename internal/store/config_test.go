@@ -79,34 +79,36 @@ func TestClients(t *testing.T) {
 
 	got, err := e.GetClient(e.ctx, f.client.ID)
 	must(t, err)
-	if got.UserPoolID != f.pool.ID || got.Version != 1 || got.Status != ClientActive || len(got.RedirectURIs) != 1 {
+	if got.UserPoolID != f.pool.ID || got.HostCount != 1 || got.Version != 1 || got.Status != ClientActive || len(got.RedirectURIs) != 1 {
 		t.Fatalf("GetClient = %+v", got)
 	}
 
-	// The default host is taken.
-	dup := &Client{ID: newID(), OrgID: f.org.ID, Name: "dup", UserPoolID: f.pool.ID}
-	wantErr(t, e.CreateClient(e.ctx, dup, strings.ToUpper(f.host)+"."), ErrHostTaken)
-	wantErr(t, e.CreateClient(e.ctx, dup, f.host), ErrHostTaken)
-
-	// A pool in another org can't be used.
+	// A client is created on an existing host of its own org, and gets the
+	// host's pool.
 	other := &Org{ID: newID(), Name: "Other"}
-	must(t, e.CreateOrg(e.ctx, other))
-	otherPool := e.newPool(t, other.ID)
-	wantErr(t, e.CreateClient(e.ctx, &Client{ID: newID(), OrgID: f.org.ID, UserPoolID: otherPool.ID}, "x.example.com"), ErrPoolNotActive)
-	wantErr(t, e.CreateClient(e.ctx, &Client{ID: newID(), OrgID: "missing", UserPoolID: f.pool.ID}, "y.example.com"), ErrNotFound)
-	wantErr(t, e.CreateClient(e.ctx, &Client{ID: f.client.ID, OrgID: f.org.ID, UserPoolID: f.pool.ID}, "z.example.com"), ErrAlreadyExists)
-	if err := e.CreateClient(e.ctx, &Client{ID: newID(), OrgID: f.org.ID, UserPoolID: f.pool.ID}, "not a host"); err == nil {
+	otherPool := &Pool{ID: newID(), Name: "Default"}
+	otherHost := other.ID + ".login.example.com"
+	must(t, e.CreateOrgWithHost(e.ctx, other, otherPool, &LoginHost{Host: otherHost, HostSettings: testHostSettings()}))
+	wantErr(t, e.CreateClient(e.ctx, &Client{ID: newID(), OrgID: f.org.ID}, otherHost), ErrWrongPool)
+	wantErr(t, e.CreateClient(e.ctx, &Client{ID: newID(), OrgID: f.org.ID}, "missing.example.com"), ErrNotFound)
+	wantErr(t, e.CreateClient(e.ctx, &Client{ID: f.client.ID, OrgID: f.org.ID}, f.host), ErrAlreadyExists)
+	if err := e.CreateClient(e.ctx, &Client{ID: newID(), OrgID: f.org.ID}, "not a host"); err == nil {
 		t.Fatal("CreateClient accepted an invalid host")
 	}
-
-	c2 := e.newClient(t, f.org.ID, f.pool.ID, "second.example.com")
+	c2 := e.newClient(t, f.org.ID, strings.ToUpper(f.host)+".")
+	if c2.UserPoolID != f.pool.ID {
+		t.Fatalf("second client's pool = %q, want the host's", c2.UserPoolID)
+	}
 	clients, err := e.ListClients(e.ctx, f.org.ID)
 	must(t, err)
 	if len(clients) != 2 {
 		t.Fatalf("ListClients returned %d clients", len(clients))
 	}
+	if ids, err := e.ListHostClients(e.ctx, f.host); err != nil || len(ids) != 2 {
+		t.Fatalf("ListHostClients = %v, %v", ids, err)
+	}
 
-	// Versioned updates.
+	// Versioned updates; the org, pool and host count can't change.
 	stale := *got
 	got.Name, got.AllowedOrigins = "Renamed", []string{"https://app.example.com"}
 	must(t, e.UpdateClient(e.ctx, got))
@@ -114,14 +116,12 @@ func TestClients(t *testing.T) {
 		t.Fatalf("version = %d, want 2", got.Version)
 	}
 	wantErr(t, e.UpdateClient(e.ctx, &stale), ErrVersionMismatch)
-	got.UserPoolID = otherPool.ID
-	wantErr(t, e.UpdateClient(e.ctx, got), ErrPoolNotActive)
-	got.UserPoolID = f.pool.ID
-	got.OrgID = other.ID // ignored: the org can't change
+	got.UserPoolID, got.OrgID, got.HostCount = otherPool.ID, other.ID, 7 // ignored
 	must(t, e.UpdateClient(e.ctx, got))
 	reread, err := e.GetClient(e.ctx, got.ID)
 	must(t, err)
-	if reread.OrgID != f.org.ID || reread.Name != "Renamed" || reread.Version != 3 || len(reread.AllowedOrigins) != 1 {
+	if reread.OrgID != f.org.ID || reread.UserPoolID != f.pool.ID || reread.HostCount != 1 || reread.Name != "Renamed" ||
+		reread.Version != 3 || len(reread.AllowedOrigins) != 1 {
 		t.Fatalf("after updates: %+v", reread)
 	}
 
@@ -142,57 +142,107 @@ func TestClients(t *testing.T) {
 	_, err = e.SetClientStatus(e.ctx, "missing", ClientActive, 1)
 	wantErr(t, err, ErrNotFound)
 
-	// Delete: refused while a custom host exists.
-	_, err = e.AddCustomHost(e.ctx, c2.ID, "login.customer.com")
-	must(t, err)
-	wantErr(t, e.DeleteClient(e.ctx, c2.ID), ErrHasCustomHosts)
-	_, err = e.RemoveHost(e.ctx, "login.customer.com")
-	must(t, err)
-	must(t, e.DeleteRemovedHost(e.ctx, "login.customer.com"))
+	// Deleting a client removes its memberships; its hosts stay.
+	e.newCustomHost(t, f.org.ID, f.pool.ID, "login.customer.com")
+	must(t, e.AddHostClient(e.ctx, "login.customer.com", c2.ID))
 	must(t, e.DeleteClient(e.ctx, c2.ID))
 	_, err = e.GetClient(e.ctx, c2.ID)
 	wantErr(t, err, ErrNotFound)
-	_, err = e.GetLoginHost(e.ctx, "second.example.com")
-	wantErr(t, err, ErrNotFound)
+	for _, h := range []string{f.host, "login.customer.com"} {
+		if _, err := e.GetLoginHost(e.ctx, h); err != nil {
+			t.Fatalf("host %s: %v", h, err)
+		}
+		_, err := e.GetHostClient(e.ctx, h, c2.ID)
+		wantErr(t, err, ErrNotFound)
+	}
+	if hosts, err := e.ListClientHosts(e.ctx, c2.ID); err != nil || len(hosts) != 0 {
+		t.Fatalf("deleted client's hosts = %+v, %v", hosts, err)
+	}
+	wantErr(t, e.DeleteClient(e.ctx, c2.ID), ErrNotFound)
 	clients, err = e.ListClients(e.ctx, f.org.ID)
 	must(t, err)
 	if len(clients) != 1 {
 		t.Fatalf("ListClients after delete returned %d clients", len(clients))
 	}
-	// The deleted client's default host is free again.
-	e.newClient(t, f.org.ID, f.pool.ID, "second.example.com")
+}
+
+func TestOrgWithHost(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	if f.org.DefaultHost != f.host || f.pool.OrgID != f.org.ID {
+		t.Fatalf("org = %+v, pool = %+v", f.org, f.pool)
+	}
+	org, err := e.GetOrg(e.ctx, f.org.ID)
+	must(t, err)
+	if org.DefaultHost != f.host {
+		t.Fatalf("stored default host = %q", org.DefaultHost)
+	}
+	h, err := e.GetLoginHost(e.ctx, "  "+strings.ToUpper(f.host)+".:443")
+	must(t, err)
+	if h.OrgID != f.org.ID || h.PoolID != f.pool.ID || h.Type != HostTypeDefault || h.Status != HostVerified ||
+		!h.RegistrationEnabled || h.SessionTTL != 604800 {
+		t.Fatalf("default host = %+v", h)
+	}
+	pools, err := e.ListPools(e.ctx, f.org.ID)
+	must(t, err)
+	if len(pools) != 1 || pools[0].ID != f.pool.ID {
+		t.Fatalf("pools = %+v", pools)
+	}
+
+	// The host name is unique; a failed create leaves nothing behind.
+	dup := &Org{ID: newID(), Name: "Dup"}
+	wantErr(t, e.CreateOrgWithHost(e.ctx, dup, &Pool{ID: newID()}, &LoginHost{Host: f.host}), ErrHostTaken)
+	_, err = e.GetOrg(e.ctx, dup.ID)
+	wantErr(t, err, ErrNotFound)
 }
 
 func TestLoginHosts(t *testing.T) {
 	e := newTestEnv(t)
 	f := e.newFixture(t)
 
-	h, err := e.GetLoginHost(e.ctx, "  "+f.host+".:443")
-	must(t, err)
-	if h.ClientID != f.client.ID || h.OrgID != f.org.ID || h.Type != HostTypeDefault || h.Status != HostVerified {
-		t.Fatalf("default host = %+v", h)
+	custom := e.newCustomHost(t, f.org.ID, f.pool.ID, "Login.Customer.COM")
+	if custom.Host != "login.customer.com" || custom.Status != HostPending || custom.Version != 1 {
+		t.Fatalf("CreateHost = %+v", custom)
 	}
+	wantErr(t, e.CreateHost(e.ctx, &LoginHost{Host: "login.customer.com", OrgID: f.org.ID, PoolID: f.pool.ID,
+		Type: HostTypeCustom, HostSettings: testHostSettings()}), ErrHostTaken)
+	other := e.newPool(t, f.org.ID)
+	must(t, e.MarkPoolDeleting(e.ctx, other.ID))
+	wantErr(t, e.CreateHost(e.ctx, &LoginHost{Host: "x.customer.com", OrgID: f.org.ID, PoolID: other.ID,
+		Type: HostTypeCustom, HostSettings: testHostSettings()}), ErrPoolNotActive)
+	wantErr(t, e.CreateHost(e.ctx, &LoginHost{Host: "y.customer.com", OrgID: "another-org", PoolID: f.pool.ID,
+		Type: HostTypeCustom, HostSettings: testHostSettings()}), ErrPoolNotActive)
 
-	custom, err := e.AddCustomHost(e.ctx, f.client.ID, "Login.Customer.COM")
-	must(t, err)
-	if custom.Host != "login.customer.com" || custom.Status != HostPending {
-		t.Fatalf("AddCustomHost = %+v", custom)
-	}
-	_, err = e.AddCustomHost(e.ctx, f.client.ID, "login.customer.com")
-	wantErr(t, err, ErrHostTaken)
-	_, err = e.AddCustomHost(e.ctx, "missing", "other.customer.com")
-	wantErr(t, err, ErrNotFound)
-
-	hosts, err := e.ListClientHosts(e.ctx, f.client.ID)
+	hosts, err := e.ListOrgHosts(e.ctx, f.org.ID)
 	must(t, err)
 	if len(hosts) != 2 || hosts[0].Host != f.host && hosts[1].Host != f.host {
-		t.Fatalf("ListClientHosts = %+v", hosts)
+		t.Fatalf("ListOrgHosts = %+v", hosts)
 	}
-
 	work := listWork(t, e)
-	if len(work) != 1 || work[0].Type != WorkCustomDomain || work[0].ID != "login.customer.com" || work[0].Status != HostPending {
+	if len(work) != 2 { // the host, and the pool being deleted
 		t.Fatalf("work = %+v", work)
 	}
+	var hostWork *WorkItem
+	for i := range work {
+		if work[i].Type == WorkCustomDomain {
+			hostWork = &work[i]
+		}
+	}
+	if hostWork == nil || hostWork.ID != "login.customer.com" || hostWork.Status != HostPending {
+		t.Fatalf("work = %+v", work)
+	}
+
+	// Settings are versioned.
+	custom.Theme = map[string]string{"brand_name": "Customer"}
+	custom.RegistrationEnabled = false
+	stale := *custom
+	must(t, e.UpdateHostSettings(e.ctx, custom))
+	h, err := e.GetLoginHost(e.ctx, "login.customer.com")
+	must(t, err)
+	if h.Version != 2 || h.Theme["brand_name"] != "Customer" || h.RegistrationEnabled || h.Status != HostPending || h.PoolID != f.pool.ID {
+		t.Fatalf("after UpdateHostSettings: %+v", h)
+	}
+	wantErr(t, e.UpdateHostSettings(e.ctx, &stale), ErrVersionMismatch)
 
 	must(t, e.VerifyHost(e.ctx, "login.customer.com"))
 	h, err = e.GetLoginHost(e.ctx, "login.customer.com")
@@ -200,39 +250,58 @@ func TestLoginHosts(t *testing.T) {
 	if h.Status != HostVerified || h.WorkUpdatedAt != 0 {
 		t.Fatalf("verified host = %+v", h)
 	}
-	if w := listWork(t, e); len(w) != 0 {
-		t.Fatalf("work after verify = %+v", w)
-	}
 	wantErr(t, e.VerifyHost(e.ctx, "login.customer.com"), ErrConditionFailed)
 	wantErr(t, e.DeleteRemovedHost(e.ctx, "login.customer.com"), ErrConditionFailed)
 
-	deleted, err := e.RemoveHost(e.ctx, "login.customer.com")
+	// Memberships: same org and pool only; a client keeps at least one host.
+	must(t, e.AddHostClient(e.ctx, "login.customer.com", f.client.ID))
+	must(t, e.AddHostClient(e.ctx, "login.customer.com", f.client.ID)) // idempotent
+	c, err := e.GetClient(e.ctx, f.client.ID)
 	must(t, err)
-	if deleted {
-		t.Fatal("custom host deleted at once; want removing")
+	if c.HostCount != 2 {
+		t.Fatalf("host_count = %d, want 2", c.HostCount)
 	}
+	if hosts, err := e.ListClientHosts(e.ctx, f.client.ID); err != nil || len(hosts) != 2 {
+		t.Fatalf("ListClientHosts = %+v, %v", hosts, err)
+	}
+	if m, err := e.GetHostClient(e.ctx, "LOGIN.customer.com", f.client.ID); err != nil || m.Host != "login.customer.com" || m.ClientID != f.client.ID {
+		t.Fatalf("GetHostClient = %+v, %v", m, err)
+	}
+	otherPoolHost := e.newPool(t, f.org.ID)
+	e.newCustomHost(t, f.org.ID, otherPoolHost.ID, "pool2.customer.com")
+	wantErr(t, e.AddHostClient(e.ctx, "pool2.customer.com", f.client.ID), ErrWrongPool)
+	wantErr(t, e.AddHostClient(e.ctx, "missing.customer.com", f.client.ID), ErrNotFound)
+	wantErr(t, e.AddHostClient(e.ctx, "login.customer.com", "missing"), ErrNotFound)
+
+	wantErr(t, e.RemoveHost(e.ctx, "login.customer.com"), ErrHostInUse)
+	wantErr(t, e.RemoveHost(e.ctx, f.host), ErrDefaultHost)
+	must(t, e.RemoveHostClient(e.ctx, f.host, f.client.ID))
+	wantErr(t, e.RemoveHostClient(e.ctx, f.host, f.client.ID), ErrNotFound)
+	wantErr(t, e.RemoveHostClient(e.ctx, "login.customer.com", f.client.ID), ErrLastHost)
+	must(t, e.AddHostClient(e.ctx, f.host, f.client.ID))
+	must(t, e.RemoveHostClient(e.ctx, "login.customer.com", f.client.ID))
+	c, err = e.GetClient(e.ctx, f.client.ID)
+	must(t, err)
+	if c.HostCount != 1 {
+		t.Fatalf("host_count = %d, want 1", c.HostCount)
+	}
+
+	// Removing a custom host with no clients goes through the Worker.
+	must(t, e.RemoveHost(e.ctx, "login.customer.com"))
 	h, err = e.GetLoginHost(e.ctx, "login.customer.com")
 	must(t, err)
 	if h.Status != HostRemoving {
 		t.Fatalf("status = %q, want removing", h.Status)
 	}
-	if w := listWork(t, e); len(w) != 1 || w[0].Status != HostRemoving {
-		t.Fatalf("work after remove = %+v", w)
-	}
-	_, err = e.RemoveHost(e.ctx, "login.customer.com")
-	wantErr(t, err, ErrConditionFailed)
+	wantErr(t, e.AddHostClient(e.ctx, "login.customer.com", f.client.ID), ErrNotFound)
+	wantErr(t, e.CreateClient(e.ctx, &Client{ID: newID(), OrgID: f.org.ID}, "login.customer.com"), ErrNotFound)
+	wantErr(t, e.RemoveHost(e.ctx, "login.customer.com"), ErrConditionFailed)
 	must(t, e.DeleteRemovedHost(e.ctx, "login.customer.com"))
 	_, err = e.GetLoginHost(e.ctx, "login.customer.com")
 	wantErr(t, err, ErrNotFound)
-
-	deleted, err = e.RemoveHost(e.ctx, f.host)
+	hosts, err = e.ListOrgHosts(e.ctx, f.org.ID)
 	must(t, err)
-	if !deleted {
-		t.Fatal("default host not deleted at once")
-	}
-	hosts, err = e.ListClientHosts(e.ctx, f.client.ID)
-	must(t, err)
-	if len(hosts) != 0 {
+	if len(hosts) != 2 { // the default host and pool2.customer.com
 		t.Fatalf("hosts left: %+v", hosts)
 	}
 }
@@ -247,8 +316,7 @@ func listWork(t *testing.T, e *testEnv) []WorkItem {
 func TestWorkAttempts(t *testing.T) {
 	e := newTestEnv(t)
 	f := e.newFixture(t)
-	_, err := e.AddCustomHost(e.ctx, f.client.ID, "login.customer.com")
-	must(t, err)
+	e.newCustomHost(t, f.org.ID, f.pool.ID, "login.customer.com")
 
 	e.clock.Advance(time.Minute)
 	if w, err := e.ListStaleWork(e.ctx, 5*time.Minute); err != nil || len(w) != 0 {
@@ -284,13 +352,27 @@ func TestWorkAttempts(t *testing.T) {
 func TestPoolDeletion(t *testing.T) {
 	e := newTestEnv(t)
 	f := e.newFixture(t)
-	u2 := e.newUser(t, f.pool.ID, "second@example.com")
-	sess := e.newSession(t, u2, f.client.ID)
-
+	// The org's default pool is served by its default host, which stays:
+	// the pool can't be deleted.
 	wantErr(t, e.MarkPoolDeleting(e.ctx, f.pool.ID), ErrPoolInUse)
-	must(t, e.DeleteClient(e.ctx, f.client.ID))
-	must(t, e.MarkPoolDeleting(e.ctx, f.pool.ID))
-	wantErr(t, e.MarkPoolDeleting(e.ctx, f.pool.ID), ErrConditionFailed)
+
+	// A second pool, on a custom host, with a client and two users.
+	pool := e.newPool(t, f.org.ID)
+	e.newCustomHost(t, f.org.ID, pool.ID, "login.customer.com")
+	client := e.newClient(t, f.org.ID, "login.customer.com")
+	u1 := e.newUser(t, pool.ID, "first@example.com")
+	u2 := e.newUser(t, pool.ID, "second@example.com")
+	sess := e.newSession(t, u2, client.ID)
+
+	wantErr(t, e.MarkPoolDeleting(e.ctx, pool.ID), ErrPoolInUse) // the client and the host
+	must(t, e.DeleteClient(e.ctx, client.ID))
+	wantErr(t, e.MarkPoolDeleting(e.ctx, pool.ID), ErrPoolInUse) // the host
+	must(t, e.RemoveHost(e.ctx, "login.customer.com"))
+	wantErr(t, e.MarkPoolDeleting(e.ctx, pool.ID), ErrPoolInUse) // still being removed
+	must(t, e.DeleteRemovedHost(e.ctx, "login.customer.com"))
+	must(t, e.MarkPoolDeleting(e.ctx, pool.ID))
+	wantErr(t, e.MarkPoolDeleting(e.ctx, pool.ID), ErrConditionFailed)
+	f.pool = pool // the rest of the test deletes this pool
 
 	p, err := e.GetPool(e.ctx, f.pool.ID)
 	must(t, err)
@@ -303,7 +385,8 @@ func TestPoolDeletion(t *testing.T) {
 
 	// Nothing new can be added to the pool.
 	wantErr(t, e.CreateUser(e.ctx, &User{ID: newID(), PoolID: f.pool.ID, Email: "new@example.com"}), ErrPoolNotActive)
-	wantErr(t, e.CreateClient(e.ctx, &Client{ID: newID(), OrgID: f.org.ID, UserPoolID: f.pool.ID}, "new.example.com"), ErrPoolNotActive)
+	wantErr(t, e.CreateHost(e.ctx, &LoginHost{Host: "new.customer.com", OrgID: f.org.ID, PoolID: f.pool.ID,
+		Type: HostTypeCustom, HostSettings: testHostSettings()}), ErrPoolNotActive)
 
 	// The pool can't be deleted until it's deleting; users go first, one page at a time.
 	n, err := e.DeletePoolUsers(e.ctx, f.pool.ID, 1)
@@ -321,7 +404,7 @@ func TestPoolDeletion(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("deleted %d users, want 0", n)
 	}
-	for _, id := range []string{f.user.ID, u2.ID} {
+	for _, id := range []string{u1.ID, u2.ID} {
 		_, err := e.GetUser(e.ctx, id)
 		wantErr(t, err, ErrNotFound)
 	}
@@ -333,7 +416,7 @@ func TestPoolDeletion(t *testing.T) {
 	wantErr(t, err, ErrNotFound)
 	pools, err := e.ListPools(e.ctx, f.org.ID)
 	must(t, err)
-	if len(pools) != 0 {
+	if len(pools) != 1 { // the default pool
 		t.Fatalf("pools left: %+v", pools)
 	}
 	if w := listWork(t, e); len(w) != 0 {

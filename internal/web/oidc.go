@@ -109,28 +109,54 @@ func (s *Server) publicPreflight(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// clientCORS allows a cross-origin request to /token or /userinfo from
-// one of the client's allowed_origins. Other origins get no CORS headers,
-// so browsers block them.
-func clientCORS(w http.ResponseWriter, r *http.Request, t *tenant) bool {
-	w.Header().Add("Vary", "Origin")
+// allowOrigin allows a cross-origin request to /token or /userinfo if its
+// Origin is in origins; otherwise it removes any CORS header set earlier,
+// so browsers block the response.
+func allowOrigin(w http.ResponseWriter, r *http.Request, origins []string) bool {
+	w.Header().Set("Vary", "Origin")
 	o := r.Header.Get("Origin")
-	if o == "" || !slices.Contains(t.Client.AllowedOrigins, o) {
+	if o == "" || !slices.Contains(origins, o) {
+		w.Header().Del("Access-Control-Allow-Origin")
 		return false
 	}
 	w.Header().Set("Access-Control-Allow-Origin", o)
 	return true
 }
 
+// requestCORS applies the CORS rule of a /token or /userinfo response: the
+// allowed_origins of the request's client once it's known, and before
+// that (an error response) those of every client on the host, as for a
+// preflight.
+func (s *Server) requestCORS(w http.ResponseWriter, r *http.Request, t *tenant) {
+	if r.Header.Get("Origin") == "" {
+		return
+	}
+	if t.Client != nil {
+		allowOrigin(w, r, t.Client.AllowedOrigins)
+		return
+	}
+	origins, err := s.hostOrigins(r.Context(), t)
+	if err != nil {
+		s.log().WarnContext(r.Context(), "list host origins", "error", err)
+	}
+	allowOrigin(w, r, origins)
+}
+
 // clientPreflight answers CORS preflight requests for /token and
-// /userinfo. They carry no client_id: the login host identifies the client.
+// /userinfo. They carry no credentials or client_id, so the origins of
+// every client on the host are allowed; the request itself is then checked
+// against its own client's origins.
 func (s *Server) clientPreflight(w http.ResponseWriter, r *http.Request) {
 	t, err := s.resolve(r)
 	if err != nil {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if clientCORS(w, r, t) {
+	origins, err := s.hostOrigins(r.Context(), t)
+	if err != nil {
+		s.log().WarnContext(r.Context(), "list host origins", "error", err)
+	}
+	if allowOrigin(w, r, origins) {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		w.Header().Set("Access-Control-Max-Age", "600")
@@ -179,10 +205,16 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.Form
-	if q.Get("client_id") != t.Client.ID {
-		s.badAuthz(w, r, t, "The sign-in request is for another application, or names no application.")
+	c, err := s.hostClient(r.Context(), t, q.Get("client_id"))
+	if errors.Is(err, errUnavailable) || len(q["client_id"]) > 1 {
+		s.badAuthz(w, r, t, "The sign-in request is for an application this page doesn't serve, or names no application.")
 		return
 	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	t.Client = c
 	redirectURI := q.Get("redirect_uri")
 	if redirectURI == "" || len(q["redirect_uri"]) > 1 || !slices.Contains(t.Client.RedirectURIs, redirectURI) {
 		s.badAuthz(w, r, t, "The sign-in request's return address isn't registered for this application.")
@@ -302,8 +334,9 @@ func parseAuthz(q url.Values, t *tenant) (*authzRequest, *authzError) {
 	return req, nil
 }
 
-// pkceOptional reports whether a client may omit PKCE: only a confidential
-// client that opted out.
+// pkceOptional reports whether a client may send authorization requests
+// without PKCE: only a confidential client that opted out. Redeeming the
+// code then has further conditions (mayOmitPKCE).
 func pkceOptional(c *store.Client) bool {
 	return c.ClientType == clientConfidential && c.PKCEOptional
 }
@@ -411,20 +444,23 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		s.tokenFail(w, r, err, false)
 		return
 	}
-	clientCORS(w, r, t)
+	fail := func(err error, basic bool) {
+		s.requestCORS(w, r, t)
+		s.tokenFail(w, r, err, basic)
+	}
 	if err := r.ParseForm(); err != nil || r.Method != http.MethodPost {
-		s.tokenFail(w, r, &tokenError{http.StatusBadRequest, "invalid_request", "send the request as a form POST"}, false)
+		fail(&tokenError{http.StatusBadRequest, "invalid_request", "send the request as a form POST"}, false)
 		return
 	}
 	for _, p := range []string{"grant_type", "code", "redirect_uri", "code_verifier", "refresh_token", "client_id", "client_secret", "scope"} {
 		if len(r.PostForm[p]) > 1 {
-			s.tokenFail(w, r, &tokenError{http.StatusBadRequest, "invalid_request", p + " is repeated"}, false)
+			fail(&tokenError{http.StatusBadRequest, "invalid_request", p + " is repeated"}, false)
 			return
 		}
 	}
 	basic, err := s.authenticateClient(r, t)
 	if err != nil {
-		s.tokenFail(w, r, err, basic)
+		fail(err, basic)
 		return
 	}
 
@@ -442,15 +478,17 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		err = &tokenError{http.StatusBadRequest, "unsupported_grant_type", "only authorization_code and refresh_token are supported"}
 	}
 	if err != nil {
-		s.tokenFail(w, r, err, basic)
+		fail(err, basic)
 		return
 	}
+	s.requestCORS(w, r, t)
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // authenticateClient authenticates the client of a token request
-// (client_secret_basic, client_secret_post, or none for public clients). It
-// reports whether HTTP Basic was used, for the WWW-Authenticate header.
+// (client_secret_basic, client_secret_post, or none for public clients),
+// which must be on the host, and makes it the tenant's client. It reports
+// whether HTTP Basic was used, for the WWW-Authenticate header.
 func (s *Server) authenticateClient(r *http.Request, t *tenant) (bool, error) {
 	bad := &tokenError{http.StatusUnauthorized, "invalid_client", "client authentication failed"}
 	id, secret, basic := r.BasicAuth()
@@ -467,19 +505,25 @@ func (s *Server) authenticateClient(r *http.Request, t *tenant) (bool, error) {
 	} else {
 		id, secret = r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
 	}
-	if id != t.Client.ID {
+	c, err := s.hostClient(r.Context(), t, id)
+	if errors.Is(err, errUnavailable) {
 		return basic, bad
 	}
-	if t.Client.ClientType != clientConfidential {
+	if err != nil {
+		return basic, err
+	}
+	if c.ClientType != clientConfidential {
 		if secret != "" {
 			return basic, bad // public clients have no secret
 		}
+		t.Client = c
 		return basic, nil
 	}
-	if secret == "" || t.Client.ClientSecretHash == "" ||
-		subtle.ConstantTimeCompare([]byte(crypto.HashToken(secret)), []byte(t.Client.ClientSecretHash)) != 1 {
+	if secret == "" || c.ClientSecretHash == "" ||
+		subtle.ConstantTimeCompare([]byte(crypto.HashToken(secret)), []byte(c.ClientSecretHash)) != 1 {
 		return basic, bad
 	}
+	t.Client = c
 	return basic, nil
 }
 
@@ -525,7 +569,7 @@ func (s *Server) exchangeCode(r *http.Request, t *tenant) (*tokenResponse, error
 		return nil, errInvalidGrant
 	}
 	if code.ClientID != t.Client.ID || code.RedirectURI != f.Get("redirect_uri") || code.Iss != s.issuer(t) ||
-		!pkceMatches(code.CodeChallenge, verifier) {
+		!pkceMatches(code.CodeChallenge, verifier) || !mayOmitPKCE(r, t, code) {
 		return nil, errInvalidGrant
 	}
 	u, err := s.Store.GetUser(ctx, code.UserID)
@@ -555,6 +599,19 @@ func (s *Server) exchangeCode(r *http.Request, t *tenant) (*tokenResponse, error
 		return nil, err
 	}
 	return s.issue(r, t, u, code.Iss, code.Scope, code.AuthTime, code.Nonce, refresh)
+}
+
+// mayOmitPKCE enforces the PKCE opt-out when a code issued without PKCE is
+// redeemed (Datamodel.md, Decision 6): PKCE isn't required only when the
+// client authenticates. So the client must still be a confidential client
+// that opted out (it was authenticated with its secret to get here), and
+// the request must not come from a browser: a request with an Origin
+// header must always use PKCE.
+func mayOmitPKCE(r *http.Request, t *tenant, code *store.AuthCode) bool {
+	if code.CodeChallenge != "" {
+		return true
+	}
+	return pkceOptional(t.Client) && r.Header.Get("Origin") == ""
 }
 
 // pkceMatches checks the code_verifier against the code's challenge. A code
@@ -693,7 +750,7 @@ func (s *Server) userinfo(w http.ResponseWriter, r *http.Request) {
 		s.jsonFailure(w, r, err)
 		return
 	}
-	clientCORS(w, r, t)
+	s.requestCORS(w, r, t)
 	token, ok := bearerToken(r)
 	if !ok {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="userinfo"`)
@@ -705,7 +762,7 @@ func (s *Server) userinfo(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token", "error_description": "the access token is invalid or expired"})
 	}
 	claims, err := s.Verifier.VerifyAccessToken(r.Context(), token, s.issuer(t))
-	if errors.Is(err, jwt.ErrInvalidToken) || (err == nil && claims.ClientID != t.Client.ID) {
+	if errors.Is(err, jwt.ErrInvalidToken) {
 		invalidToken()
 		return
 	}
@@ -713,6 +770,18 @@ func (s *Server) userinfo(w http.ResponseWriter, r *http.Request) {
 		s.jsonFailure(w, r, err)
 		return
 	}
+	// The token's client must still be on this host.
+	c, err := s.hostClient(r.Context(), t, claims.ClientID)
+	if errors.Is(err, errUnavailable) {
+		invalidToken()
+		return
+	}
+	if err != nil {
+		s.jsonFailure(w, r, err)
+		return
+	}
+	t.Client = c
+	s.requestCORS(w, r, t)
 	scopes := strings.Fields(claims.Scope)
 	if !slices.Contains(scopes, "openid") {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="userinfo", error="insufficient_scope", scope="openid"`)

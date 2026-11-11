@@ -1,6 +1,7 @@
 {{define "content"}}
 <form method="post" action="/logout">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
+{{if .LogoutClientID}}<input type="hidden" name="client_id" value="{{.LogoutClientID}}">{{end}}
 {{if .PostLogoutRedirectURI}}<input type="hidden" name="post_logout_redirect_uri" value="{{.PostLogoutRedirectURI}}">{{end}}
 {{if .State}}<input type="hidden" name="state" value="{{.State}}">{{end}}
 <p>Sign out of {{.Brand}} on this browser?</p>

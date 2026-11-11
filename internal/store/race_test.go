@@ -163,18 +163,51 @@ func TestRaceCreateEmail(t *testing.T) {
 func TestRaceAddHost(t *testing.T) {
 	e := newTestEnv(t)
 	f := e.newFixture(t)
-	clients := make([]*Client, racers)
-	for i := range clients {
-		clients[i] = e.newClient(t, f.org.ID, f.pool.ID, fmt.Sprintf("c%d.example.com", i))
-	}
-	errs := race(func(i int) error {
-		_, err := e.AddCustomHost(e.ctx, clients[i].ID, "login.contested.com")
-		return err
+	errs := race(func(int) error {
+		return e.CreateHost(e.ctx, &LoginHost{Host: "login.contested.com", OrgID: f.org.ID, PoolID: f.pool.ID,
+			Type: HostTypeCustom, HostSettings: testHostSettings()})
 	})
-	winner := oneWinner(t, errs, ErrHostTaken)
-	h, err := e.GetLoginHost(e.ctx, "login.contested.com")
-	must(t, err)
-	if h.ClientID != clients[winner].ID {
-		t.Fatalf("host belongs to %q, want the winner %q", h.ClientID, clients[winner].ID)
+	oneWinner(t, errs, ErrHostTaken)
+	if hosts, err := e.ListOrgHosts(e.ctx, f.org.ID); err != nil || len(hosts) != 2 {
+		t.Fatalf("ListOrgHosts = %+v, %v", hosts, err)
 	}
+}
+
+// Concurrent joins and leaves keep host_count equal to the memberships.
+func TestRaceHostMembership(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	hosts := make([]string, racers-1) // with the default host, one per racer
+	for i := range hosts {
+		hosts[i] = fmt.Sprintf("h%d.example.com", i)
+		e.newCustomHost(t, f.org.ID, f.pool.ID, hosts[i])
+	}
+	// Racers 0 and 1 both add hosts[0]: adding is idempotent.
+	errs := race(func(i int) error { return e.AddHostClient(e.ctx, hosts[max(i-1, 0)], f.client.ID) })
+	for _, err := range errs {
+		must(t, err)
+	}
+	// Every membership is removed at once: exactly one must stay.
+	all := append([]string{f.host}, hosts...)
+	errs = race(func(i int) error { return e.RemoveHostClient(e.ctx, all[i], f.client.ID) })
+	if n := countErrs(errs, ErrLastHost); n != 1 {
+		t.Errorf("%d removals refused as the last host, want 1 (errors %v)", n, errs)
+	}
+	c, err := e.GetClient(e.ctx, f.client.ID)
+	must(t, err)
+	left, err := e.ListClientHosts(e.ctx, f.client.ID)
+	must(t, err)
+	if c.HostCount != int64(len(left)) || c.HostCount < 1 {
+		t.Fatalf("host_count %d, %d memberships left (errors %v)", c.HostCount, len(left), errs)
+	}
+}
+
+func countErrs(errs []error, target error) int {
+	n := 0
+	for _, err := range errs {
+		if errors.Is(err, target) {
+			n++
+		}
+	}
+	return n
 }

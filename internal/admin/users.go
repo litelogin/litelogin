@@ -15,126 +15,6 @@ import (
 	"github.com/litelogin/litelogin/internal/store"
 )
 
-// ---- Login hosts ----
-
-// Host is the API representation of a login host.
-type Host struct {
-	Host     string `json:"host"`
-	ClientID string `json:"client_id"`
-	Type     string `json:"type"`
-	Status   string `json:"status"`
-	Issuer   string `json:"issuer"`
-
-	// Set while a custom host is being provisioned or removed.
-	WorkAttempts  int64  `json:"work_attempts,omitempty"`
-	WorkUpdatedAt string `json:"work_updated_at,omitempty"`
-	WorkLastError string `json:"work_last_error,omitempty"`
-}
-
-func hostJSON(h *store.LoginHost) Host {
-	return Host{Host: h.Host, ClientID: h.ClientID, Type: h.Type, Status: h.Status, Issuer: "https://" + h.Host,
-		WorkAttempts: h.WorkAttempts, WorkUpdatedAt: timestamp(h.WorkUpdatedAt), WorkLastError: h.WorkLastError}
-}
-
-func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "client")
-	if err != nil {
-		return err
-	}
-	if _, err := s.Store.GetClient(r.Context(), id); err != nil {
-		return err
-	}
-	hosts, err := s.Store.ListClientHosts(r.Context(), id)
-	if err != nil {
-		return err
-	}
-	out := list[Host]{Items: make([]Host, 0, len(hosts))}
-	for i := range hosts {
-		out.Items = append(out.Items, hostJSON(&hosts[i]))
-	}
-	writeJSON(w, http.StatusOK, out)
-	return nil
-}
-
-// HostInput is the body of an add host request.
-type HostInput struct {
-	Host string `json:"host"`
-}
-
-// addHost adds a custom login host. It starts pending; the Worker
-// provisions its certificate and marks it verified once DNS points to
-// LiteLogin.
-func (s *Server) addHost(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "client")
-	if err != nil {
-		return err
-	}
-	var in HostInput
-	if err := decode(r, &in); err != nil {
-		return err
-	}
-	host, err := store.NormalizeHost(in.Host)
-	if err != nil {
-		return err
-	}
-	if host == s.DefaultHostDomain || strings.HasSuffix(host, "."+s.DefaultHostDomain) {
-		return errInvalid("hosts under %s are default hosts; add a host on your own domain", s.DefaultHostDomain)
-	}
-	h, err := s.Store.AddCustomHost(r.Context(), id, host)
-	if err != nil {
-		return err
-	}
-	writeJSON(w, http.StatusCreated, hostJSON(h))
-	return nil
-}
-
-// clientHost returns a login host if it belongs to the client in the path.
-func (s *Server) clientHost(r *http.Request) (*store.LoginHost, error) {
-	id, err := pathValue(r, "client")
-	if err != nil {
-		return nil, err
-	}
-	name, err := pathValue(r, "host")
-	if err != nil {
-		return nil, err
-	}
-	h, err := s.Store.GetLoginHost(r.Context(), name)
-	if errors.Is(err, store.ErrInvalidHost) || (err == nil && h.ClientID != id) {
-		return nil, errNotFound("the client has no such host")
-	}
-	return h, err
-}
-
-func (s *Server) getHost(w http.ResponseWriter, r *http.Request) error {
-	h, err := s.clientHost(r)
-	if err != nil {
-		return err
-	}
-	writeJSON(w, http.StatusOK, hostJSON(h))
-	return nil
-}
-
-// removeHost stops serving a host at once. A default host is deleted
-// (204); a custom host is marked removing and deleted by the Worker once
-// its CloudFront tenant is gone (202).
-func (s *Server) removeHost(w http.ResponseWriter, r *http.Request) error {
-	h, err := s.clientHost(r)
-	if err != nil {
-		return err
-	}
-	deleted, err := s.Store.RemoveHost(r.Context(), h.Host)
-	if err != nil {
-		return err
-	}
-	if deleted {
-		w.WriteHeader(http.StatusNoContent)
-		return nil
-	}
-	h.Status = store.HostRemoving
-	writeJSON(w, http.StatusAccepted, hostJSON(h))
-	return nil
-}
-
 // ---- Users ----
 
 // User is the API representation of a user. The password hash is never
@@ -166,9 +46,11 @@ type UserInput struct {
 	Password      *string `json:"password"`
 	EmailVerified *bool   `json:"email_verified"`
 	// Invite (create only) emails the user a link to set a password,
-	// instead of setting one. The link is on ClientID's default login
-	// host; the client must use the user's pool.
+	// instead of setting one. The link is on a verified login host of the
+	// user's pool: Host if given; else ClientID's host in the pool, if it
+	// has exactly one; else the org's default host, if it's on the pool.
 	Invite   *bool   `json:"invite"`
+	Host     *string `json:"host"`
 	ClientID *string `json:"client_id"`
 }
 
@@ -205,10 +87,10 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) error {
 	switch {
 	case invite && in.Password != nil:
 		return errInvalid("send either password or invite, not both")
-	case invite && in.ClientID == nil:
-		return errInvalid("client_id is required with invite: the invite links to its login host")
-	case !invite && in.ClientID != nil:
-		return errInvalid("client_id is only used with invite")
+	case invite && in.Host != nil && in.ClientID != nil:
+		return errInvalid("send host or client_id with invite, not both")
+	case !invite && (in.ClientID != nil || in.Host != nil):
+		return errInvalid("host and client_id are only used with invite")
 	case !invite && in.Password == nil:
 		return errInvalid("password is required (or invite)")
 	}
@@ -217,7 +99,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if invite {
-		return s.inviteUser(w, r, poolID, addr, *in.ClientID)
+		return s.inviteUser(w, r, poolID, addr, deref(in.Host), deref(in.ClientID))
 	}
 	hash, err := s.hashPassword(*in.Password)
 	if err != nil {
@@ -233,39 +115,17 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) error {
 }
 
 // inviteUser creates a user without a password and emails them a link to
-// choose one, on the client's default login host. Choosing the password
-// also verifies the email. If the email can't be sent, the user is
-// deleted again, so the request can simply be retried.
-func (s *Server) inviteUser(w http.ResponseWriter, r *http.Request, poolID, addr, clientID string) error {
+// choose one, on a login host of their pool. Choosing the password also
+// verifies the email. If the email can't be sent, the user is deleted
+// again, so the request can simply be retried.
+func (s *Server) inviteUser(w http.ResponseWriter, r *http.Request, poolID, addr, host, clientID string) error {
 	ctx := r.Context()
 	if s.Email == nil {
 		return &apiError{Status: http.StatusNotImplemented, Code: "not_implemented", Message: "email isn't configured for this server"}
 	}
-	c, err := s.Store.GetClient(ctx, clientID)
-	if errors.Is(err, store.ErrNotFound) {
-		return errInvalid("client %s doesn't exist", clientID)
-	}
+	h, org, err := s.inviteHost(r, poolID, host, clientID)
 	if err != nil {
 		return err
-	}
-	if c.UserPoolID != poolID {
-		return errInvalid("client %s doesn't use pool %s", clientID, poolID)
-	}
-	if c.Status != store.ClientActive {
-		return errInvalid("client %s is disabled", clientID)
-	}
-	hosts, err := s.Store.ListClientHosts(ctx, clientID)
-	if err != nil {
-		return err
-	}
-	host := ""
-	for _, h := range hosts {
-		if h.Type == store.HostTypeDefault && h.Status == store.HostVerified {
-			host = h.Host
-		}
-	}
-	if host == "" {
-		return errInvalid("client %s has no verified default login host", clientID)
 	}
 
 	u := &store.User{ID: crypto.NewID(), PoolID: poolID, Email: addr}
@@ -277,7 +137,7 @@ func (s *Server) inviteUser(w http.ResponseWriter, r *http.Request, poolID, addr
 		Hash: crypto.HashToken(token), Purpose: store.PurposeResetPassword, PoolID: poolID, UserID: u.ID, Email: addr,
 	}, InviteLifetime)
 	if err == nil {
-		err = s.sendInvite(ctx, c, host, addr, token)
+		err = s.sendInvite(ctx, h, org, addr, token)
 	}
 	if err != nil {
 		if derr := s.Store.DeleteUser(ctx, u.ID); derr != nil {
@@ -289,20 +149,81 @@ func (s *Server) inviteUser(w http.ResponseWriter, r *http.Request, poolID, addr
 	return nil
 }
 
-func (s *Server) sendInvite(ctx context.Context, c *store.Client, host, addr, token string) error {
-	scheme, h := s.LinkScheme, host
+// inviteHost picks the login host an invite links to (see UserInput).
+func (s *Server) inviteHost(r *http.Request, poolID, host, clientID string) (*store.LoginHost, *store.Org, error) {
+	ctx := r.Context()
+	pool, err := s.Store.GetPool(ctx, poolID)
+	if err != nil {
+		return nil, nil, err
+	}
+	org, err := s.Store.GetOrg(ctx, pool.OrgID)
+	if err != nil {
+		return nil, nil, err
+	}
+	usable := func(h *store.LoginHost) bool { return h.PoolID == poolID && h.Status == store.HostVerified }
+	switch {
+	case host != "":
+		h, err := s.Store.GetLoginHost(ctx, host)
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidHost) || (err == nil && !usable(h)) {
+			return nil, nil, errInvalid("host %s isn't a verified login host of pool %s", host, poolID)
+		}
+		return h, org, err
+	case clientID != "":
+		c, err := s.Store.GetClient(ctx, clientID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil, errInvalid("client %s doesn't exist", clientID)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		if c.UserPoolID != poolID {
+			return nil, nil, errInvalid("client %s doesn't use pool %s", clientID, poolID)
+		}
+		if c.Status != store.ClientActive {
+			return nil, nil, errInvalid("client %s is disabled", clientID)
+		}
+		hosts, err := s.Store.ListClientHosts(ctx, clientID)
+		if err != nil {
+			return nil, nil, err
+		}
+		var found []store.LoginHost
+		for _, h := range hosts {
+			if usable(&h) {
+				found = append(found, h)
+			}
+		}
+		if len(found) != 1 {
+			return nil, nil, errInvalid("client %s is on %d verified login hosts of the pool: say which with host", clientID, len(found))
+		}
+		return &found[0], org, nil
+	default:
+		if org.DefaultHost != "" {
+			h, err := s.Store.GetLoginHost(ctx, org.DefaultHost)
+			if err == nil && usable(h) {
+				return h, org, nil
+			}
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return nil, nil, err
+			}
+		}
+		return nil, nil, errInvalid("the org's default host isn't on pool %s: say which login host the invite links to with host", poolID)
+	}
+}
+
+func (s *Server) sendInvite(ctx context.Context, h *store.LoginHost, org *store.Org, addr, token string) error {
+	scheme, host := s.LinkScheme, h.Host
 	if scheme == "" {
 		scheme = "https"
 	}
 	if s.LinkPort != "" {
-		h += ":" + s.LinkPort
+		host += ":" + s.LinkPort
 	}
-	link := (&url.URL{Scheme: scheme, Host: h, Path: "/password/reset", RawQuery: url.Values{"token": {token}}.Encode()}).String()
-	brand := c.Name
-	if v := c.Theme["brand_name"]; v != "" {
+	link := (&url.URL{Scheme: scheme, Host: host, Path: "/password/reset", RawQuery: url.Values{"token": {token}}.Encode()}).String()
+	brand := org.Name
+	if v := h.Theme["brand_name"]; v != "" {
 		brand = v
 	}
-	m, err := email.Render(email.Invite, addr, email.Data{Brand: brand, Host: host, Link: link, Expires: "7 days"})
+	m, err := email.Render(email.Invite, addr, email.Data{Brand: brand, Host: h.Host, Link: link, Expires: "7 days"})
 	if err != nil {
 		return err
 	}

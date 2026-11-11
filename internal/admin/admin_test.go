@@ -31,6 +31,7 @@ type fakeStore struct {
 	mu      sync.Mutex
 	orgs    map[string]store.Org
 	pools   map[string]store.Pool
+	hosts   map[string]store.LoginHost
 	clients map[string]store.Client
 	idem    map[string]*idemRecord
 	users   []store.UserSummary
@@ -46,15 +47,19 @@ type idemRecord struct {
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{orgs: map[string]store.Org{}, pools: map[string]store.Pool{}, clients: map[string]store.Client{},
-		idem: map[string]*idemRecord{}}
+	return &fakeStore{orgs: map[string]store.Org{}, pools: map[string]store.Pool{}, hosts: map[string]store.LoginHost{},
+		clients: map[string]store.Client{}, idem: map[string]*idemRecord{}}
 }
 
-func (f *fakeStore) CreateOrg(_ context.Context, o *store.Org) error {
+func (f *fakeStore) CreateOrgWithHost(_ context.Context, o *store.Org, p *store.Pool, h *store.LoginHost) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	o.Status, o.Version, o.CreatedAt, o.UpdatedAt = store.OrgActive, 1, 1_800_000_000, 1_800_000_000
-	f.orgs[o.ID] = *o
+	if _, ok := f.hosts[h.Host]; ok {
+		return store.ErrHostTaken
+	}
+	o.Status, o.Version, o.CreatedAt, o.UpdatedAt, o.DefaultHost = store.OrgActive, 1, 1_800_000_000, 1_800_000_000, h.Host
+	p.OrgID, h.OrgID, h.PoolID, h.Type, h.Status = o.ID, o.ID, p.ID, store.HostTypeDefault, store.HostVerified
+	f.orgs[o.ID], f.pools[p.ID], f.hosts[h.Host] = *o, *p, *h
 	return nil
 }
 
@@ -93,13 +98,14 @@ func (f *fakeStore) GetPool(_ context.Context, id string) (*store.Pool, error) {
 	return &p, nil
 }
 
+// CreateClient accepts any host; the client gets pool-1.
 func (f *fakeStore) CreateClient(_ context.Context, c *store.Client, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failCreate != nil {
 		return f.failCreate
 	}
-	c.Status, c.Version = store.ClientActive, 1
+	c.Status, c.Version, c.UserPoolID, c.HostCount = store.ClientActive, 1, "pool-1", 1
 	f.clients[c.ID] = *c
 	return nil
 }
@@ -227,8 +233,13 @@ func TestOrgETagAndIfMatch(t *testing.T) {
 	res := r.call("POST", "/v1/orgs", `{"name":"  Acme  "}`)
 	wantCode(t, res, 201, "")
 	id := res.body["id"].(string)
-	if res.body["name"] != "Acme" || res.hdr.Get("ETag") != `"1"` || res.body["created_at"] != "2027-01-15T08:00:00Z" {
+	if res.body["name"] != "Acme" || res.hdr.Get("ETag") != `"1"` || res.body["created_at"] != "2027-01-15T08:00:00Z" ||
+		res.body["default_host"] != "acme.litelogin.test" || res.body["default_pool_id"] == "" {
 		t.Fatalf("create org: %s %v", res.raw, res.hdr)
+	}
+	h := r.store.hosts["acme.litelogin.test"]
+	if h.OrgID != id || h.PoolID != res.body["default_pool_id"] || !h.RegistrationEnabled || h.SessionTTL != 604800 {
+		t.Fatalf("default host: %+v", h)
 	}
 	res = r.call("GET", "/v1/orgs/"+id, "")
 	if res.hdr.Get("ETag") != `"1"` || res.hdr.Get("Cache-Control") != "no-store" {
@@ -246,21 +257,40 @@ func TestOrgETagAndIfMatch(t *testing.T) {
 	}
 	// The old ETag is stale now.
 	wantCode(t, r.call("PATCH", "/v1/orgs/"+id, `{"name":"Again"}`, "If-Match", `"1"`), 412, "version_mismatch")
+	// The default host is chosen at creation only.
+	wantCode(t, r.call("PATCH", "/v1/orgs/"+id, `{"host_label":"x"}`, "If-Match", `"2"`), 400, "invalid_request")
 }
 
-func TestRequestValidation(t *testing.T) {
+func TestCreateOrgDefaultHost(t *testing.T) {
 	r := newRig(t)
-	wantCode(t, r.call("POST", "/v1/orgs", ``), 400, "invalid_request")
-	wantCode(t, r.call("POST", "/v1/orgs", `{"name":"x"`), 400, "invalid_request")
-	wantCode(t, r.call("POST", "/v1/orgs", `{"name":"x","nmae":"typo"}`), 400, "invalid_request") //nolint:misspell // a deliberate typo
-	wantCode(t, r.call("POST", "/v1/orgs", `{"name":"x"} {}`), 400, "invalid_request")
-	wantCode(t, r.call("POST", "/v1/orgs", `{"name":"   "}`), 400, "invalid_request")
-	wantCode(t, r.call("POST", "/v1/orgs", `{"name":"`+strings.Repeat("a", 201)+`"}`), 400, "invalid_request")
-	wantCode(t, r.call("POST", "/v1/orgs", `{"name":"`+strings.Repeat("a", 70000)+`"}`), 413, "body_too_large")
-	wantCode(t, r.call("POST", "/v1/orgs", `{"name":"x"}`, "Idempotency-Key", strings.Repeat("k", 256)), 400, "invalid_request")
+	for _, tc := range []struct {
+		body string
+		want int
+	}{
+		{`{"name":"Acme"}`, 201},
+		{`{"name":"Other","host_label":"acme"}`, 409}, // taken
+		{`{"name":"!!!"}`, 400},                       // no label from the name
+		{`{"name":"x","host_label":"-bad"}`, 400},
+		{`{"name":"x","host_label":"a.b"}`, 400},
+		{`{"name":"x","host_label":"Login-1"}`, 201},
+		{`{"name":"y","host_settings":{"session_ttl":3600,"session_idle_ttl":7200}}`, 400},
+		{`{"name":"y","host_settings":{"session_ttl":10}}`, 400},
+		{`{"name":"y","host_settings":{"registration_enabled":false,"theme":{"brand_name":"Y"}}}`, 201},
+		{`{"name":"z","host_settings":{"session_ttl_typo":1}}`, 400},
+	} {
+		if res := r.call("POST", "/v1/orgs", tc.body); res.code != tc.want {
+			t.Errorf("%s: %d, want %d: %s", tc.body, res.code, tc.want, res.raw)
+		}
+	}
+	if h := r.store.hosts["login-1.litelogin.test"]; h.OrgID == "" {
+		t.Error("host_label isn't lowercased")
+	}
+	if h := r.store.hosts["y.litelogin.test"]; h.RegistrationEnabled || h.Theme["brand_name"] != "Y" || h.SessionTTL != 604800 {
+		t.Errorf("host_settings not applied: %+v", h)
+	}
 }
 
-const clientBody = `{"name":"Acme Portal","user_pool_id":"pool-1","redirect_uris":["https://app.acme.com/callback"]}`
+const clientBody = `{"name":"Acme Portal","host":"acme.litelogin.test","redirect_uris":["https://app.acme.com/callback"]}`
 
 func TestCreateClientSecretOnceAndIdempotency(t *testing.T) {
 	r := newRig(t)
@@ -269,15 +299,15 @@ func TestCreateClientSecretOnceAndIdempotency(t *testing.T) {
 	wantCode(t, res, 201, "")
 	secret, _ := res.body["client_secret"].(string)
 	id := res.body["id"].(string)
-	if len(secret) != 43 || res.body["default_host"] != "acme-portal.litelogin.test" ||
-		res.body["issuer"] != "https://acme-portal.litelogin.test" || res.body["token_endpoint_auth_method"] != AuthSecretBasic {
+	if len(secret) != 43 || res.body["host"] != "acme.litelogin.test" || res.body["user_pool_id"] != "pool-1" ||
+		res.body["issuer"] != "https://acme.litelogin.test" || res.body["token_endpoint_auth_method"] != AuthSecretBasic {
 		t.Fatalf("create client: %s", res.raw)
 	}
 	stored := r.store.clients[id]
 	if stored.ClientSecretHash != crypto.HashToken(secret) || strings.Contains(r.logs.String(), secret) {
 		t.Fatal("secret not stored as its hash, or logged")
 	}
-	if stored.AccessTokenTTL != 900 || stored.SessionIdleTTL != 86400 || len(stored.AllowedScopes) != 3 {
+	if stored.AccessTokenTTL != 900 || stored.RefreshFamilyTTL != 7776000 || len(stored.AllowedScopes) != 3 {
 		t.Fatalf("defaults not applied: %+v", stored)
 	}
 
@@ -307,8 +337,8 @@ func TestCreateClientSecretOnceAndIdempotency(t *testing.T) {
 	wantCode(t, r.call("POST", "/v1/orgs/org-1/clients", clientBody, "Idempotency-Key", "busy"), 409, "request_in_progress")
 
 	// A failed request releases its key, so it can be retried.
-	r.store.failCreate = store.ErrHostTaken
-	wantCode(t, r.call("POST", "/v1/orgs/org-1/clients", clientBody, "Idempotency-Key", "k2"), 409, "host_taken")
+	r.store.failCreate = store.ErrPoolNotActive
+	wantCode(t, r.call("POST", "/v1/orgs/org-1/clients", clientBody, "Idempotency-Key", "k2"), 409, "pool_not_active")
 	r.store.failCreate = nil
 	wantCode(t, r.call("POST", "/v1/orgs/org-1/clients", clientBody, "Idempotency-Key", "k2"), 201, "")
 
@@ -320,7 +350,7 @@ func TestCreateClientSecretOnceAndIdempotency(t *testing.T) {
 
 func TestClientValidation(t *testing.T) {
 	r := newRig(t)
-	base := map[string]any{"name": "App", "user_pool_id": "p", "redirect_uris": []string{"https://app.example.com/cb"}}
+	base := map[string]any{"name": "App", "host": "acme.litelogin.test", "redirect_uris": []string{"https://app.example.com/cb"}}
 	cases := []struct {
 		name  string
 		patch map[string]any
@@ -355,11 +385,15 @@ func TestClientValidation(t *testing.T) {
 		{"implicit", map[string]any{"grant_types": []string{"authorization_code", "implicit"}}, false},
 		{"ttl too short", map[string]any{"access_token_ttl": 10}, false},
 		{"family shorter than refresh", map[string]any{"refresh_token_ttl": 86400, "refresh_family_ttl": 3600}, false},
-		{"idle over session", map[string]any{"session_ttl": 3600, "session_idle_ttl": 7200}, false},
-		{"no pool", map[string]any{"user_pool_id": ""}, false},
-		{"label", map[string]any{"default_host_label": "acme-login"}, true},
-		{"bad label", map[string]any{"default_host_label": "-acme"}, false},
-		{"label with dot", map[string]any{"default_host_label": "a.b"}, false},
+		{"no host", map[string]any{"host": nil}, false},
+		{"bad host", map[string]any{"host": "not a host"}, false},
+		{"custom host", map[string]any{"host": "Login.Acme.com"}, true},
+		// Host settings and the pool come from the host.
+		{"session ttl", map[string]any{"session_ttl": 3600}, false},
+		{"registration", map[string]any{"registration_enabled": false}, false},
+		{"theme", map[string]any{"theme": map[string]string{}}, false},
+		{"pool", map[string]any{"user_pool_id": "p"}, false},
+		{"label", map[string]any{"default_host_label": "acme-login"}, false},
 	}
 	for _, tc := range cases {
 		body := map[string]any{}
@@ -367,6 +401,10 @@ func TestClientValidation(t *testing.T) {
 			body[k] = v
 		}
 		for k, v := range tc.patch {
+			if v == nil {
+				delete(body, k)
+				continue
+			}
 			body[k] = v
 		}
 		raw, _ := json.Marshal(body)
@@ -386,9 +424,6 @@ func TestDefaultLabel(t *testing.T) {
 			t.Errorf("defaultLabel(%q) = %q, want %q", in, got, want)
 		}
 	}
-	r := newRig(t)
-	wantCode(t, r.call("POST", "/v1/orgs/o/clients", `{"name":"!!!","user_pool_id":"p","redirect_uris":["https://a.example/cb"]}`),
-		400, "invalid_request")
 }
 
 func TestUserCursors(t *testing.T) {

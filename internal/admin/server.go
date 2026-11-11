@@ -16,7 +16,7 @@ import (
 
 // Store is the part of *store.Store the Admin API uses.
 type Store interface {
-	CreateOrg(ctx context.Context, org *store.Org) error
+	CreateOrgWithHost(ctx context.Context, org *store.Org, pool *store.Pool, host *store.LoginHost) error
 	GetOrg(ctx context.Context, orgID string) (*store.Org, error)
 	ListOrgs(ctx context.Context, opts store.ListOrgsOptions) ([]store.Org, string, error)
 	UpdateOrg(ctx context.Context, org *store.Org) error
@@ -28,7 +28,7 @@ type Store interface {
 	UpdatePool(ctx context.Context, pool *store.Pool) error
 	MarkPoolDeleting(ctx context.Context, poolID string) error
 
-	CreateClient(ctx context.Context, c *store.Client, defaultHost string) error
+	CreateClient(ctx context.Context, c *store.Client, host string) error
 	GetClient(ctx context.Context, clientID string) (*store.Client, error)
 	CreateOneTimeToken(ctx context.Context, t *store.OneTimeToken, lifetime time.Duration) error
 	ListClients(ctx context.Context, orgID string) ([]store.Client, error)
@@ -37,10 +37,15 @@ type Store interface {
 	SetClientSecretHash(ctx context.Context, clientID, secretHash string, expectedVersion int64) (*store.Client, error)
 	DeleteClient(ctx context.Context, clientID string) error
 
+	CreateHost(ctx context.Context, h *store.LoginHost) error
 	GetLoginHost(ctx context.Context, host string) (*store.LoginHost, error)
+	UpdateHostSettings(ctx context.Context, h *store.LoginHost) error
+	ListOrgHosts(ctx context.Context, orgID string) ([]store.LoginHost, error)
+	RemoveHost(ctx context.Context, host string) error
+	AddHostClient(ctx context.Context, host, clientID string) error
+	RemoveHostClient(ctx context.Context, host, clientID string) error
+	ListHostClients(ctx context.Context, host string) ([]string, error)
 	ListClientHosts(ctx context.Context, clientID string) ([]store.LoginHost, error)
-	AddCustomHost(ctx context.Context, clientID, host string) (*store.LoginHost, error)
-	RemoveHost(ctx context.Context, host string) (bool, error)
 
 	CreateUser(ctx context.Context, u *store.User) error
 	GetUser(ctx context.Context, userID string) (*store.User, error)
@@ -73,7 +78,7 @@ type Server struct {
 	Hasher *crypto.PasswordHasher
 	Cursor Cursors
 	// DefaultHostDomain is the parent domain of default login hosts, e.g.
-	// litelogin.com: a client's default host is {label}.{domain}.
+	// litelogin.com: an org's default host is {label}.{domain}.
 	DefaultHostDomain string
 	Caller            CallerFunc
 	Log               *slog.Logger
@@ -117,10 +122,16 @@ func (s *Server) Handler() http.Handler {
 	route("POST /v1/clients/{client}/enable", s.setClientStatus(store.ClientActive))
 	route("POST /v1/clients/{client}/secret", s.rotateClientSecret)
 
-	route("GET /v1/clients/{client}/hosts", s.listHosts)
-	route("POST /v1/clients/{client}/hosts", s.addHost)
-	route("GET /v1/clients/{client}/hosts/{host}", s.getHost)
-	route("DELETE /v1/clients/{client}/hosts/{host}", s.removeHost)
+	route("GET /v1/clients/{client}/hosts", s.listClientHosts)
+
+	route("GET /v1/orgs/{org}/hosts", s.listOrgHosts)
+	route("POST /v1/orgs/{org}/hosts", s.addHost)
+	route("GET /v1/hosts/{host}", s.getHost)
+	route("PATCH /v1/hosts/{host}", s.updateHost)
+	route("DELETE /v1/hosts/{host}", s.removeHost)
+	route("GET /v1/hosts/{host}/clients", s.listHostClients)
+	route("PUT /v1/hosts/{host}/clients/{client}", s.addHostClient)
+	route("DELETE /v1/hosts/{host}/clients/{client}", s.removeHostClient)
 
 	route("POST /v1/pools/{pool}/users", s.createUser)
 	route("GET /v1/pools/{pool}/users", s.listUsers)

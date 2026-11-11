@@ -23,13 +23,14 @@ func group(use, short string, children ...*cobra.Command) *cobra.Command {
 // ---- init ----
 
 func (a *App) initCommand() *cobra.Command {
-	var org, pool, client, clientType, label, key string
+	var org, client, clientType, label, key string
 	var redirects []string
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Create an org, a user pool, a client and its default login host",
-		Long: `Create an org, a user pool, a client and its default login host, and
-print the issuer URL and client credentials.
+		Short: "Create an org (with its user pool and default login host) and a client",
+		Long: `Create an org, which comes with a default user pool and a default login
+host, and a client on that host, and print the issuer URL and client
+credentials.
 
 Every step is idempotent: if the command fails part way, run it again with
 the printed --idempotency-key to finish without creating duplicates. A
@@ -42,18 +43,15 @@ lost).`,
 			key = a.idempotencyKey(key)
 			_, _ = fmt.Fprintf(a.Stderr, "Idempotency key: %s\n", key)
 
+			orgBody := map[string]any{"name": org}
+			if label != "" {
+				orgBody["host_label"] = label
+			}
 			var o admin.Org
-			if _, err := a.create(cmd, "/v1/orgs", key+"/org", map[string]any{"name": org}, &o); err != nil {
+			if _, err := a.create(cmd, "/v1/orgs", key+"/org", orgBody, &o); err != nil {
 				return fmt.Errorf("create org: %w", err)
 			}
-			var p admin.Pool
-			if _, err := a.create(cmd, "/v1/orgs/"+esc(o.ID)+"/pools", key+"/pool", map[string]any{"name": pool}, &p); err != nil {
-				return fmt.Errorf("create pool: %w", err)
-			}
-			body := map[string]any{"name": client, "client_type": clientType, "user_pool_id": p.ID, "redirect_uris": redirects}
-			if label != "" {
-				body["default_host_label"] = label
-			}
+			body := map[string]any{"name": client, "client_type": clientType, "host": o.DefaultHost, "redirect_uris": redirects}
 			var c admin.Client
 			replayed, err := a.create(cmd, "/v1/orgs/"+esc(o.ID)+"/clients", key+"/client", body, &c)
 			if err != nil {
@@ -61,6 +59,10 @@ lost).`,
 			}
 
 			if a.output == OutputJSON {
+				var p admin.Pool
+				if _, err := a.get(cmd, "/v1/pools/"+esc(c.UserPoolID), &p); err != nil {
+					return fmt.Errorf("get pool: %w", err)
+				}
 				return printJSON(a.Stdout, map[string]any{"org": o, "pool": p, "client": c})
 			}
 			rows := []struct {
@@ -69,7 +71,7 @@ lost).`,
 				Client       string `json:"client_id"`
 				Issuer       string `json:"issuer"`
 				ClientSecret string `json:"client_secret,omitempty"`
-			}{{o.ID, p.ID, c.ID, c.Issuer, c.ClientSecret}}
+			}{{o.ID, c.UserPoolID, c.ID, c.Issuer, c.ClientSecret}}
 			if err := printObject(a.Stdout, OutputTable, rows[0]); err != nil {
 				return err
 			}
@@ -84,11 +86,10 @@ lost).`,
 	}
 	f := cmd.Flags()
 	f.StringVar(&org, "org", "", "org name (required)")
-	f.StringVar(&pool, "pool", "Default", "user pool name")
 	f.StringVar(&client, "client", "", "client name (required)")
 	f.StringVar(&clientType, "type", admin.ClientConfidential, "client type: confidential or public")
 	f.StringArrayVar(&redirects, "redirect-uri", nil, "redirect URI (required; repeat for more)")
-	f.StringVar(&label, "host-label", "", "default login host label (default: from the client name)")
+	f.StringVar(&label, "host-label", "", "the org's default login host label (default: from the org name)")
 	idempotencyFlag(cmd, &key)
 	for _, name := range []string{"org", "client", "redirect-uri"} {
 		_ = cmd.MarkFlagRequired(name)
@@ -123,15 +124,25 @@ func action[T any](a *App, cmd *cobra.Command, path string) error {
 // ---- org ----
 
 func (a *App) orgCommand() *cobra.Command {
-	var name, desc, key string
+	var name, desc, label, key string
+	var hs hostSettingsFlags
 	create := &cobra.Command{
-		Use: "create", Short: "Create an org", Args: cobra.NoArgs,
+		Use: "create", Short: "Create an org, with its default user pool and default login host", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return createAndShow[admin.Org](a, cmd, "/v1/orgs", key, map[string]any{"name": name, "description": desc})
+			body := map[string]any{"name": name, "description": desc}
+			if label != "" {
+				body["host_label"] = label
+			}
+			if settings := hs.body(cmd); len(settings) > 0 {
+				body["host_settings"] = settings
+			}
+			return createAndShow[admin.Org](a, cmd, "/v1/orgs", key, body)
 		},
 	}
 	create.Flags().StringVar(&name, "name", "", "name (required)")
 	create.Flags().StringVar(&desc, "description", "", "description")
+	create.Flags().StringVar(&label, "host-label", "", "default login host label (default: from the name)")
+	hs.register(create)
 	_ = create.MarkFlagRequired("name")
 	idempotencyFlag(create, &key)
 
@@ -154,7 +165,7 @@ func (a *App) orgCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return printList(a.Stdout, a.output, orgs, next, "id", "name", "status", "created_at", "version")
+			return printList(a.Stdout, a.output, orgs, next, "id", "name", "status", "default_host", "created_at", "version")
 		},
 	}
 	pageFlags(list, &limit, &cursor, &all)
@@ -315,36 +326,31 @@ func (a *App) poolCommand() *cobra.Command {
 // ---- client ----
 
 type clientFlags struct {
-	name, desc, pool, clientType, authMethod, label string
-	redirects, logoutRedirects, origins, scopes     []string
-	grants                                          []string
-	registration, requirePKCE                       bool
-	accessTTL, idTTL, refreshTTL, familyTTL         int64
-	sessionTTL, idleTTL                             int64
+	name, desc, host, clientType, authMethod    string
+	redirects, logoutRedirects, origins, scopes []string
+	grants                                      []string
+	requirePKCE                                 bool
+	accessTTL, idTTL, refreshTTL, familyTTL     int64
 }
 
 func (f *clientFlags) register(cmd *cobra.Command, create bool) {
 	fl := cmd.Flags()
 	fl.StringVar(&f.name, "name", "", "name")
 	fl.StringVar(&f.desc, "description", "", "description")
-	fl.StringVar(&f.pool, "pool", "", "user pool ID")
 	fl.StringVar(&f.authMethod, "token-endpoint-auth-method", "", "confidential clients: client_secret_basic (default) or client_secret_post")
 	fl.StringArrayVar(&f.redirects, "redirect-uri", nil, "redirect URI (repeat for more; replaces the list)")
 	fl.StringArrayVar(&f.logoutRedirects, "post-logout-redirect-uri", nil, "post-logout redirect URI (repeat for more; replaces the list)")
 	fl.StringArrayVar(&f.origins, "allowed-origin", nil, "browser origin allowed to call /token and /userinfo (repeat for more; replaces the list)")
 	fl.StringSliceVar(&f.scopes, "scopes", nil, "allowed scopes, comma-separated (default: openid,email,offline_access)")
 	fl.StringSliceVar(&f.grants, "grant-types", nil, "grant types, comma-separated (default: authorization_code,refresh_token)")
-	fl.BoolVar(&f.registration, "registration", true, "allow users to register on the login pages")
-	fl.BoolVar(&f.requirePKCE, "require-pkce", true, "require PKCE in authorization requests (only confidential clients can set false)")
+	fl.BoolVar(&f.requirePKCE, "require-pkce", true, "require PKCE (only confidential clients can set false: PKCE is then optional when the client authenticates)")
 	fl.Int64Var(&f.accessTTL, "access-token-ttl", 0, "access token lifetime in seconds")
 	fl.Int64Var(&f.idTTL, "id-token-ttl", 0, "ID token lifetime in seconds")
 	fl.Int64Var(&f.refreshTTL, "refresh-token-ttl", 0, "refresh token lifetime in seconds")
 	fl.Int64Var(&f.familyTTL, "refresh-family-ttl", 0, "maximum lifetime of a chain of refresh tokens in seconds")
-	fl.Int64Var(&f.sessionTTL, "session-ttl", 0, "login session lifetime in seconds")
-	fl.Int64Var(&f.idleTTL, "session-idle-ttl", 0, "login session idle timeout in seconds")
 	if create {
 		fl.StringVar(&f.clientType, "type", admin.ClientConfidential, "confidential or public")
-		fl.StringVar(&f.label, "host-label", "", "default login host label (default: from the name)")
+		fl.StringVar(&f.host, "host", "", "the login host the client is on, e.g. the org's default_host (required)")
 	}
 }
 
@@ -352,16 +358,14 @@ func (f *clientFlags) body(cmd *cobra.Command) map[string]any {
 	body := changed(cmd, map[string]any{
 		"name": &f.name, "description": &f.desc, "token-endpoint-auth-method": &f.authMethod,
 		"redirect-uri": &f.redirects, "post-logout-redirect-uri": &f.logoutRedirects, "allowed-origin": &f.origins,
-		"scopes": &f.scopes, "grant-types": &f.grants, "registration": &f.registration,
-		"require-pkce": &f.requirePKCE, "access-token-ttl": &f.accessTTL, "id-token-ttl": &f.idTTL, "refresh-token-ttl": &f.refreshTTL,
-		"refresh-family-ttl": &f.familyTTL, "session-ttl": &f.sessionTTL, "session-idle-ttl": &f.idleTTL,
-		"type": &f.clientType, "host-label": &f.label, "pool": &f.pool,
+		"scopes": &f.scopes, "grant-types": &f.grants, "require-pkce": &f.requirePKCE,
+		"access-token-ttl": &f.accessTTL, "id-token-ttl": &f.idTTL, "refresh-token-ttl": &f.refreshTTL,
+		"refresh-family-ttl": &f.familyTTL, "type": &f.clientType, "host": &f.host,
 	})
 	// Flag names that differ from the API's field names.
 	for flag, field := range map[string]string{
 		"redirect_uri": "redirect_uris", "post_logout_redirect_uri": "post_logout_redirect_uris",
-		"allowed_origin": "allowed_origins", "scopes": "allowed_scopes", "registration": "registration_enabled",
-		"type": "client_type", "host_label": "default_host_label", "pool": "user_pool_id",
+		"allowed_origin": "allowed_origins", "scopes": "allowed_scopes", "type": "client_type",
 	} {
 		if v, ok := body[flag]; ok {
 			delete(body, flag)
@@ -371,14 +375,43 @@ func (f *clientFlags) body(cmd *cobra.Command) map[string]any {
 	return body
 }
 
-var clientColumns = []string{"id", "name", "status", "client_type", "user_pool_id", "version"}
+// hostSettingsFlags are a login host's settings.
+type hostSettingsFlags struct {
+	theme               map[string]string
+	registration        bool
+	sessionTTL, idleTTL int64
+}
+
+func (f *hostSettingsFlags) register(cmd *cobra.Command) {
+	fl := cmd.Flags()
+	fl.StringToStringVar(&f.theme, "theme", nil, "theme, as key=value pairs (brand_name, primary_color, background_color, logo_url; replaces the theme)")
+	fl.BoolVar(&f.registration, "registration", true, "allow users to register on the login pages")
+	fl.Int64Var(&f.sessionTTL, "session-ttl", 0, "login session lifetime in seconds")
+	fl.Int64Var(&f.idleTTL, "session-idle-ttl", 0, "login session idle timeout in seconds")
+}
+
+func (f *hostSettingsFlags) body(cmd *cobra.Command) map[string]any {
+	body := changed(cmd, map[string]any{
+		"registration": &f.registration, "session-ttl": &f.sessionTTL, "session-idle-ttl": &f.idleTTL,
+	})
+	if v, ok := body["registration"]; ok {
+		delete(body, "registration")
+		body["registration_enabled"] = v
+	}
+	if cmd.Flags().Changed("theme") {
+		body["theme"] = f.theme
+	}
+	return body
+}
+
+var clientColumns = []string{"id", "name", "status", "client_type", "user_pool_id", "host_count", "version"}
 
 func (a *App) clientCommand() *cobra.Command {
 	var cf clientFlags
 	var org, key string
 	create := &cobra.Command{
-		Use: "create", Short: "Create a client and its default login host", Args: cobra.NoArgs,
-		Example: `  litelogin client create --org ORG --pool POOL --name "Mobile app" --type public --redirect-uri com.acme.app:/callback`,
+		Use: "create", Short: "Create a client on a login host of its org", Args: cobra.NoArgs,
+		Example: `  litelogin client create --org ORG --host acme.litelogin.com --name "Mobile app" --type public --redirect-uri com.acme.app:/callback`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			body := cf.body(cmd)
 			body["client_type"] = cf.clientType
@@ -397,7 +430,7 @@ func (a *App) clientCommand() *cobra.Command {
 	}
 	cf.register(create, true)
 	create.Flags().StringVar(&org, "org", "", "org ID (required)")
-	for _, name := range []string{"org", "name", "pool", "redirect-uri"} {
+	for _, name := range []string{"org", "name", "host", "redirect-uri"} {
 		_ = create.MarkFlagRequired(name)
 	}
 	idempotencyFlag(create, &key)
@@ -454,74 +487,134 @@ func (a *App) clientCommand() *cobra.Command {
 		actionCommand[admin.Client](a, "disable CLIENT", "Disable a client: its logins and refresh tokens stop working", "/v1/clients/", "/disable"),
 		actionCommand[admin.Client](a, "enable CLIENT", "Enable a disabled client", "/v1/clients/", "/enable"),
 		rotate,
-		deleteCommand(a, "delete CLIENT", "Delete a client and its default login host", "/v1/clients/", "client"),
+		deleteCommand(a, "delete CLIENT", "Delete a client (its login hosts stay)", "/v1/clients/", "client"),
 	)
 }
 
 // ---- host ----
 
-func (a *App) hostCommand() *cobra.Command {
-	var client string
-	withClient := func(cmd *cobra.Command) *cobra.Command {
-		cmd.Flags().StringVar(&client, "client", "", "client ID (required)")
-		_ = cmd.MarkFlagRequired("client")
-		return cmd
-	}
-	hostPath := func(host string) string { return "/v1/clients/" + esc(client) + "/hosts/" + esc(host) }
+var hostColumns = []string{"host", "type", "status", "user_pool_id", "registration_enabled", "version"}
 
-	list := withClient(&cobra.Command{
-		Use: "list", Short: "List a client's login hosts", Args: cobra.NoArgs,
+func (a *App) hostCommand() *cobra.Command {
+	var org, client, pool string
+	hostPath := func(host string) string { return "/v1/hosts/" + esc(host) }
+
+	list := &cobra.Command{
+		Use: "list", Short: "List an org's login hosts, or a client's", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			path := "/v1/orgs/" + esc(org) + "/hosts"
+			switch {
+			case (org == "") == (client == ""):
+				return errors.New("give --org or --client")
+			case client != "":
+				path = "/v1/clients/" + esc(client) + "/hosts"
+			}
 			var out struct{ Items []admin.Host }
-			if _, err := a.get(cmd, "/v1/clients/"+esc(client)+"/hosts", &out); err != nil {
+			if _, err := a.get(cmd, path, &out); err != nil {
 				return err
 			}
-			return printList(a.Stdout, a.output, out.Items, "", "host", "type", "status", "issuer")
+			return printList(a.Stdout, a.output, out.Items, "", hostColumns...)
 		},
-	})
-	add := withClient(&cobra.Command{
-		Use: "add HOST", Short: "Add a custom login host to a client", Args: cobra.ExactArgs(1),
-		Example: "  litelogin host add --client CLIENT login.acme.com",
+	}
+	list.Flags().StringVar(&org, "org", "", "org ID")
+	list.Flags().StringVar(&client, "client", "", "client ID")
+
+	var addSettings hostSettingsFlags
+	add := &cobra.Command{
+		Use: "add HOST", Short: "Add a custom login host to an org", Args: cobra.ExactArgs(1),
+		Long: `Add a custom login host to an org. It's verified in the background; then
+add clients to it with "litelogin host add-client".`,
+		Example: "  litelogin host add --org ORG login.acme.com",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return show[admin.Host](a, cmd, Request{Method: http.MethodPost, Path: "/v1/clients/" + esc(client) + "/hosts",
-				Body: map[string]any{"host": args[0]}, IdempotencyKey: a.NewID()})
+			body := addSettings.body(cmd)
+			body["host"] = args[0]
+			if pool != "" {
+				body["user_pool_id"] = pool
+			}
+			return show[admin.Host](a, cmd, Request{Method: http.MethodPost, Path: "/v1/orgs/" + esc(org) + "/hosts",
+				Body: body, IdempotencyKey: a.NewID()})
 		},
-	})
-	status := withClient(&cobra.Command{
-		Use: "status HOST", Aliases: []string{"get"}, Short: "Show a login host and its verification status", Args: cobra.ExactArgs(1),
+	}
+	add.Flags().StringVar(&org, "org", "", "org ID (required)")
+	add.Flags().StringVar(&pool, "pool", "", "user pool the host serves (default: the pool of the org's default host)")
+	addSettings.register(add)
+	_ = add.MarkFlagRequired("org")
+
+	get := &cobra.Command{
+		Use: "get HOST", Aliases: []string{"status"}, Short: "Show a login host, its settings and verification status", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return show[admin.Host](a, cmd, Request{Method: http.MethodGet, Path: hostPath(args[0])})
 		},
-	})
-	remove := withClient(&cobra.Command{
-		Use: "remove HOST", Short: "Stop serving a login host and remove it", Args: cobra.ExactArgs(1),
+	}
+
+	var updSettings hostSettingsFlags
+	upd := &cobra.Command{
+		Use: "update HOST", Short: "Change a login host's settings (for every client on it)", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return update[admin.Host](a, cmd, hostPath(args[0]), updSettings.body(cmd))
+		},
+	}
+	updSettings.register(upd)
+
+	remove := &cobra.Command{
+		Use: "remove HOST", Short: "Stop serving a custom login host and remove it (it must have no clients)", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return a.remove(cmd, hostPath(args[0]), "host "+args[0])
 		},
-	})
-	return group("host", "Manage login hosts", list, add, status, remove)
+	}
+
+	clients := &cobra.Command{
+		Use: "clients HOST", Short: "List the clients on a login host", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var out struct{ Items []admin.Client }
+			if _, err := a.get(cmd, hostPath(args[0])+"/clients", &out); err != nil {
+				return err
+			}
+			return printList(a.Stdout, a.output, out.Items, "", clientColumns...)
+		},
+	}
+	addClient := &cobra.Command{
+		Use: "add-client HOST CLIENT", Short: "Put a client on a login host of its org and pool", Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return show[admin.HostClient](a, cmd, Request{Method: http.MethodPut,
+				Path: hostPath(args[0]) + "/clients/" + esc(args[1]), IdempotencyKey: a.NewID()})
+		},
+	}
+	removeClient := &cobra.Command{
+		Use: "remove-client HOST CLIENT", Short: "Take a client off a login host (not its last one)", Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.remove(cmd, hostPath(args[0])+"/clients/"+esc(args[1]), "client "+args[1]+" from host "+args[0])
+		},
+	}
+	return group("host", "Manage login hosts", list, add, get, upd, remove, clients, addClient, removeClient)
 }
 
 // ---- user ----
 
 func (a *App) userCommand() *cobra.Command {
-	var pool, email, key, prefix, cursor, inviteClient string
+	var pool, email, key, prefix, cursor, inviteClient, inviteHost string
 	var pwStdin, invite, verified, all bool
 	var limit int
 	create := &cobra.Command{
 		Use: "create", Short: "Create a user with an initial password", Args: cobra.NoArgs,
 		Example: `  echo "$PASSWORD" | litelogin user create --pool POOL --email admin@acme.com --password-stdin
-  litelogin user create --pool POOL --email bob@acme.com --invite --client CLIENT`,
+  litelogin user create --pool POOL --email bob@acme.com --invite`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			body := map[string]any{"email": email}
 			if verified {
 				body["email_verified"] = true
 			}
-			if (inviteClient != "") != invite {
-				return errors.New("--invite and --client go together: the invite links to the client's login host")
+			if !invite && (inviteClient != "" || inviteHost != "") {
+				return errors.New("--host and --client are only used with --invite")
 			}
 			if invite {
-				body["invite"], body["client_id"] = true, inviteClient
+				body["invite"] = true
+				if inviteHost != "" {
+					body["host"] = inviteHost
+				}
+				if inviteClient != "" {
+					body["client_id"] = inviteClient
+				}
 			} else {
 				pw, err := a.readPassword(pwStdin)
 				if err != nil {
@@ -535,8 +628,9 @@ func (a *App) userCommand() *cobra.Command {
 	create.Flags().StringVar(&pool, "pool", "", "user pool ID (required)")
 	create.Flags().StringVar(&email, "email", "", "email address (required)")
 	create.Flags().BoolVar(&pwStdin, "password-stdin", false, "read the initial password from stdin (otherwise you're prompted)")
-	create.Flags().BoolVar(&invite, "invite", false, "email the user a link to set their password instead (with --client)")
-	create.Flags().StringVar(&inviteClient, "client", "", "with --invite: the client whose login host the link is on")
+	create.Flags().BoolVar(&invite, "invite", false, "email the user a link to set their password instead (on the org's default host, unless --host or --client)")
+	create.Flags().StringVar(&inviteHost, "host", "", "with --invite: the login host the link is on")
+	create.Flags().StringVar(&inviteClient, "client", "", "with --invite: link to this client's login host (if it has one in the pool)")
 	create.Flags().BoolVar(&verified, "email-verified", false, "mark the email as already verified")
 	_ = create.MarkFlagRequired("pool")
 	_ = create.MarkFlagRequired("email")

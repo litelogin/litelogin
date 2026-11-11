@@ -53,16 +53,22 @@ func toAPIError(err error) *apiError {
 	case errors.Is(err, store.ErrEmailTaken):
 		return errConflict("email_taken", "a user in this pool already has this email")
 	case errors.Is(err, store.ErrHostTaken):
-		return errConflict("host_taken", "this login host is already in use")
+		return errConflict("host_taken", "this login host already exists")
 	case errors.Is(err, store.ErrVersionMismatch):
 		return &apiError{Status: http.StatusPreconditionFailed, Code: "version_mismatch",
 			Message: "the resource was changed since it was read; get it again and retry"}
 	case errors.Is(err, store.ErrPoolNotActive):
 		return errConflict("pool_not_active", "the pool doesn't exist in this org, or is being deleted")
 	case errors.Is(err, store.ErrPoolInUse):
-		return errConflict("pool_in_use", "a client still uses this pool")
-	case errors.Is(err, store.ErrHasCustomHosts):
-		return errConflict("has_custom_hosts", "remove the client's custom hosts first")
+		return errConflict("pool_in_use", "a client or login host still uses this pool")
+	case errors.Is(err, store.ErrWrongPool):
+		return errConflict("wrong_pool", "a client can only be on login hosts of its own org and user pool")
+	case errors.Is(err, store.ErrHostInUse):
+		return errConflict("host_in_use", "clients are still on this login host: remove them first")
+	case errors.Is(err, store.ErrLastHost):
+		return errConflict("last_host", "this is the client's only login host; every client is on at least one")
+	case errors.Is(err, store.ErrDefaultHost):
+		return errConflict("default_host", "an org's default login host can't be removed")
 	case errors.Is(err, store.ErrConditionFailed):
 		return errConflict("conflict", "the resource isn't in a state that allows this; get it again and retry")
 	case errors.Is(err, store.ErrInvalidEmail):

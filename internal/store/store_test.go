@@ -111,15 +111,15 @@ func TestTransactRetriesConflicts(t *testing.T) {
 }
 
 func TestQueryAllFollowsPages(t *testing.T) {
-	item := func(sk string) map[string]types.AttributeValue { return key("CLIENT#c", "LOGIN_HOST#"+sk) }
+	item := func(id string) map[string]types.AttributeValue { return key("LOGIN_HOST#h.example.com", "CLIENT#"+id) }
 	db := &fakeDB{queries: []*dynamodb.QueryOutput{
-		{Items: []map[string]types.AttributeValue{item("a.example.com")}, LastEvaluatedKey: item("a.example.com")},
-		{Items: []map[string]types.AttributeValue{item("b.example.com")}},
+		{Items: []map[string]types.AttributeValue{item("a")}, LastEvaluatedKey: item("a")},
+		{Items: []map[string]types.AttributeValue{item("b")}},
 	}}
-	hosts, err := New(db, "c", "s").ListClientHosts(context.Background(), "c")
+	ids, err := New(db, "c", "s").ListHostClients(context.Background(), "h.example.com")
 	must(t, err)
-	if len(hosts) != 2 || hosts[1].Host != "b.example.com" {
-		t.Fatalf("hosts = %+v", hosts)
+	if len(ids) != 2 || ids[1] != "b" {
+		t.Fatalf("ids = %v", ids)
 	}
 }
 

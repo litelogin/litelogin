@@ -40,9 +40,27 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, t *tenant) {
 // ---- Login ----
 
 func (s *Server) loginForm(w http.ResponseWriter, r *http.Request, t *tenant) {
+	authz := r.URL.Query().Get("authz")
+	s.useAuthzClient(r, t, authz)
 	s.render(w, r, t, http.StatusOK, "login", pageData{
-		Title: "Sign in", Notice: notices[r.URL.Query().Get("n")], Authz: r.URL.Query().Get("authz"),
+		Title: "Sign in", Notice: notices[r.URL.Query().Get("n")], Authz: authz,
 	})
+}
+
+// useAuthzClient makes the client of a pending authorization request the
+// tenant's client, so the page's CSP allows the redirect that follows
+// signing in. The request itself is validated again at /authorize.
+func (s *Server) useAuthzClient(r *http.Request, t *tenant, authz string) {
+	if authz == "" {
+		return
+	}
+	q, err := url.ParseQuery(authz)
+	if err != nil {
+		return
+	}
+	if c, err := s.hostClient(r.Context(), t, q.Get("client_id")); err == nil {
+		t.Client = c
+	}
 }
 
 // login implements "Login with email and password" (Datamodel.md). Every
@@ -52,6 +70,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 	ctx := r.Context()
 	addr, password := strings.TrimSpace(r.PostFormValue("email")), r.PostFormValue("password")
 	authz := r.PostFormValue("authz")
+	s.useAuthzClient(r, t, authz)
 	bad := func() {
 		s.render(w, r, t, http.StatusUnauthorized, "login", pageData{Title: "Sign in", Email: addr, Error: msgBadLogin, Authz: authz})
 	}
@@ -138,15 +157,15 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, t *tenant,
 	}
 	token := crypto.NewToken()
 	sess := &store.Session{
-		Hash: crypto.HashToken(token), OrgID: t.Org.ID, PoolID: t.Pool.ID, UserID: u.ID, ClientID: t.Client.ID,
+		Hash: crypto.HashToken(token), OrgID: t.Org.ID, PoolID: t.Pool.ID, UserID: u.ID, ClientID: t.clientID(),
 		LoginHost: t.Host, AuthVersion: u.AuthVersion, AMR: []string{"pwd"},
 		IP: viewerIP(r), UserAgent: truncate(r.UserAgent(), 256),
 	}
-	lifetime := time.Duration(t.Client.SessionTTL) * time.Second
-	if err := s.Store.CreateSession(ctx, sess, lifetime, time.Duration(t.Client.SessionIdleTTL)*time.Second); err != nil {
+	lifetime := time.Duration(t.Login.SessionTTL) * time.Second
+	if err := s.Store.CreateSession(ctx, sess, lifetime, time.Duration(t.Login.SessionIdleTTL)*time.Second); err != nil {
 		return err
 	}
-	s.setSessionCookie(w, token, t.Client.SessionTTL)
+	s.setSessionCookie(w, token, t.Login.SessionTTL)
 	return nil
 }
 
@@ -177,7 +196,7 @@ func truncate(s string, n int) string {
 // ---- Registration ----
 
 func (s *Server) registerForm(w http.ResponseWriter, r *http.Request, t *tenant) {
-	if !t.Client.RegistrationEnabled {
+	if !t.Login.RegistrationEnabled {
 		s.fail(w, r, t, errUnavailable)
 		return
 	}
@@ -188,7 +207,7 @@ func (s *Server) registerForm(w http.ResponseWriter, r *http.Request, t *tenant)
 // Whether or not the email is already registered, the response is the
 // same "check your email" page; the email says which case it was.
 func (s *Server) register(w http.ResponseWriter, r *http.Request, t *tenant) {
-	if !t.Client.RegistrationEnabled {
+	if !t.Login.RegistrationEnabled {
 		s.fail(w, r, t, errUnavailable)
 		return
 	}
@@ -442,22 +461,38 @@ type logoutRequest struct {
 	State                 string
 }
 
-// parseLogout validates a logout request's parameters. The login host
-// identifies the client, so a client_id or id_token_hint must match it,
-// and post_logout_redirect_uri must be one of its registered URIs.
+// parseLogout validates a logout request's parameters. The client is named
+// by client_id or by the audience of id_token_hint (both, if given, must
+// agree) and must be on this host; post_logout_redirect_uri must be one of
+// its registered URIs. Without a client there's nowhere to return to.
 func (s *Server) parseLogout(r *http.Request, t *tenant) (*logoutRequest, string) {
+	ctx := r.Context()
 	q := r.Form
-	if id := q.Get("client_id"); id != "" && id != t.Client.ID {
-		return nil, "The sign-out request is for another application."
+	if id := q.Get("client_id"); id != "" {
+		c, err := s.hostClient(ctx, t, id)
+		if err != nil {
+			return nil, "The sign-out request is for an application this page doesn't serve."
+		}
+		t.Client = c
 	}
 	if hint := q.Get("id_token_hint"); hint != "" {
-		c, err := s.Verifier.VerifyIDTokenHint(r.Context(), hint, s.issuer(t))
-		if err != nil || c.Audience != t.Client.ID {
+		claims, err := s.Verifier.VerifyIDTokenHint(ctx, hint, s.issuer(t))
+		if err != nil || (t.Client != nil && claims.Audience != t.Client.ID) {
 			return nil, "The sign-out request isn't valid for this application."
+		}
+		if t.Client == nil {
+			c, err := s.hostClient(ctx, t, claims.Audience)
+			if err != nil {
+				return nil, "The sign-out request isn't valid for this application."
+			}
+			t.Client = c
 		}
 	}
 	req := &logoutRequest{State: q.Get("state")}
 	if u := q.Get("post_logout_redirect_uri"); u != "" {
+		if t.Client == nil {
+			return nil, "The sign-out request doesn't say which application it's for."
+		}
 		if !slices.Contains(t.Client.PostLogoutRedirectURIs, u) {
 			return nil, "The sign-out request's return address isn't registered for this application."
 		}
@@ -505,7 +540,7 @@ func (s *Server) logoutForm(w http.ResponseWriter, r *http.Request, t *tenant) {
 		return
 	}
 	s.render(w, r, t, http.StatusOK, "logout", pageData{
-		Title: "Sign out", PostLogoutRedirectURI: req.PostLogoutRedirectURI, State: req.State,
+		Title: "Sign out", LogoutClientID: t.clientID(), PostLogoutRedirectURI: req.PostLogoutRedirectURI, State: req.State,
 	})
 }
 

@@ -118,8 +118,9 @@ func TestInitIsIdempotent(t *testing.T) {
 		"--redirect-uri", "https://app.acme.com/callback", "--idempotency-key", "bootstrap-1"}
 	var first initResult
 	e.json(&first, "", args...)
-	if first.Client.ClientSecret == "" || first.Client.Issuer != "https://acme-portal.litelogin.test" ||
-		first.Client.UserPoolID != first.Pool.ID || first.Pool.OrgID != first.Org.ID {
+	if first.Client.ClientSecret == "" || first.Client.Issuer != "https://acme.litelogin.test" ||
+		first.Org.DefaultHost != "acme.litelogin.test" || first.Client.Host != first.Org.DefaultHost ||
+		first.Client.UserPoolID != first.Pool.ID || first.Pool.OrgID != first.Org.ID || first.Pool.Name != "Default" {
 		t.Fatalf("init: %+v", first)
 	}
 	// The secret works: it's the one whose hash is stored.
@@ -158,7 +159,7 @@ func TestResourceLifecycle(t *testing.T) {
 	e := newEnv(t)
 	var init initResult
 	e.json(&init, "", "init", "--org", "Acme", "--client", "Portal", "--redirect-uri", "https://app.acme.com/cb")
-	org, pool, client := init.Org.ID, init.Pool.ID, init.Client.ID
+	org, pool, client, defaultHost := init.Org.ID, init.Pool.ID, init.Client.ID, init.Org.DefaultHost
 
 	// Orgs.
 	var o admin.Org
@@ -197,7 +198,11 @@ func TestResourceLifecycle(t *testing.T) {
 
 	// Clients.
 	var c admin.Client
-	e.json(&c, "", "client", "create", "--org", org, "--pool", pool, "--name", "Mobile app", "--type", "public",
+	if _, errOut, code := e.try("", "client", "create", "--org", org, "--name", "x", "--redirect-uri", "https://a.acme.com/cb"); code == 0 ||
+		!strings.Contains(errOut, "host") {
+		t.Fatalf("client create without --host: %q", errOut)
+	}
+	e.json(&c, "", "client", "create", "--org", org, "--host", defaultHost, "--name", "Mobile app", "--type", "public",
 		"--redirect-uri", "com.acme.app:/callback", "--scopes", "openid,email")
 	if c.ClientSecret != "" || c.TokenEndpointAuthMethod != "none" || len(c.AllowedScopes) != 2 || !c.RequirePKCE {
 		t.Fatalf("public client: %+v", c)
@@ -207,15 +212,14 @@ func TestResourceLifecycle(t *testing.T) {
 		t.Fatalf("public client without PKCE: %q", errOut)
 	}
 	var conf admin.Client
-	e.json(&conf, "", "client", "create", "--org", org, "--pool", pool, "--name", "Server app",
+	e.json(&conf, "", "client", "create", "--org", org, "--host", defaultHost, "--name", "Server app",
 		"--redirect-uri", "https://server.acme.com/cb", "--require-pkce=false")
 	if conf.RequirePKCE || conf.ClientType != "confidential" {
 		t.Fatalf("confidential client without PKCE: %+v", conf)
 	}
 	e.run("", "client", "delete", conf.ID)
-	e.json(&c, "", "client", "update", c.ID, "--allowed-origin", "https://app.acme.com", "--access-token-ttl", "600",
-		"--registration=false")
-	if c.AccessTokenTTL != 600 || len(c.AllowedOrigins) != 1 || c.RegistrationEnabled || c.Version != 2 {
+	e.json(&c, "", "client", "update", c.ID, "--allowed-origin", "https://app.acme.com", "--access-token-ttl", "600")
+	if c.AccessTokenTTL != 600 || len(c.AllowedOrigins) != 1 || c.UserPoolID != pool || c.HostCount != 1 || c.Version != 2 {
 		t.Fatalf("client update: %+v", c)
 	}
 	if _, errOut, code := e.try("", "client", "update", c.ID, "--redirect-uri", "http://evil.example/cb"); code == 0 ||
@@ -240,29 +244,57 @@ func TestResourceLifecycle(t *testing.T) {
 		t.Fatal("rotate-secret didn't replace the secret")
 	}
 
-	// Hosts.
+	// Hosts: the org's default host, and a custom one.
 	var h admin.Host
-	e.json(&h, "", "host", "add", "--client", client, "Login.Acme.com")
-	if h.Host != "login.acme.com" || h.Status != store.HostPending || h.Type != store.HostTypeCustom {
+	e.json(&h, "", "host", "update", defaultHost, "--registration=false", "--theme", "brand_name=Acme Login", "--session-ttl", "3600",
+		"--session-idle-ttl", "600")
+	if h.RegistrationEnabled || h.Theme["brand_name"] != "Acme Login" || h.SessionTTL != 3600 || h.Version != 2 {
+		t.Fatalf("host update: %+v", h)
+	}
+	e.json(&h, "", "host", "add", "--org", org, "Login.Acme.com")
+	if h.Host != "login.acme.com" || h.Status != store.HostPending || h.Type != store.HostTypeCustom || h.UserPoolID != pool ||
+		!h.RegistrationEnabled {
 		t.Fatalf("host add: %+v", h)
 	}
-	e.json(&h, "", "host", "status", "--client", client, "login.acme.com")
+	e.json(&h, "", "host", "status", "login.acme.com")
 	if h.Status != store.HostPending || h.WorkUpdatedAt == "" {
 		t.Fatalf("host status: %+v", h)
 	}
-	if _, errOut, code := e.try("", "host", "status", "--client", c.ID, "login.acme.com"); code == 0 || !strings.Contains(errOut, "not_found") {
-		t.Fatalf("another client's host: %q", errOut)
-	}
-	if _, errOut, code := e.try("", "host", "add", "--client", client, "x.litelogin.test"); code == 0 || !strings.Contains(errOut, "default hosts") {
+	if _, errOut, code := e.try("", "host", "add", "--org", org, "x.litelogin.test"); code == 0 || !strings.Contains(errOut, "default hosts") {
 		t.Fatalf("custom host under the default domain: %q", errOut)
 	}
-	if out := e.run("", "host", "list", "--client", client); !strings.Contains(out, "portal.litelogin.test") || !strings.Contains(out, "login.acme.com") {
+	if _, errOut, code := e.try("", "host", "add", "--org", org, "--pool", p.ID, "staff.acme.com"); code != 0 {
+		t.Fatalf("custom host on another pool: %q", errOut)
+	}
+	if _, errOut, code := e.try("", "host", "add-client", "staff.acme.com", client); code == 0 || !strings.Contains(errOut, "wrong_pool") {
+		t.Fatalf("client on another pool's host: %q", errOut)
+	}
+	e.run("", "host", "remove", "staff.acme.com")
+	if out := e.run("", "host", "list", "--org", org); !strings.Contains(out, defaultHost) || !strings.Contains(out, "login.acme.com") {
 		t.Fatalf("host list: %s", out)
 	}
-	if _, errOut, code := e.try("", "client", "delete", client); code == 0 || !strings.Contains(errOut, "has_custom_hosts") {
-		t.Fatalf("delete a client with custom hosts: %q", errOut)
+	var hc admin.HostClient
+	e.json(&hc, "", "host", "add-client", "login.acme.com", client)
+	if hc.Host != "login.acme.com" || hc.ClientID != client {
+		t.Fatalf("add-client: %+v", hc)
 	}
-	if out := e.run("", "host", "remove", "--client", client, "login.acme.com"); !strings.Contains(out, "background") {
+	if out := e.run("", "host", "list", "--client", client); !strings.Contains(out, defaultHost) || !strings.Contains(out, "login.acme.com") {
+		t.Fatalf("client's hosts: %s", out)
+	}
+	if out := e.run("", "host", "clients", "login.acme.com"); !strings.Contains(out, client) {
+		t.Fatalf("host clients: %s", out)
+	}
+	for args, want := range map[string]string{
+		"host remove login.acme.com":                     "host_in_use",
+		"host remove " + defaultHost:                     "default_host",
+		"host remove-client " + defaultHost + " " + c.ID: "last_host",
+	} {
+		if _, errOut, code := e.try("", strings.Fields(args)...); code == 0 || !strings.Contains(errOut, want) {
+			t.Fatalf("%s: %q, want %s", args, errOut, want)
+		}
+	}
+	e.run("", "host", "remove-client", "login.acme.com", client)
+	if out := e.run("", "host", "remove", "login.acme.com"); !strings.Contains(out, "background") {
 		t.Fatalf("remove custom host: %s", out)
 	}
 
@@ -271,9 +303,15 @@ func TestResourceLifecycle(t *testing.T) {
 		t.Fatalf("keys list: %s", out)
 	}
 
-	// Pool deletion is refused while a client uses the pool.
+	// Pool deletion is refused while a client or host uses the pool.
 	if _, errOut, code := e.try("", "pool", "delete", pool); code == 0 || !strings.Contains(errOut, "pool_in_use") {
 		t.Fatalf("delete a pool in use: %q", errOut)
+	}
+	if _, errOut, code := e.try("", "pool", "delete", p.ID); code == 0 || !strings.Contains(errOut, "pool_in_use") {
+		t.Fatalf("delete a pool with a host being removed: %q", errOut)
+	}
+	if err := e.store.DeleteRemovedHost(context.Background(), "staff.acme.com"); err != nil {
+		t.Fatal(err) // what the Worker does
 	}
 	if out := e.run("", "client", "delete", c.ID); !strings.Contains(out, "deleted client") {
 		t.Fatalf("client delete: %s", out)
@@ -317,21 +355,31 @@ func TestUsers(t *testing.T) {
 		!strings.Contains(errOut, "at least 8") {
 		t.Fatalf("short password: %q", errOut)
 	}
-	if _, errOut, code := e.try("", "user", "create", "--pool", pool, "--email", "b@acme.com", "--invite"); code == 0 ||
-		!strings.Contains(errOut, "--client") {
-		t.Fatalf("invite without client: %q", errOut)
+	// Invites link to the org's default host, or the client's only host.
+	host := init.Org.DefaultHost
+	for i, extra := range [][]string{nil, {"--client", init.Client.ID}, {"--host", host}} {
+		var invited admin.User
+		args := append([]string{"user", "create", "--pool", pool, "--email", "Invited@Acme.com", "--invite"}, extra...)
+		e.json(&invited, "", args...)
+		if invited.PasswordSet == nil || *invited.PasswordSet {
+			t.Fatalf("invited user: %+v", invited)
+		}
+		msgs := e.mail.Messages()
+		if len(msgs) != i+1 || msgs[i].To != "invited@acme.com" ||
+			!strings.Contains(msgs[i].Text, "https://"+host+"/password/reset?token=") || !strings.Contains(msgs[i].Text, "Acme") {
+			t.Fatalf("invite email %v: %+v", extra, msgs)
+		}
+		e.run("", "user", "delete", invited.ID) // keep the list checks below as they are
 	}
-	var invited admin.User
-	e.json(&invited, "", "user", "create", "--pool", pool, "--email", "Invited@Acme.com", "--invite", "--client", init.Client.ID)
-	if invited.PasswordSet == nil || *invited.PasswordSet {
-		t.Fatalf("invited user: %+v", invited)
+	for _, args := range [][]string{
+		{"--invite", "--host", "unknown.acme.com"},
+		{"--invite", "--client", "missing"},
+		{"--client", init.Client.ID, "--password-stdin"},
+	} {
+		if _, errOut, code := e.try("password123\n", append([]string{"user", "create", "--pool", pool, "--email", "b@acme.com"}, args...)...); code == 0 {
+			t.Fatalf("%v: accepted: %q", args, errOut)
+		}
 	}
-	msgs := e.mail.Messages()
-	if len(msgs) != 1 || msgs[0].To != "invited@acme.com" ||
-		!strings.Contains(msgs[0].Text, "https://"+init.Client.DefaultHost+"/password/reset?token=") {
-		t.Fatalf("invite email: %+v", msgs)
-	}
-	e.run("", "user", "delete", invited.ID) // keep the list checks below as they are
 	if _, errOut, code := e.try("", "user", "create", "--pool", pool, "--email", "b@acme.com"); code == 0 ||
 		!strings.Contains(errOut, "password-stdin") {
 		t.Fatalf("no password and no terminal: %q", errOut)

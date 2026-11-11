@@ -66,21 +66,16 @@ func newEnv(t *testing.T, requireVerified bool) *env {
 	})
 	st := store.New(db, configTable, sessionTable)
 
-	org := &store.Org{ID: crypto.NewID(), Name: "Acme"}
-	pool := &store.Pool{ID: crypto.NewID(), OrgID: org.ID, Name: "Default", RequireEmailVerified: requireVerified}
-	c := &store.Client{
-		ID: crypto.NewID(), OrgID: org.ID, Name: "Acme Portal", ClientType: "public", TokenEndpointAuthMethod: "none",
-		UserPoolID: pool.ID, RegistrationEnabled: true, Theme: map[string]string{web.ThemePrimary: "#2563eb"},
-		RedirectURIs: []string{"https://app.example.com/cb"}, PostLogoutRedirectURIs: []string{"https://app.example.com/bye"},
-		AllowedOrigins: []string{"https://app.example.com"}, AllowedScopes: []string{"openid", "email", "offline_access"},
-		GrantTypes: []string{"authorization_code", "refresh_token"}, AccessTokenTTL: 900, IDTokenTTL: 900,
-		RefreshTokenTTL: 2592000, RefreshFamilyTTL: 7776000, SessionTTL: 604800, SessionIdleTTL: 86400,
+	org := &store.Org{ID: crypto.NewID(), Name: "Acme Portal"}
+	pool := &store.Pool{ID: crypto.NewID(), Name: "Default", RequireEmailVerified: requireVerified}
+	host := &store.LoginHost{Host: loginHost, HostSettings: store.HostSettings{
+		Theme: map[string]string{web.ThemePrimary: "#2563eb"}, RegistrationEnabled: true, SessionTTL: 604800, SessionIdleTTL: 86400,
+	}}
+	if err := st.CreateOrgWithHost(ctx, org, pool, host); err != nil {
+		t.Fatal(err)
 	}
-	for _, err := range []error{st.CreateOrg(ctx, org), st.CreatePool(ctx, pool), st.CreateClient(ctx, c, loginHost)} {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+	e := &env{t: t, st: st, pool: pool}
+	e.client = e.addClient(func(*store.Client) {})
 
 	fake := kmsfake.New()
 	rot := &keyrotation.Rotator{KMS: fake, Store: st, Policy: keyrotation.DefaultPolicy, Environment: "test"}
@@ -110,7 +105,39 @@ func newEnv(t *testing.T, requireVerified bool) *env {
 		h.ServeHTTP(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	return &env{t: t, st: st, mail: mail, srv: srv, client: c, pool: pool}
+	e.mail, e.srv = mail, srv
+	return e
+}
+
+// addClient creates a public client on the login host; change adjusts it
+// first.
+func (e *env) addClient(change func(*store.Client)) *store.Client {
+	e.t.Helper()
+	c := &store.Client{
+		ID: crypto.NewID(), OrgID: e.pool.OrgID, Name: "Acme App", ClientType: "public", TokenEndpointAuthMethod: "none",
+		RedirectURIs: []string{"https://app.example.com/cb"}, PostLogoutRedirectURIs: []string{"https://app.example.com/bye"},
+		AllowedOrigins: []string{"https://app.example.com"}, AllowedScopes: []string{"openid", "email", "offline_access"},
+		GrantTypes: []string{"authorization_code", "refresh_token"}, AccessTokenTTL: 900, IDTokenTTL: 900,
+		RefreshTokenTTL: 2592000, RefreshFamilyTTL: 7776000,
+	}
+	change(c)
+	if err := e.st.CreateClient(context.Background(), c, loginHost); err != nil {
+		e.t.Fatal(err)
+	}
+	return c
+}
+
+// updateHost changes the login host's settings.
+func (e *env) updateHost(change func(*store.LoginHost)) {
+	e.t.Helper()
+	h, err := e.st.GetLoginHost(context.Background(), loginHost)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	change(h)
+	if err := e.st.UpdateHostSettings(context.Background(), h); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 // browser is a client with its own cookies that doesn't follow redirects.
@@ -377,7 +404,7 @@ func TestPageHeadersAndTheme(t *testing.T) {
 	}
 }
 
-func TestUnknownHostAndClientMismatch(t *testing.T) {
+func TestUnknownHost(t *testing.T) {
 	e := newEnv(t, false)
 	b := e.browser()
 	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, e.srv.URL+"/login", nil)
@@ -390,23 +417,15 @@ func TestUnknownHostAndClientMismatch(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("unknown host: %d, want 404", resp.StatusCode)
 	}
-	expect(t, b.get("/login?client_id=someone-else"), 404, "Page not available")
-	expect(t, b.get("/login?client_id="+e.client.ID), 200, "")
+	expect(t, b.get("/login"), 200, "")
 	expect(t, b.get("/nope"), 404, "Page not found")
 }
 
 func TestRegistrationDisabled(t *testing.T) {
 	e := newEnv(t, false)
 	ctx := context.Background()
-	c, err := e.st.GetClient(ctx, e.client.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.RegistrationEnabled = false
-	if err := e.st.UpdateClient(ctx, c); err != nil {
-		t.Fatal(err)
-	}
-	// A fresh server: the cache would otherwise serve the old client.
+	e.updateHost(func(h *store.LoginHost) { h.RegistrationEnabled = false })
+	// A fresh server: the cache would otherwise serve the old host.
 	ws := &web.Server{Store: e.st, Config: configcache.New(e.st, 0), Hasher: crypto.NewPasswordHasher(crypto.DefaultArgon2Params), Email: e.mail}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/register", nil)

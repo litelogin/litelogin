@@ -89,10 +89,11 @@ flowchart LR
 
 ### Login hosts and TLS
 
+- **Hosts belong to orgs.** Every org has a default host, `{label}.litelogin.com`, created with it; it can add custom hosts. A host serves one user pool, and the org's clients on that pool can be put on it. A host is the sign-on boundary: its sessions, theme, sign-up setting and session lifetimes are shared by every client on it, while each client keeps its own redirect URIs, scopes, grants, PKCE setting, token lifetimes and credentials (Datamodel.md, Decision 8).
 - **Default hosts** (`*.litelogin.com`) are served by one CloudFront distribution with a wildcard ACM certificate.
 - **Custom hosts** (e.g. `login.acme.com`) need a certificate each. Use CloudFront's multi-tenant distributions (CloudFront SaaS Manager): each custom host becomes a distribution tenant with its own managed certificate. The customer adds a CNAME to LiteLogin, and certificate validation doubles as the domain-ownership check.
 - **When a custom host is verified:** the host becomes `verified` only when both checks pass: the certificate has been issued, and the CNAME resolves to LiteLogin. A valid certificate alone doesn't prove that traffic will route correctly.
-- **Removing a custom host:** the host is set to `removing` and stops serving immediately. The Worker then deletes its CloudFront tenant and certificate, so a failed removal can't leave orphaned resources behind.
+- **Removing a custom host:** only a host with no clients left can be removed (an org's default host can't be). It's set to `removing` and stops serving immediately. The Worker then deletes its CloudFront tenant and certificate, so a failed removal can't leave orphaned resources behind.
 - Before relying on it, check the per-account limits on tenants and certificates against the expected number of custom domains.
 
 ### Forwarding the login host
@@ -130,7 +131,7 @@ All of these are served by the Auth Lambda on every login host.
 | `/.well-known/jwks.json` | GET, OPTIONS | Public signing keys |
 | `/authorize` | GET | Start authorization; reuse the session or show login |
 | `/login` | GET, POST | Login form |
-| `/register` | GET, POST | Registration form (if `registration_enabled`) |
+| `/register` | GET, POST | Registration form (if the host's `registration_enabled`) |
 | `/verify-email` | GET | Confirm an email verification link |
 | `/password/forgot` | GET, POST | Request a password reset |
 | `/password/reset` | GET, POST | Complete a password reset |
@@ -141,8 +142,8 @@ All of these are served by the Auth Lambda on every login host.
 
 **CORS:**
 - `/.well-known/*` is public and allows any origin.
-- `/token` and `/userinfo` allow only the origins in the client's `allowed_origins`. These are configured separately from `redirect_uris`, because a redirect URI isn't an origin (native apps, for example, use custom schemes).
-- Preflight `OPTIONS` requests carry no `client_id`, so the client is resolved from the login host, which belongs to exactly one client. Requests from any other origin get no CORS headers.
+- `/token` and `/userinfo` allow only the origins in the request's client's `allowed_origins`. These are configured separately from `redirect_uris`, because a redirect URI isn't an origin (native apps, for example, use custom schemes).
+- Preflight `OPTIONS` requests carry no `client_id`, so they're allowed for the `allowed_origins` of every client on the login host. The response to the request itself then allows only its own client's origins. Requests from any other origin get no CORS headers.
 
 The admin API is served separately by the Admin Lambda (see [Admin API](#admin-api)). It isn't reachable on login hosts.
 
@@ -223,15 +224,18 @@ The admin API is for deployment operators.
 
 | Resource | Operations |
 | -- | -- |
-| `/v1/orgs` | Create, list (oldest first) |
+| `/v1/orgs` | Create (with its default pool and default login host), list (oldest first) |
 | `/v1/orgs/{org}` | Get, update, suspend, reactivate |
 | `/v1/orgs/{org}/pools` | Create, list |
 | `/v1/pools/{pool}` | Get, update, delete (asynchronous; returns `202`) |
-| `/v1/orgs/{org}/clients` | Create (returns the client secret once), list |
+| `/v1/orgs/{org}/clients` | Create on an existing login host of the org (returns the client secret once), list |
 | `/v1/clients/{client}` | Get, update, disable, enable, delete |
 | `/v1/clients/{client}/secret` | Rotate (returns the new secret once) |
-| `/v1/clients/{client}/hosts` | List, add |
-| `/v1/clients/{client}/hosts/{host}` | Get (including verification status), remove |
+| `/v1/clients/{client}/hosts` | List the client's login hosts |
+| `/v1/orgs/{org}/hosts` | List, add a custom host |
+| `/v1/hosts/{host}` | Get (including verification status), update settings (theme, registration, session lifetimes), remove (a custom host with no clients) |
+| `/v1/hosts/{host}/clients` | List the host's clients |
+| `/v1/hosts/{host}/clients/{client}` | Add (`PUT`, idempotent) or remove (`DELETE`; not the client's last host) |
 | `/v1/pools/{pool}/users` | Create (with an initial password, or by emailing a password-set link), list, search by `email_prefix` |
 | `/v1/users/{user}` | Get, update, disable, enable, delete |
 | `/v1/users/{user}/sessions` | List, revoke all (increments `auth_version`) |
@@ -241,7 +245,7 @@ The admin API is for deployment operators.
 
 - **Versioning:** the API is versioned in the path (`/v1`). Changes within a version are additive only.
 - **Optimistic locking:** `GET` returns the item's `version` as an `ETag`. Updates must send `If-Match`, and a mismatch returns `412`.
-- **Pagination:** list endpoints take `limit` and an opaque `cursor`. The cursor is the encoded DynamoDB `LastEvaluatedKey`, bound to its listing (e.g. the pool and `email_prefix`) and signed with a KMS HMAC key, so callers can't change it or use it for another listing. The key never leaves KMS. The org and user lists are paginated; the other lists (an org's pools and clients, a client's hosts, signing keys) are small and return every item, and they gain a `next_cursor` the same way if they grow.
+- **Pagination:** list endpoints take `limit` and an opaque `cursor`. The cursor is the encoded DynamoDB `LastEvaluatedKey`, bound to its listing (e.g. the pool and `email_prefix`) and signed with a KMS HMAC key, so callers can't change it or use it for another listing. The key never leaves KMS. The org and user lists are paginated; the other lists (an org's pools, clients and hosts, a host's clients, a client's hosts, signing keys) are small and return every item, and they gain a `next_cursor` the same way if they grow.
 - **Idempotency:** create requests and other important changes accept an `Idempotency-Key` header. A retry with the same key and body returns the original response, so a lost response can't create a duplicate. Keys are scoped per caller and kept for 24 hours. The CLI sends one on every create. Client secrets aren't stored with the response: a replayed "create client" response has no secret, and the caller rotates it if the original response was lost.
 - **Errors:** JSON `{ "error": "<code>", "message": "<text>" }` with standard HTTP status codes. A missing `If-Match` is `428`, a stale one `412`, and unknown request fields are rejected with `400`, so a misspelled field fails instead of being ignored.
 - **Actions:** suspend, reactivate, disable, enable and rotate-secret are `POST` to a sub-path (e.g. `POST /v1/clients/{client}/disable`). They accept `If-Match` but don't require it. Revoking a user's sessions is `DELETE /v1/users/{user}/sessions`.
@@ -252,14 +256,18 @@ The admin API is for deployment operators.
 The `litelogin` CLI lives in this repository and is a thin client for the admin API. It signs requests with the standard AWS credential chain (`--profile`, environment variables, IAM Identity Center). It finds the admin API URL from `--endpoint`, a config file, or the deployed stack's outputs.
 
 ```sh
-# Bootstrap a new deployment: org, pool, client and default login host.
+# Bootstrap a new deployment: an org (with its default pool and default
+# login host, acme.litelogin.com) and a client on that host.
 # Prints the issuer URL, client ID and client secret.
 litelogin init --org "Acme" --client "Acme Portal" --redirect-uri https://app.acme.com/callback
 
-litelogin client create --org {org} --name "Mobile app" --type public --redirect-uri com.acme.app:/callback
-litelogin host add --client {client} login.acme.com
-litelogin host status --client {client} login.acme.com
-litelogin user create --pool {pool} --email admin@acme.com --invite --client {client}
+# A second client on the same host: one sign-in serves both.
+litelogin client create --org {org} --host acme.litelogin.com --name "Mobile app" --type public --redirect-uri com.acme.app:/callback
+litelogin host update acme.litelogin.com --theme brand_name=Acme --registration=false
+litelogin host add --org {org} login.acme.com
+litelogin host status login.acme.com
+litelogin host add-client login.acme.com {client}
+litelogin user create --pool {pool} --email admin@acme.com --invite
 litelogin user revoke-sessions {user}
 ```
 
@@ -332,7 +340,7 @@ If a deployment needs instant client or org disablement, shorten the cache time 
 | Pool deletion | Config stream: pool `status` set to `deleting` | Deletes the pool's users in bounded batches, using the SQS continuation queue to carry on across invocations. Re-running a batch is harmless, because every delete is conditional and missing items are skipped. |
 | Custom domain onboarding | Config stream: login host created with `status=pending` | Creates the CloudFront tenant and certificate. Safe to re-run: an existing tenant for the host is reused. |
 | Custom domain verification | Reconciler | Marks a `pending` host `verified` once its certificate has been issued and its CNAME points to LiteLogin |
-| Custom domain removal | Config stream: login host set to `status=removing` | Deletes the CloudFront tenant and certificate, then deletes both host items |
+| Custom domain removal | Config stream: login host set to `status=removing` | Deletes the CloudFront tenant and certificate, then deletes the host items |
 | Reconciler | EventBridge Scheduler, every 5 minutes | Queries Config GSI2 for outstanding work. Retries stalled jobs, checks pending hosts, and records `work_attempts` and `work_last_error`. |
 | Signing key rotation | EventBridge Scheduler (e.g. daily check, rotate every 90 days) | Prepare, activate and remove, as described in the data model |
 

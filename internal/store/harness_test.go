@@ -71,8 +71,8 @@ func newHash() string {
 	return hex.EncodeToString(b)
 }
 
-// fixture is an org with an active pool, a client on that pool with a
-// default host, and one active user.
+// fixture is an org with its default pool and default host, a client on
+// that host, and one active user.
 type fixture struct {
 	org    *Org
 	pool   *Pool
@@ -85,10 +85,10 @@ func (e *testEnv) newFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := &fixture{}
 	f.org = &Org{ID: newID(), Name: "Acme"}
-	must(t, e.CreateOrg(e.ctx, f.org))
-	f.pool = e.newPool(t, f.org.ID)
+	f.pool = &Pool{ID: newID(), Name: "Default"}
 	f.host = f.org.ID + ".login.example.com"
-	f.client = e.newClient(t, f.org.ID, f.pool.ID, f.host)
+	must(t, e.CreateOrgWithHost(e.ctx, f.org, f.pool, &LoginHost{Host: f.host, HostSettings: testHostSettings()}))
+	f.client = e.newClient(t, f.org.ID, f.host)
 	f.user = e.newUser(t, f.pool.ID, newID()+"@example.com")
 	return f
 }
@@ -100,14 +100,26 @@ func (e *testEnv) newPool(t *testing.T, orgID string) *Pool {
 	return p
 }
 
-func (e *testEnv) newClient(t *testing.T, orgID, poolID, host string) *Client {
+func testHostSettings() HostSettings {
+	return HostSettings{RegistrationEnabled: true, SessionTTL: 604800, SessionIdleTTL: 86400}
+}
+
+// newCustomHost adds a pending custom host to an org, on a pool.
+func (e *testEnv) newCustomHost(t *testing.T, orgID, poolID, host string) *LoginHost {
+	t.Helper()
+	h := &LoginHost{Host: host, OrgID: orgID, PoolID: poolID, Type: HostTypeCustom, HostSettings: testHostSettings()}
+	must(t, e.CreateHost(e.ctx, h))
+	return h
+}
+
+// newClient creates a client on an existing login host.
+func (e *testEnv) newClient(t *testing.T, orgID, host string) *Client {
 	t.Helper()
 	c := &Client{
 		ID: newID(), OrgID: orgID, Name: "App", ClientType: "public", TokenEndpointAuthMethod: "none",
 		GrantTypes: []string{"authorization_code", "refresh_token"}, RedirectURIs: []string{"https://app.example.com/cb"},
-		AllowedScopes: []string{"openid", "email", "offline_access"}, UserPoolID: poolID, RegistrationEnabled: true,
+		AllowedScopes:  []string{"openid", "email", "offline_access"},
 		AccessTokenTTL: 900, IDTokenTTL: 900, RefreshTokenTTL: 2592000, RefreshFamilyTTL: 7776000,
-		SessionTTL: 604800, SessionIdleTTL: 86400,
 	}
 	must(t, e.CreateClient(e.ctx, c, host))
 	return c

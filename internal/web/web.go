@@ -168,24 +168,30 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// ---- Client resolution ----
+// ---- Host and client resolution ----
 
-// tenant is the client a login host belongs to, with its org and pool.
+// tenant is the login host a request arrived on, with its org, pool and
+// settings, and the client of the request when there is one.
 type tenant struct {
-	Host   string
+	Host  string
+	Login *store.LoginHost
+	Org   *store.Org
+	Pool  *store.Pool
+	Theme Theme
+	// Client is the request's client, once known: named by client_id
+	// (authorize, logout), authenticated (token), or the audience of a
+	// token. It's nil on pages with no sign-in request in progress.
 	Client *store.Client
-	Org    *store.Org
-	Pool   *store.Pool
-	Theme  Theme
 }
 
 // errUnavailable means the login host doesn't serve: unknown, not
-// verified, or its org, client or pool isn't active. Every case looks the
-// same to the viewer.
+// verified, or its org or pool isn't active; or the client named isn't
+// active on the host. Every case looks the same to the viewer.
 var errUnavailable = errors.New("web: login host unavailable")
 
-// resolve implements "Resolve client from request" (Datamodel.md). Config
-// items come from the cache, so a change takes effect within its TTL.
+// resolve implements "Resolve login host from request" (Datamodel.md).
+// Config items come from the cache, so a change takes effect within its
+// TTL.
 func (s *Server) resolve(r *http.Request) (*tenant, error) {
 	ctx := r.Context()
 	host, err := store.NormalizeHost(httpx.LoginHost(r))
@@ -199,22 +205,63 @@ func (s *Server) resolve(r *http.Request) (*tenant, error) {
 	if err != nil {
 		return nil, err
 	}
-	if id := r.URL.Query().Get("client_id"); id != "" && id != h.ClientID {
-		return nil, errUnavailable
-	}
 	org, err := s.Config.Org(ctx, h.OrgID)
 	if err != nil || org.Status != store.OrgActive {
 		return nil, unavailable(err)
 	}
-	c, err := s.Config.Client(ctx, h.ClientID)
-	if err != nil || c.Status != store.ClientActive {
-		return nil, unavailable(err)
-	}
-	pool, err := s.Config.Pool(ctx, c.UserPoolID)
+	pool, err := s.Config.Pool(ctx, h.PoolID)
 	if err != nil || pool.Status != store.PoolActive {
 		return nil, unavailable(err)
 	}
-	return &tenant{Host: host, Client: c, Org: org, Pool: pool, Theme: ThemeFor(c)}, nil
+	return &tenant{Host: host, Login: h, Org: org, Pool: pool, Theme: ThemeFor(h, org)}, nil
+}
+
+// hostClient returns a client if it's active on the tenant's host: a
+// member of the host, in its pool. Otherwise it returns errUnavailable.
+func (s *Server) hostClient(ctx context.Context, t *tenant, clientID string) (*store.Client, error) {
+	if clientID == "" {
+		return nil, errUnavailable
+	}
+	if _, err := s.Config.HostClient(ctx, t.Host, clientID); err != nil {
+		return nil, unavailable(err)
+	}
+	c, err := s.Config.Client(ctx, clientID)
+	if err != nil || c.Status != store.ClientActive || c.UserPoolID != t.Pool.ID {
+		return nil, unavailable(err)
+	}
+	return c, nil
+}
+
+// hostOrigins returns the allowed_origins of every active client on the
+// host, for CORS preflight requests, which don't say which client they're
+// for.
+func (s *Server) hostOrigins(ctx context.Context, t *tenant) ([]string, error) {
+	ids, err := s.Config.HostClients(ctx, t.Host)
+	if err != nil {
+		return nil, err
+	}
+	var origins []string
+	for _, id := range ids {
+		c, err := s.Config.Client(ctx, id)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if c.Status == store.ClientActive && c.UserPoolID == t.Pool.ID {
+			origins = append(origins, c.AllowedOrigins...)
+		}
+	}
+	return origins, nil
+}
+
+// clientID is the ID of the tenant's client, or "".
+func (t *tenant) clientID() string {
+	if t.Client == nil {
+		return ""
+	}
+	return t.Client.ID
 }
 
 func unavailable(err error) error {
@@ -286,7 +333,8 @@ type pageData struct {
 	// the login form.
 	Authz string
 	// Logout carries a validated RP-initiated logout through its
-	// confirmation form.
+	// confirmation form: the client it's for, where to return and state.
+	LogoutClientID        string
 	PostLogoutRedirectURI string
 	State                 string
 
@@ -312,7 +360,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, t *tenant, statu
 	d.Nonce = crypto.NewToken()
 	d.MinPassword = MinPasswordLength
 	if t != nil {
-		d.Theme, d.Brand, d.Registration = t.Theme, t.Theme.Brand, t.Client.RegistrationEnabled
+		d.Theme, d.Brand, d.Registration = t.Theme, t.Theme.Brand, t.Login.RegistrationEnabled
 		d.CSRF = s.ensureCSRF(w, r)
 	} else {
 		d.Theme, d.Brand = DefaultTheme(), "LiteLogin"
@@ -332,10 +380,11 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, t *tenant, statu
 }
 
 // formActionSources lists 'self' and the origins (or, for native apps,
-// schemes) of the client's redirect and post-logout redirect URIs.
+// schemes) of the request's client's redirect and post-logout redirect
+// URIs.
 func formActionSources(t *tenant) string {
 	sources := []string{"'self'"}
-	if t == nil {
+	if t == nil || t.Client == nil {
 		return sources[0]
 	}
 	for _, raw := range append(slices.Clone(t.Client.RedirectURIs), t.Client.PostLogoutRedirectURIs...) {
@@ -428,8 +477,9 @@ func clearCookie(w http.ResponseWriter, name string) {
 }
 
 // currentSession returns the browser's session and user if the session is
-// usable for this client (Datamodel.md, "Authorize", step 2): unexpired,
-// in the client's pool, for an active user whose auth_version it matches.
+// usable on this host (Datamodel.md, "Authorize", step 2): unexpired,
+// started on this host, for an active user whose auth_version it matches.
+// A session serves every client on the host (single sign-on).
 // The user is always read, strongly consistent; it's never cached.
 func (s *Server) currentSession(r *http.Request, t *tenant) (*store.Session, *store.User, error) {
 	c, err := r.Cookie(SessionCookie)
@@ -444,7 +494,7 @@ func (s *Server) currentSession(r *http.Request, t *tenant) (*store.Session, *st
 	if err != nil {
 		return nil, nil, err
 	}
-	if sess.PoolID != t.Pool.ID || sess.ClientID != t.Client.ID || sess.LoginHost != t.Host {
+	if sess.PoolID != t.Pool.ID || sess.LoginHost != t.Host {
 		return nil, nil, nil
 	}
 	u, err := s.Store.GetUser(ctx, sess.UserID)
@@ -457,7 +507,7 @@ func (s *Server) currentSession(r *http.Request, t *tenant) (*store.Session, *st
 	if u.Status != store.UserActive || u.AuthVersion != sess.AuthVersion {
 		return nil, nil, nil
 	}
-	if _, err := s.Store.TouchSession(ctx, sess, time.Duration(t.Client.SessionIdleTTL)*time.Second); err != nil {
+	if _, err := s.Store.TouchSession(ctx, sess, time.Duration(t.Login.SessionIdleTTL)*time.Second); err != nil {
 		s.log().WarnContext(ctx, "touch session", "error", err)
 	}
 	return sess, u, nil

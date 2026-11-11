@@ -37,6 +37,40 @@ func (s *countingStore) GetClient(context.Context, string) (*store.Client, error
 func (s *countingStore) GetPool(context.Context, string) (*store.Pool, error) {
 	return nil, store.ErrNotFound
 }
+func (s *countingStore) GetHostClient(_ context.Context, host, clientID string) (*store.HostClient, error) {
+	s.reads++
+	if host == "h" && clientID == "c" {
+		return &store.HostClient{Host: host, ClientID: clientID}, nil
+	}
+	return nil, store.ErrNotFound
+}
+func (s *countingStore) ListHostClients(_ context.Context, host string) ([]string, error) {
+	s.reads++
+	if host == "h" {
+		return []string{"c"}, nil
+	}
+	return nil, nil
+}
+
+func TestHostClients(t *testing.T) {
+	ctx := context.Background()
+	s := &countingStore{}
+	c := New(s, 30*time.Second)
+	for range 2 {
+		if _, err := c.HostClient(ctx, "h", "c"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.HostClient(ctx, "h", "other"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("other client: %v", err)
+		}
+		if ids, err := c.HostClients(ctx, "h"); err != nil || len(ids) != 1 || ids[0] != "c" {
+			t.Fatalf("HostClients = %v, %v", ids, err)
+		}
+	}
+	if s.reads != 3 {
+		t.Errorf("%d reads, want 3 (each cached)", s.reads)
+	}
+}
 
 func TestCache(t *testing.T) {
 	ctx := context.Background()

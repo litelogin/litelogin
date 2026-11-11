@@ -7,7 +7,7 @@ import (
 	"github.com/litelogin/litelogin/internal/store"
 )
 
-// Theme keys a client's theme can set. Other keys are ignored, and so are
+// Theme keys a login host's theme can set. Other keys are ignored, and so are
 // invalid values: the theme goes into CSS and HTML, so only values that
 // match these formats are used.
 const (
@@ -22,19 +22,19 @@ var ThemeKeys = []string{ThemeBrandName, ThemePrimary, ThemeBackground, ThemeLog
 
 var hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
-// Theme is a client's validated theme.
+// Theme is a login host's validated theme.
 type Theme struct {
 	Brand   string
 	Primary string
-	// Background is a solid page color the client chose. When it's empty,
+	// Background is a solid page color the host's owner chose. When it's empty,
 	// pages use the default multi-color gradient with a frosted-glass
 	// card; with it, a plain light card (dark text stays readable on any
-	// color the client picks).
+	// color is picked).
 	Background string
 	LogoURL    string
 }
 
-// DefaultTheme is used where no client is known.
+// DefaultTheme is used where no login host is known.
 func DefaultTheme() Theme {
 	return Theme{Brand: "LiteLogin", Primary: "#2d2b55"}
 }
@@ -48,21 +48,21 @@ func ValidLogoURL(v string) bool {
 	return err == nil && u.Scheme == "https" && u.Host != "" && u.User == nil && len(v) <= 1024
 }
 
-// ThemeFor returns a client's theme, with defaults for unset or invalid
-// values.
-func ThemeFor(c *store.Client) Theme {
+// ThemeFor returns a login host's theme, with defaults for unset or invalid
+// values. The brand defaults to the org's name.
+func ThemeFor(h *store.LoginHost, org *store.Org) Theme {
 	t := DefaultTheme()
-	t.Brand = c.Name
-	if v := c.Theme[ThemeBrandName]; v != "" && len(v) <= 100 {
+	t.Brand = org.Name
+	if v := h.Theme[ThemeBrandName]; v != "" && len(v) <= 100 {
 		t.Brand = v
 	}
-	if v := c.Theme[ThemePrimary]; ValidColor(v) {
+	if v := h.Theme[ThemePrimary]; ValidColor(v) {
 		t.Primary = v
 	}
-	if v := c.Theme[ThemeBackground]; ValidColor(v) {
+	if v := h.Theme[ThemeBackground]; ValidColor(v) {
 		t.Background = v
 	}
-	if v := c.Theme[ThemeLogoURL]; ValidLogoURL(v) {
+	if v := h.Theme[ThemeLogoURL]; ValidLogoURL(v) {
 		t.LogoURL = v
 	}
 	return t

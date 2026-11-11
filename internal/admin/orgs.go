@@ -51,13 +51,18 @@ type Org struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
+	DefaultHost string `json:"default_host"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
 	Version     int64  `json:"version"`
+
+	// DefaultPoolID is set only in the create response: the pool created
+	// with the org, which its default host serves.
+	DefaultPoolID string `json:"default_pool_id,omitempty"`
 }
 
 func orgJSON(o *store.Org) Org {
-	return Org{ID: o.ID, Name: o.Name, Description: o.Description, Status: o.Status,
+	return Org{ID: o.ID, Name: o.Name, Description: o.Description, Status: o.Status, DefaultHost: o.DefaultHost,
 		CreatedAt: timestamp(o.CreatedAt), UpdatedAt: timestamp(o.UpdatedAt), Version: o.Version}
 }
 
@@ -65,6 +70,13 @@ func orgJSON(o *store.Org) Org {
 type OrgInput struct {
 	Name        *string `json:"name"`
 	Description *string `json:"description"`
+
+	// Create only. HostLabel names the org's default login host:
+	// {label}.{default host domain}. It defaults to the org name in
+	// lowercase, with other characters replaced by hyphens. HostSettings
+	// are the default host's settings.
+	HostLabel    *string            `json:"host_label"`
+	HostSettings *HostSettingsInput `json:"host_settings"`
 }
 
 func (s *Server) createOrg(w http.ResponseWriter, r *http.Request) error {
@@ -80,10 +92,27 @@ func (s *Server) createOrg(w http.ResponseWriter, r *http.Request) error {
 	if org.Description, err = validDescription(deref(in.Description)); err != nil {
 		return err
 	}
-	if err := s.Store.CreateOrg(r.Context(), org); err != nil {
+	label := defaultLabel(org.Name)
+	if in.HostLabel != nil {
+		label = strings.ToLower(strings.TrimSpace(*in.HostLabel))
+	}
+	if !hostLabel.MatchString(label) {
+		return errInvalid("host_label must be 1-63 letters, digits and hyphens, not starting or ending with a hyphen")
+	}
+	host := &store.LoginHost{Host: label + "." + s.DefaultHostDomain, HostSettings: defaultHostSettings()}
+	if err := in.HostSettings.apply(&host.HostSettings); err != nil {
 		return err
 	}
-	writeVersioned(w, http.StatusCreated, org.Version, orgJSON(org))
+	pool := &store.Pool{ID: crypto.NewID(), Name: "Default"}
+	if err := s.Store.CreateOrgWithHost(r.Context(), org, pool, host); err != nil {
+		if errors.Is(err, store.ErrHostTaken) {
+			return errConflict("host_taken", "the default host "+host.Host+" is taken: choose another host_label")
+		}
+		return err
+	}
+	out := orgJSON(org)
+	out.DefaultPoolID = pool.ID
+	writeVersioned(w, http.StatusCreated, org.Version, out)
 	return nil
 }
 
@@ -144,6 +173,9 @@ func (s *Server) updateOrg(w http.ResponseWriter, r *http.Request) error {
 	var in OrgInput
 	if err := decode(r, &in); err != nil {
 		return err
+	}
+	if in.HostLabel != nil || in.HostSettings != nil {
+		return errInvalid("host_label and host_settings can only be set when creating an org; change the host with PATCH /v1/hosts/{host}")
 	}
 	org, err := s.Store.GetOrg(r.Context(), id)
 	if err != nil {

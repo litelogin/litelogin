@@ -26,7 +26,7 @@ var (
 	// ErrEmailTaken: another user in the pool has this email.
 	ErrEmailTaken = errors.New("store: email already registered in pool")
 
-	// ErrHostTaken: the login host belongs to a client already.
+	// ErrHostTaken: the login host already exists.
 	ErrHostTaken = errors.New("store: login host already in use")
 
 	// ErrVersionMismatch: the item's version isn't the expected one; it was
@@ -36,11 +36,22 @@ var (
 	// ErrPoolNotActive: the pool is being deleted, or belongs to another org.
 	ErrPoolNotActive = errors.New("store: pool is not active")
 
-	// ErrPoolInUse: a client still uses the pool.
-	ErrPoolInUse = errors.New("store: pool is used by a client")
+	// ErrPoolInUse: a client or login host still uses the pool.
+	ErrPoolInUse = errors.New("store: pool is used by a client or login host")
 
-	// ErrHasCustomHosts: the client still has custom login hosts.
-	ErrHasCustomHosts = errors.New("store: client has custom login hosts")
+	// ErrWrongPool: a client can only be on login hosts of its own org and
+	// user pool.
+	ErrWrongPool = errors.New("store: the client and login host are in different orgs or pools")
+
+	// ErrHostInUse: clients are still on the login host.
+	ErrHostInUse = errors.New("store: login host still has clients")
+
+	// ErrLastHost: the login host is the client's only one; every client is
+	// on at least one.
+	ErrLastHost = errors.New("store: the client's only login host")
+
+	// ErrDefaultHost: an org's default login host can't be removed.
+	ErrDefaultHost = errors.New("store: the org's default login host")
 
 	// ErrConditionFailed: the item is no longer in the state the operation
 	// requires. For credentials: the user was disabled, revoked or deleted,
@@ -95,7 +106,6 @@ func (s *Store) unix() int64 { return s.now().Unix() }
 const (
 	skDetails = "DETAILS"
 	skEmail   = "EMAIL"
-	skClient  = "CLIENT"
 
 	pfxOrg       = "ORG#"
 	pfxPool      = "POOL#"

@@ -150,7 +150,7 @@ Built before the login flows, so test orgs, clients and users can be created wit
   - an idempotency key on every create
 - Tests: handler tests with a fake store, and CLI tests against a local Admin server.
 
-**Done when:** `litelogin init` against `dev` creates an org, pool, client and default host, and prints the client credentials. Running it again with the same idempotency key returns the same resources.
+**Done when:** `litelogin init` against `dev` creates an org with its default pool and default host, and a client on that host, and prints the client credentials. Running it again with the same idempotency key returns the same resources.
 
 ### Phase 4: Edge and browser login
 
@@ -176,8 +176,8 @@ Built before the login flows, so test orgs, clients and users can be created wit
   - CSRF tokens on every form
 - `internal/email`: SES sender and templates. `infra/modules/email` provisions the identity and configuration set. Request production SES access now, because approval takes time.
 - `infra/modules/dns`: each environment's default host domain is a Route 53 zone in its account, delegated from the parent domain with NS records, so Terraform manages the certificate validation, the wildcard alias and the SES records.
-- Admin user invites (`litelogin user create --invite --client {client}`), which email a password-set link on the client's default host, valid for 7 days.
-- Basic theming from the client's `theme`.
+- Admin user invites (`litelogin user create --invite`), which email a password-set link on a login host of the user's pool (by default the org's default host), valid for 7 days.
+- Basic theming from the login host's `theme`.
 
 **Done when:** on a default host in `dev`, a user can register, verify their email, log in, log out and reset their password. A request to the function URL that bypasses CloudFront is rejected.
 
@@ -196,10 +196,13 @@ Built before the login flows, so test orgs, clients and users can be created wit
   - client authentication (`client_secret_basic`, `client_secret_post`, `none`)
 - `/userinfo` and `/logout` (RP-initiated).
 - CORS with `allowed_origins`, including preflight requests.
+- Org-owned login hosts (Datamodel.md, Decision 8): each org gets a default host with its default pool; clients are created on an existing host and can join others of their org and pool. One sign-in serves every client on a host, and the theme, sign-up and session lifetimes are the host's. The conformance suite's refresh-token test needs this: it uses a second client on the same issuer. `cmd/migratehosts` moves data created before this change.
 - **OpenID Foundation conformance suite.** Run the Basic OP and Config OP test plans against `dev` and fix every failure.
 - An end-to-end test in `test/e2e` with a real OIDC client library acting as the relying party (`coreos/go-oidc` and `golang.org/x/oauth2`, run by `make test-integration`).
 
 **Done when:** the conformance suite's Basic OP and Config OP plans pass, and a sample web app signs in through LiteLogin.
+
+Follow-ups noted while comparing with other identity providers: a short grace window for refresh token reuse (see "Refresh tokens" in Datamodel.md), back-channel logout for the clients on a host, and optional per-client overrides of the host's theme and sign-up setting.
 
 ### Phase 6: Account management and revocation
 

@@ -45,7 +45,7 @@ type WorkItem struct {
 func workKey(workType, id string) (map[string]types.AttributeValue, error) {
 	switch workType {
 	case WorkCustomDomain:
-		return key(pfxLoginHost+id, skClient), nil
+		return key(pfxLoginHost+id, skDetails), nil
 	case WorkPoolDeletion:
 		return key(pfxPool+id, skDetails), nil
 	default:
