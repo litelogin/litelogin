@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 
@@ -493,7 +492,7 @@ func (s *Server) parseLogout(r *http.Request, t *tenant) (*logoutRequest, string
 		if t.Client == nil {
 			return nil, "The sign-out request doesn't say which application it's for."
 		}
-		if !slices.Contains(t.Client.PostLogoutRedirectURIs, u) {
+		if !redirectURIAllowed(t.Client.PostLogoutRedirectURIs, u) {
 			return nil, "The sign-out request's return address isn't registered for this application."
 		}
 		req.PostLogoutRedirectURI = u

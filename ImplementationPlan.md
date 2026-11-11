@@ -199,8 +199,9 @@ Built before the login flows, so test orgs, clients and users can be created wit
 - Org-owned login hosts (Datamodel.md, Decision 8): each org gets a default host with its default pool; clients are created on an existing host and can join others of their org and pool. One sign-in serves every client on a host, and the theme, sign-up and session lifetimes are the host's. The conformance suite's refresh-token test needs this: it uses a second client on the same issuer. `cmd/migratehosts` moves data created before this change.
 - **OpenID Foundation conformance suite.** Run the Basic OP and Config OP test plans against `dev` and fix every failure.
 - An end-to-end test in `test/e2e` with a real OIDC client library acting as the relying party (`coreos/go-oidc` and `golang.org/x/oauth2`, run by `make test-integration`).
+- `litelogin client test`: a relying party in the CLI that signs in through the browser and checks the code exchange, ID token, `/userinfo`, refresh and logout. It uses a loopback redirect URI, which matches on any port (RFC 8252 §7.3).
 
-**Done when:** the conformance suite's Basic OP and Config OP plans pass, and a sample web app signs in through LiteLogin.
+**Done when:** the conformance suite's Basic OP and Config OP plans pass, and `litelogin client test` signs in through LiteLogin on `dev`.
 
 Follow-ups noted while comparing with other identity providers: a short grace window for refresh token reuse (see "Refresh tokens" in Datamodel.md), back-channel logout for the clients on a host, and optional per-client overrides of the host's theme and sign-up setting.
 

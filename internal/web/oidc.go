@@ -216,7 +216,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	t.Client = c
 	redirectURI := q.Get("redirect_uri")
-	if redirectURI == "" || len(q["redirect_uri"]) > 1 || !slices.Contains(t.Client.RedirectURIs, redirectURI) {
+	if redirectURI == "" || len(q["redirect_uri"]) > 1 || !redirectURIAllowed(t.Client.RedirectURIs, redirectURI) {
 		s.badAuthz(w, r, t, "The sign-in request's return address isn't registered for this application.")
 		return
 	}

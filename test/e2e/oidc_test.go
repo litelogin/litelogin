@@ -47,53 +47,50 @@ const (
 	redirectURI = "https://" + rpHost + "/callback"
 )
 
-func TestSignInWithOIDCClient(t *testing.T) {
+// harness is LiteLogin running in-process over TLS, with an org (its
+// default pool and host, loginHost) and a user.
+type harness struct {
+	st     *store.Store
+	org    *store.Org
+	pool   *store.Pool
+	user   *store.User
+	issuer string
+	// base reaches the server at loginHost, and dials anything else
+	// normally (e.g. a relying party listening on loopback).
+	base   *http.Transport
+	rpHTTP *http.Client
+}
+
+const userPassword = "correct horse battery"
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
 	endpoint := os.Getenv(platform.EnvDynamoDBEndpoint)
 	if endpoint == "" {
 		t.Skipf("set %s to run end-to-end tests against DynamoDB Local", platform.EnvDynamoDBEndpoint)
 	}
 	ctx := context.Background()
-	st := newStore(t, endpoint)
-
-	// An org with its default pool and host (loginHost), two confidential
-	// clients on the host, and a user.
-	org := &store.Org{ID: crypto.NewID(), Name: "E2E"}
-	pool := &store.Pool{ID: crypto.NewID(), Name: "Default"}
+	h := &harness{st: newStore(t, endpoint)}
+	h.org = &store.Org{ID: crypto.NewID(), Name: "E2E"}
+	h.pool = &store.Pool{ID: crypto.NewID(), Name: "Default"}
 	host := &store.LoginHost{Host: loginHost, HostSettings: store.HostSettings{RegistrationEnabled: true, SessionTTL: 3600, SessionIdleTTL: 600}}
-	if err := st.CreateOrgWithHost(ctx, org, pool, host); err != nil {
+	if err := h.st.CreateOrgWithHost(ctx, h.org, h.pool, host); err != nil {
 		t.Fatal(err)
 	}
-	newClient := func(name string) (*store.Client, string) {
-		secret := crypto.NewToken()
-		c := &store.Client{
-			ID: crypto.NewID(), OrgID: org.ID, Name: name, ClientType: "confidential",
-			TokenEndpointAuthMethod: "client_secret_basic", ClientSecretHash: crypto.HashToken(secret),
-			RedirectURIs: []string{redirectURI}, AllowedScopes: []string{"openid", "email", "offline_access"},
-			GrantTypes: []string{"authorization_code", "refresh_token"}, AccessTokenTTL: 900, IDTokenTTL: 900,
-			RefreshTokenTTL: 3600, RefreshFamilyTTL: 7200,
-		}
-		if err := st.CreateClient(ctx, c, loginHost); err != nil {
-			t.Fatal(err)
-		}
-		return c, secret
-	}
-	client, secret := newClient("E2E App")
-	client2, secret2 := newClient("E2E App 2")
 	hasher := crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32})
-	pw, _ := hasher.Hash("correct horse battery")
-	user := &store.User{ID: crypto.NewID(), PoolID: pool.ID, Email: "ada@example.org", PasswordHash: pw, EmailVerified: true}
-	if err := st.CreateUser(ctx, user); err != nil {
+	pw, _ := hasher.Hash(userPassword)
+	h.user = &store.User{ID: crypto.NewID(), PoolID: h.pool.ID, Email: "ada@example.org", PasswordHash: pw, EmailVerified: true}
+	if err := h.st.CreateUser(ctx, h.user); err != nil {
 		t.Fatal(err)
 	}
 
-	// LiteLogin, over TLS.
 	fake := kmsfake.New()
-	if _, err := (&keyrotation.Rotator{KMS: fake, Store: st, Policy: keyrotation.DefaultPolicy, Environment: "e2e"}).Run(ctx); err != nil {
+	if _, err := (&keyrotation.Rotator{KMS: fake, Store: h.st, Policy: keyrotation.DefaultPolicy, Environment: "e2e"}).Run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	keys := jwt.NewKeySet(st, nil)
+	keys := jwt.NewKeySet(h.st, nil)
 	ws := &web.Server{
-		Store: st, Config: configcache.New(st, 0), Hasher: hasher, Email: &email.Recorder{},
+		Store: h.st, Config: configcache.New(h.st, 0), Hasher: hasher, Email: &email.Recorder{},
 		Keys: keys, Signer: jwt.NewSigner(fake, keys), Verifier: jwt.NewVerifier(keys, nil),
 	}
 	srv := httptest.NewUnstartedServer(httpx.SetLoginHostFromHost(httpx.SecurityHeaders(ws.Handler())))
@@ -101,16 +98,49 @@ func TestSignInWithOIDCClient(t *testing.T) {
 	t.Cleanup(srv.Close)
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 	ws.LinkPort = port
-	issuer := "https://" + loginHost + ":" + port
+	h.issuer = "https://" + loginHost + ":" + port
 
-	// HTTP clients that reach the server at loginHost.
-	base := srv.Client().Transport.(*http.Transport).Clone()
-	base.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+	h.base = srv.Client().Transport.(*http.Transport).Clone()
+	h.base.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if host, _, _ := net.SplitHostPort(addr); host == loginHost {
+			addr = srv.Listener.Addr().String()
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	}
-	base.TLSClientConfig = &tls.Config{RootCAs: srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs, MinVersion: tls.VersionTLS12}
-	rpHTTP := &http.Client{Transport: base, Timeout: 10 * time.Second}
-	ctx = oidc.ClientContext(ctx, rpHTTP)
+	h.base.TLSClientConfig = &tls.Config{RootCAs: srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs, MinVersion: tls.VersionTLS12}
+	h.rpHTTP = &http.Client{Transport: h.base, Timeout: 10 * time.Second}
+	return h
+}
+
+// newClient creates a client on loginHost and returns its secret (""
+// for a public client).
+func (h *harness) newClient(t *testing.T, name, clientType string, redirects, logoutRedirects []string) (*store.Client, string) {
+	t.Helper()
+	c := &store.Client{
+		ID: crypto.NewID(), OrgID: h.org.ID, Name: name, ClientType: clientType, TokenEndpointAuthMethod: "none",
+		RedirectURIs: redirects, PostLogoutRedirectURIs: logoutRedirects,
+		AllowedScopes: []string{"openid", "email", "offline_access"},
+		GrantTypes:    []string{"authorization_code", "refresh_token"}, AccessTokenTTL: 900, IDTokenTTL: 900,
+		RefreshTokenTTL: 3600, RefreshFamilyTTL: 7200,
+	}
+	secret := ""
+	if clientType == "confidential" {
+		secret = crypto.NewToken()
+		c.TokenEndpointAuthMethod, c.ClientSecretHash = "client_secret_basic", crypto.HashToken(secret)
+	}
+	if err := h.st.CreateClient(context.Background(), c, loginHost); err != nil {
+		t.Fatal(err)
+	}
+	return c, secret
+}
+
+func TestSignInWithOIDCClient(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	client, secret := h.newClient(t, "E2E App", "confidential", []string{redirectURI}, nil)
+	client2, secret2 := h.newClient(t, "E2E App 2", "confidential", []string{redirectURI}, nil)
+	user, issuer, base := h.user, h.issuer, h.base
+	ctx = oidc.ClientContext(ctx, h.rpHTTP)
 
 	// The relying party.
 	provider, err := oidc.NewProvider(ctx, issuer)
@@ -140,7 +170,7 @@ func TestSignInWithOIDCClient(t *testing.T) {
 	}
 	form := hiddenFields(loginPage.body)
 	form.Set("email", user.Email)
-	form.Set("password", "correct horse battery")
+	form.Set("password", userPassword)
 	back := fetch(t, browser, http.MethodPost, issuer+"/login", form)
 	if back.status != http.StatusFound {
 		t.Fatalf("expected a redirect to the RP, got %d:\n%s", back.status, back.body)

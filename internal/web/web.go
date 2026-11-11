@@ -404,7 +404,14 @@ func formActionSources(t *tenant) string {
 			continue
 		}
 		src := u.Scheme + ":"
-		if u.Host != "" {
+		switch {
+		case isLoopbackIPURI(u):
+			// Any port matches (redirectURIAllowed).
+			src = u.Scheme + "://" + u.Hostname() + ":*"
+			if strings.Contains(u.Hostname(), ":") {
+				src = u.Scheme + "://[" + u.Hostname() + "]:*"
+			}
+		case u.Host != "":
 			src = u.Scheme + "://" + u.Host
 		}
 		if strings.ContainsAny(src, " ;,'\"") || slices.Contains(sources, src) {

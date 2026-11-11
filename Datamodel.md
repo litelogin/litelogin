@@ -241,7 +241,7 @@ Once a request names its client (`client_id` at `/authorize` and `/logout`, the 
 
 1. GetItem `LOGIN_HOST#{host}` / `CLIENT#{client}`. Reject unless it exists: the client isn't on this host.
 2. GetItem `CLIENT#{client}` / `DETAILS` → `status`, `user_pool_id`, `redirect_uris`, `allowed_scopes`, token lifetimes. Reject unless `status=active` and `user_pool_id` is the host's pool.
-3. If the request carries a `redirect_uri`, reject unless it exactly matches an entry in `redirect_uris`.
+3. If the request carries a `redirect_uri`, reject unless it exactly matches an entry in `redirect_uris`. The one exception is a registered `http` URI on a loopback IP address (`127.0.0.1`, `[::1]`): it matches on any port, because native apps and command-line tools listen on whichever port is free (RFC 8252 §7.3, OAuth 2.1 §8.4.2). The rest of the URI must still match exactly, and `localhost` doesn't get the exception. The login page's CSP `form-action` allows those addresses on any port too.
 
 Every read in both patterns is of configuration that rarely changes, so they're cached in the Lambda for 30–60 seconds. As a result, suspending an org, disabling a client or taking it off a host takes effect within that cache time.
 
@@ -341,7 +341,7 @@ Access tokens are not revocable before they expire, so keep their lifetime short
 ### Logout (`/logout`)
 
 1. Resolve the login host. The client is named by `client_id` or by the audience of `id_token_hint` (signature verified; expired tokens are accepted). If both are given they must agree, and the client must be on the host.
-2. Reject `post_logout_redirect_uri` unless a client is named and the URI exactly matches an entry in its `post_logout_redirect_uris`.
+2. Reject `post_logout_redirect_uri` unless a client is named and the URI matches an entry in its `post_logout_redirect_uris`, as redirect URIs do (exactly, or on any port for a loopback IP address).
 3. DeleteItem `SESSION#{session_hash}` / `DETAILS` and clear the cookie. The session is the host's, so this signs the user out of every client on the host.
 
 Refresh token families are not tied to the browser session and survive logout. Use the next pattern to revoke them.

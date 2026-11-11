@@ -87,6 +87,16 @@ echo "$PASSWORD" | dist/litelogin user create --pool POOL --email admin@acme.com
 dist/litelogin keys list
 ```
 
+To check a client end to end, as its app would, register a loopback redirect URI and run `client test`. It opens your browser to sign in, then checks the code exchange, the ID token, `/userinfo` and a refresh, and prints the claims:
+
+```sh
+dist/litelogin client update CLIENT --redirect-uri https://app.acme.com/callback --redirect-uri http://127.0.0.1/callback
+dist/litelogin client test CLIENT            # a confidential client asks for its secret
+dist/litelogin client test CLIENT --logout   # also RP-initiated logout (register http://127.0.0.1/logged-out)
+```
+
+LiteLogin accepts a loopback redirect URI on any port, so the command listens on a free one.
+
 `init` prints an idempotency key; running it again with `--idempotency-key` returns the same org, pool and client instead of creating new ones. The client secret is shown only once; `litelogin client rotate-secret CLIENT` issues a new one. Every command takes `-o json`. Run `litelogin help` for the full list.
 
 ## Signing keys

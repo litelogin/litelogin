@@ -487,6 +487,7 @@ func (a *App) clientCommand() *cobra.Command {
 		actionCommand[admin.Client](a, "disable CLIENT", "Disable a client: its logins and refresh tokens stop working", "/v1/clients/", "/disable"),
 		actionCommand[admin.Client](a, "enable CLIENT", "Enable a disabled client", "/v1/clients/", "/enable"),
 		rotate,
+		a.clientTestCommand(),
 		deleteCommand(a, "delete CLIENT", "Delete a client (its login hosts stay)", "/v1/clients/", "client"),
 	)
 }
