@@ -138,7 +138,7 @@ All of these are served by the Auth Lambda on every login host.
 | `/token` | POST, OPTIONS | Authorization code and refresh token grants |
 | `/userinfo` | GET, POST, OPTIONS | User claims for an access token |
 | `/logout` | GET, POST | RP-initiated logout |
-| `/account/*` | GET, POST | Signed-in user: change password, change email, sessions |
+| `/account/*` | GET, POST | Signed-in user: change password, change email (confirmed by a link to the new address), list sessions, sign one out, sign out everywhere |
 
 **CORS:**
 - `/.well-known/*` is public and allows any origin.
@@ -336,7 +336,7 @@ If a deployment needs instant client or org disablement, shorten the cache time 
 
 | Job | Trigger | Notes |
 | -- | -- | -- |
-| Revocation cleanup | Config stream: user `auth_version` increased or user deleted | Deletes stale sessions and refresh families through GSI1. Must be idempotent and safe to retry. |
+| Revocation cleanup | Config stream: user `auth_version` increased or user deleted | Deletes stale sessions and refresh families through GSI1, in batches of 500. A job that runs short of time continues through the SQS continuation queue from its cursor. Deletes are idempotent, so retrying is safe. |
 | Pool deletion | Config stream: pool `status` set to `deleting` | Deletes the pool's users in bounded batches, using the SQS continuation queue to carry on across invocations. Re-running a batch is harmless, because every delete is conditional and missing items are skipped. |
 | Custom domain onboarding | Config stream: login host created with `status=pending` | Creates the CloudFront tenant and certificate. Safe to re-run: an existing tenant for the host is reused. |
 | Custom domain verification | Reconciler | Marks a `pending` host `verified` once its certificate has been issued and its CNAME points to LiteLogin |

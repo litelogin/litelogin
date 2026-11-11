@@ -17,9 +17,11 @@ import (
 
 // Notices shown on the login page after a redirect (?n=...).
 var notices = map[string]string{
-	"verified":   "Your email is verified. You can sign in now.",
-	"reset":      "Your password was changed. Sign in with your new password.",
-	"logged_out": "You're signed out.",
+	"verified":              "Your email is verified. You can sign in now.",
+	"reset":                 "Your password was changed. Sign in with your new password.",
+	"logged_out":            "You're signed out.",
+	"signed_out_everywhere": "You're signed out everywhere: on every device and in every app.",
+	"email_changed":         "Your email address was changed. Sign in to continue.",
 }
 
 const msgBadLogin = "Incorrect email or password."
@@ -435,7 +437,9 @@ func (s *Server) reset(w http.ResponseWriter, r *http.Request, t *tenant) {
 		s.fail(w, r, t, err)
 		return
 	}
-	userID, err := s.Store.CompletePasswordReset(ctx, hash, pw)
+	// The auth_version increment revokes everything; the Worker deletes
+	// the revoked items.
+	_, err = s.Store.CompletePasswordReset(ctx, hash, pw)
 	if errors.Is(err, store.ErrNotFound) {
 		s.invalidLink(w, r, t)
 		return
@@ -444,15 +448,11 @@ func (s *Server) reset(w http.ResponseWriter, r *http.Request, t *tenant) {
 		s.fail(w, r, t, err)
 		return
 	}
-	// Cleanup only: the auth_version increment already revoked everything.
-	if _, err := s.Store.CleanupUserCredentials(ctx, userID); err != nil {
-		s.log().WarnContext(ctx, "clean up credentials after reset", "error", err)
-	}
-	clearCookie(w, SessionCookie)
+	clearSessionCookie(w)
 	http.Redirect(w, r, "/login?n=reset", http.StatusSeeOther)
 }
 
-// ---- Logout and account ----
+// ---- Logout ----
 
 // logoutRequest is a validated RP-initiated logout request (OpenID Connect
 // RP-Initiated Logout 1.0).
@@ -535,7 +535,7 @@ func (s *Server) logoutForm(w http.ResponseWriter, r *http.Request, t *tenant) {
 		return
 	}
 	if sess == nil {
-		clearCookie(w, SessionCookie)
+		clearSessionCookie(w)
 		finishLogout(w, r, req)
 		return
 	}
@@ -558,19 +558,6 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, t *tenant) {
 			return
 		}
 	}
-	clearCookie(w, SessionCookie)
+	clearSessionCookie(w)
 	finishLogout(w, r, req)
-}
-
-func (s *Server) account(w http.ResponseWriter, r *http.Request, t *tenant) {
-	sess, u, err := s.currentSession(r, t)
-	if err != nil {
-		s.fail(w, r, t, err)
-		return
-	}
-	if sess == nil {
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
-		return
-	}
-	s.render(w, r, t, http.StatusOK, "account", pageData{Title: "Your account", Account: u})
 }

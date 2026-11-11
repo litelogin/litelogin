@@ -226,7 +226,7 @@ func (s *Store) ChangePassword(ctx context.Context, userID, newHash string) (int
 
 // RevokeUserCredentials increments the user's auth_version ("logout
 // everywhere"). Every existing session, unredeemed code and refresh family
-// fails validation from this moment. Run CleanupUserCredentials afterwards.
+// fails validation from this moment; the Worker cleans up afterwards.
 // It returns the new auth_version.
 func (s *Store) RevokeUserCredentials(ctx context.Context, userID string) (int64, error) {
 	return s.bumpAuthVersion(ctx, userID, "SET #updated_at = :now", names("updated_at"),
@@ -234,7 +234,7 @@ func (s *Store) RevokeUserCredentials(ctx context.Context, userID string) (int64
 }
 
 // DisableUser sets status=disabled and increments auth_version, revoking
-// every credential. Run CleanupUserCredentials afterwards.
+// every credential. The Worker cleans up afterwards.
 func (s *Store) DisableUser(ctx context.Context, userID string) (int64, error) {
 	return s.bumpAuthVersion(ctx, userID, "SET #status = :disabled, #updated_at = :now", names("status", "updated_at"),
 		map[string]types.AttributeValue{":disabled": avS(UserDisabled), ":now": avN(s.unix())})
@@ -313,9 +313,10 @@ func (s *Store) updateUser(ctx context.Context, userID, upd, cond string, nm map
 	return nil
 }
 
-// DeleteUser deletes a user and its email item, then deletes its sessions
-// and refresh families. Every credential fails validation as soon as the
-// user item is gone, so the cleanup is best effort.
+// DeleteUser deletes a user and its email item. Every credential fails
+// validation as soon as the user item is gone; the Worker deletes the
+// user's sessions and refresh families afterwards (Datamodel.md, "Revoke
+// everything for a user").
 func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 	u, err := s.GetUser(ctx, userID)
 	if err != nil {
@@ -328,10 +329,6 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 	if asTxFailure(err) != nil {
 		return ErrConditionFailed // the email changed or the user was deleted concurrently
 	}
-	if err != nil {
-		return err
-	}
-	_, err = s.CleanupUserCredentials(ctx, userID)
 	return err
 }
 
@@ -456,7 +453,15 @@ type sessionIndexItem struct {
 }
 
 func (s *Store) queryUserCredentials(ctx context.Context, userID, skPrefix string, fn func(sessionIndexItem) error) error {
+	return s.queryUserCredentialsFrom(ctx, userID, skPrefix, nil, fn)
+}
+
+// queryUserCredentialsFrom is queryUserCredentials starting after start.
+func (s *Store) queryUserCredentialsFrom(ctx context.Context, userID, skPrefix string, start map[string]types.AttributeValue,
+	fn func(sessionIndexItem) error,
+) error {
 	in := &dynamodb.QueryInput{
+		ExclusiveStartKey:         start,
 		TableName:                 aws.String(s.session),
 		IndexName:                 aws.String(IndexGSI1),
 		KeyConditionExpression:    aws.String("GSI1PK = :pk"),
@@ -475,37 +480,65 @@ func (s *Store) queryUserCredentials(ctx context.Context, userID, skPrefix strin
 	})
 }
 
-// CleanupUserCredentials deletes the user's sessions and refresh families
-// that the current auth_version has revoked: all of them if the user no
-// longer exists. It returns how many items it deleted.
+// CleanupUserCredentials deletes up to limit of the user's sessions and
+// refresh families that the current auth_version has revoked: all of them
+// if the user no longer exists. It starts after cursor ("" for the
+// beginning) and returns how many items it deleted, and a cursor to
+// continue from, or "" when it's done.
 //
 // This is cleanup only. Revocation already happened when auth_version was
 // incremented. Items GSI1 doesn't list yet were revoked too, and TTL
 // removes them.
-func (s *Store) CleanupUserCredentials(ctx context.Context, userID string) (int, error) {
+func (s *Store) CleanupUserCredentials(ctx context.Context, userID, cursor string, limit int) (int, string, error) {
+	if limit <= 0 {
+		return 0, "", errors.New("store: cleanup limit must be positive")
+	}
 	current := int64(math.MaxInt64)
 	u, err := s.GetUser(ctx, userID)
 	switch {
 	case err == nil:
 		current = u.AuthVersion
 	case !errors.Is(err, ErrNotFound):
-		return 0, err
+		return 0, "", err
+	}
+	gsiPK := pfxUser + userID
+	var start map[string]types.AttributeValue
+	if cursor != "" {
+		if start, err = decodeCursor(cursor, map[string]string{AttrGSI1PK: gsiPK}); err != nil {
+			return 0, "", err
+		}
 	}
 	var stale []map[string]types.AttributeValue
-	err = s.queryUserCredentials(ctx, userID, "", func(it sessionIndexItem) error {
-		if it.AuthVersion < current {
-			stale = append(stale, key(it.PK, it.SK))
+	var last sessionIndexItem
+	err = s.queryUserCredentialsFrom(ctx, userID, "", start, func(it sessionIndexItem) error {
+		if it.AuthVersion >= current {
+			return nil
+		}
+		stale = append(stale, key(it.PK, it.SK))
+		last = it
+		if len(stale) == limit {
+			return errStopQuery
 		}
 		return nil
 	})
-	if err != nil {
-		return 0, err
+	stopped := errors.Is(err, errStopQuery)
+	if err != nil && !stopped {
+		return 0, "", err
 	}
 	if err := s.batchDelete(ctx, s.session, stale); err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return len(stale), nil
+	if !stopped {
+		return len(stale), "", nil
+	}
+	next, err := encodeCursor(map[string]types.AttributeValue{
+		AttrPK: avS(last.PK), AttrSK: avS(last.SK), AttrGSI1PK: avS(gsiPK), AttrGSI1SK: avS(last.GSI1SK),
+	})
+	return len(stale), next, err
 }
+
+// errStopQuery ends a queryAll early.
+var errStopQuery = errors.New("store: stop query")
 
 // SessionSummary is one of a user's sessions, as listed from Session GSI1.
 type SessionSummary struct {

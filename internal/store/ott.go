@@ -113,7 +113,7 @@ func (s *Store) VerifyEmail(ctx context.Context, hash string) (string, error) {
 // CompletePasswordReset consumes a reset_password token and sets the new
 // password hash. It also marks the email verified (the user just proved they
 // own it), clears the lockout, and increments auth_version, revoking every
-// credential. Run CleanupUserCredentials afterwards.
+// credential. The Worker cleans up afterwards.
 //
 // It returns the user ID, or ErrNotFound if the link is invalid, expired, or
 // was sent to an email the user no longer has.

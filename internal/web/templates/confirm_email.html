@@ -1,0 +1,8 @@
+{{define "content"}}
+<p>Confirm this address to make it your account's email.</p>
+<form method="post" action="/account/email/confirm">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="token" value="{{.Token}}">
+<button type="submit">Confirm new email</button>
+</form>
+{{end}}

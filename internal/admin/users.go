@@ -353,22 +353,12 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) error {
 		if _, err := s.Store.ChangePassword(r.Context(), id, hash); err != nil {
 			return err
 		}
-		s.cleanup(r, id)
 	}
 	if u, err = s.Store.GetUser(r.Context(), id); err != nil {
 		return err
 	}
 	writeVersioned(w, http.StatusOK, u.Version, userJSON(u))
 	return nil
-}
-
-// cleanup deletes credentials a revocation made invalid. They already
-// fail validation, so a failure here is only logged; the Worker and TTL
-// clean up too.
-func (s *Server) cleanup(r *http.Request, userID string) {
-	if _, err := s.Store.CleanupUserCredentials(r.Context(), userID); err != nil {
-		s.log().WarnContext(r.Context(), "credential cleanup failed", "user_id", userID, "error", err)
-	}
 }
 
 func (s *Server) disableUser(w http.ResponseWriter, r *http.Request) error {
@@ -379,7 +369,6 @@ func (s *Server) disableUser(w http.ResponseWriter, r *http.Request) error {
 	if _, err := s.Store.DisableUser(r.Context(), id); err != nil {
 		return err
 	}
-	s.cleanup(r, id)
 	return s.getUser(w, r)
 }
 
@@ -450,7 +439,6 @@ func (s *Server) revokeSessions(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	s.cleanup(r, id)
 	writeJSON(w, http.StatusOK, RevokeResult{AuthVersion: v})
 	return nil
 }

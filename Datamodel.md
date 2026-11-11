@@ -355,9 +355,10 @@ A preflight request carries neither credentials nor a `client_id`, so it's allow
 Also used after a password reset, a password change, or disabling the user. In those flows, step 1 is part of that flow's own user update.
 
 1. **Revoke.** UpdateItem `USER#{user}` / `DETAILS` ADD `auth_version 1`. From this moment, every existing session, unredeemed code and refresh family for the user fails validation. This step is the revocation.
-2. **Clean up** (can run asynchronously):
-   - Query GSI1 `GSI1PK = USER#{user}`, following `LastEvaluatedKey` until all pages are read.
-   - Delete every `SESSION` and `REFRESH_FAMILY` item whose `auth_version` is lower than the user's new value. BatchWriteItem takes at most 25 deletes per call; retry `UnprocessedItems` with backoff.
+2. **Clean up.** The Worker does this asynchronously, started by the Config table stream: a user item whose `auth_version` increased, or that was deleted.
+   - Query GSI1 `GSI1PK = USER#{user}`, following `LastEvaluatedKey`.
+   - Delete every `SESSION` and `REFRESH_FAMILY` item whose `auth_version` is lower than the user's current value (every one, if the user no longer exists). BatchWriteItem takes at most 25 deletes per call; retry `UnprocessedItems` with backoff.
+   - The Worker deletes in batches of 500. A batch ends with a cursor (the GSI1 key of its last item); if the invocation runs short of time, the rest of the job goes to the SQS continuation queue with that cursor.
    - GSI1 may not yet show items created moments before step 1. That's harmless: step 1 already invalidated them, and TTL removes them.
 
 Access tokens that were already issued stay valid until they expire, which is why their lifetime is kept short.
@@ -366,6 +367,13 @@ Access tokens that were already issued stay valid until they expire, which is wh
 
 1. GetItem `USER#{user}` / `DETAILS` → `auth_version`.
 2. Query GSI1 `GSI1PK = USER#{user}`, `begins_with(GSI1SK, "SESSION#")`. Skip any result whose `expires_at` has passed or whose `auth_version` is lower than the user's.
+
+The account page lists them, and adds the browser's own session if GSI1 doesn't show it yet.
+
+### Sign out one session (account page)
+
+1. GetItem `SESSION#{session_hash}` / `DETAILS` for the hash the form names. Continue only if its `user_id` is the signed-in user's.
+2. DeleteItem `SESSION#{session_hash}` / `DETAILS`. The response is the same if the session didn't exist or wasn't the user's.
 
 ### Verify email
 
@@ -390,18 +398,18 @@ Admin invites use the same token: the user is created without a password, and a 
 2. TransactWriteItems:
    - Delete `OTT#{token_hash}` / `DETAILS`, condition `purpose = reset_password AND expires_at > :now`
    - Update `USER#{user}` / `DETAILS` SET `password_hash`, `password_updated_at`, `email_verified = true` (the user just proved they own the email), `failed_login_count = 0`, REMOVE `locked_until`, ADD `auth_version 1`, condition `email = :ott_email`. A reset link sent to an address the user no longer has is useless.
-3. Run the cleanup step of "Revoke everything for the user". The `auth_version` increment in step 2 has already revoked everything.
+3. The Worker runs the cleanup step of "Revoke everything for the user". The `auth_version` increment in step 2 has already revoked everything.
 
 ### Change password (signed in)
 
-1. Verify the current password (as in login steps 3–4).
+1. Verify the current password (as in login steps 3–4). A wrong one counts as a failed login, so a stolen session can't be used to guess the password.
 2. UpdateItem `USER#{user}` / `DETAILS` SET `password_hash`, `password_updated_at`, ADD `auth_version 1`, ReturnValues `UPDATED_NEW`. This revokes every session, including the current one.
-3. Create a new session for the current browser with the new `auth_version`, then run the cleanup step of "Revoke everything for the user".
+3. Create a new session for the current browser with the new `auth_version`. The Worker runs the cleanup step of "Revoke everything for the user".
 
 ### Change email (signed in)
 
-1. Put `OTT#{token_hash}` / `DETAILS` (`purpose=change_email`, `user_id`, `email` = current, `new_email`, `expires_at` = now + 24h). Send the link to `new_email`.
-2. On confirmation, TransactWriteItems:
+1. Verify the current password, as in "Change password". Then Put `OTT#{token_hash}` / `DETAILS` (`purpose=change_email`, `user_id`, `email` = current, `new_email`, `expires_at` = now + 24h). Send the link to `new_email`.
+2. On confirmation (a button on the linked page, which works without a session: the link proves the user owns the new address), TransactWriteItems:
    - Delete `OTT#{token_hash}`, condition `purpose = change_email AND expires_at > :now`
    - Put `POOL#{pool}#EMAIL#{new_email}` / `EMAIL`, condition `attribute_not_exists(PK)`
    - Delete `POOL#{pool}#EMAIL#{old_email}` / `EMAIL`, condition `user_id = :user`
@@ -429,8 +437,8 @@ Admin invites use the same token: the user is created without a password, and a 
 | Search users by email prefix | Query config GSI1 `GSI1PK=POOL#{pool}`, `begins_with(GSI1SK, "EMAIL#{prefix}")` |
 | Create user | Same transaction as registration: Put `USER#{user}`, Put `POOL#{pool}#EMAIL#{email}`, ConditionCheck `POOL#{pool}` `status = active`. With an initial password, store its hash. Without one, Put an `OTT` item (`purpose=reset_password`) and email a password-set link. |
 | Get user | GetItem `USER#{user}` / `DETAILS` |
-| Disable user | UpdateItem `USER#{user}` / `DETAILS` SET `status=disabled`, ADD `auth_version 1`, then run the revocation cleanup |
-| Delete user | TransactWriteItems deleting `USER#{user}` / `DETAILS` and `POOL#{pool}#EMAIL#{email}` / `EMAIL`, then run the revocation cleanup. Every credential fails validation as soon as the user item is gone. |
+| Disable user | UpdateItem `USER#{user}` / `DETAILS` SET `status=disabled`, ADD `auth_version 1`. The Worker then runs the revocation cleanup. |
+| Delete user | TransactWriteItems deleting `USER#{user}` / `DETAILS` and `POOL#{pool}#EMAIL#{email}` / `EMAIL`. The Worker then runs the revocation cleanup. Every credential fails validation as soon as the user item is gone. |
 | Delete pool | Reject if any client or login host in the org uses it (Query the org's clients and hosts, BatchGetItem, check `user_pool_id` / `pool_id`). So an org's default pool, served by its default host, can't be deleted. Otherwise UpdateItem `POOL#{pool}` SET `status=deleting` and the GSI2 work attributes. Because user and client creation check `status = active` in their transactions, nothing new can be added after this point. A background job then pages through config GSI1 `GSI1PK=POOL#{pool}` deleting each user (as above), and finally deletes `POOL#{pool}` / `DETAILS` and `ORG#{org}` / `POOL#{pool}` |
 
 ### Admin: login hosts

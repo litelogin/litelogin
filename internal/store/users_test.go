@@ -133,10 +133,10 @@ func TestRevocation(t *testing.T) {
 
 	// A session created after the revocation survives the cleanup.
 	fresh := e.newSession(t, f.user, f.client.ID)
-	n, err := e.CleanupUserCredentials(e.ctx, f.user.ID)
+	n, next, err := e.CleanupUserCredentials(e.ctx, f.user.ID, "", 100)
 	must(t, err)
-	if n != 3 { // two sessions and one family
-		t.Fatalf("cleanup deleted %d items, want 3", n)
+	if n != 3 || next != "" { // two sessions and one family
+		t.Fatalf("cleanup deleted %d items (next %q), want 3", n, next)
 	}
 	_, err = e.GetSession(e.ctx, s1.Hash)
 	wantErr(t, err, ErrNotFound)
@@ -245,6 +245,16 @@ func TestDeleteUser(t *testing.T) {
 	must(t, e.DeleteUser(e.ctx, f.user.ID))
 	_, err := e.GetUser(e.ctx, f.user.ID)
 	wantErr(t, err, ErrNotFound)
+
+	// The credentials fail validation now (their user is gone); the
+	// Worker's cleanup deletes them.
+	_, err = e.GetSession(e.ctx, sess.Hash)
+	must(t, err)
+	n, _, err := e.CleanupUserCredentials(e.ctx, f.user.ID, "", 100)
+	must(t, err)
+	if n != 2 {
+		t.Fatalf("cleanup deleted %d, want 2", n)
+	}
 	_, err = e.GetSession(e.ctx, sess.Hash)
 	wantErr(t, err, ErrNotFound)
 	_, err = e.GetRefreshFamily(e.ctx, fam.ID)
@@ -253,4 +263,55 @@ func TestDeleteUser(t *testing.T) {
 
 	// The email is free again.
 	e.newUser(t, f.pool.ID, f.user.Email)
+}
+
+// Cleanup works in bounded batches that continue from a cursor, and
+// deletes everything once the user is gone.
+func TestCleanupUserCredentialsBatches(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	for range 5 {
+		e.newSession(t, f.user, f.client.ID)
+	}
+	_, _ = e.newFamily(t, f)
+	_, err := e.RevokeUserCredentials(e.ctx, f.user.ID)
+	must(t, err)
+	kept := e.newSession(t, f.user, f.client.ID)
+
+	total, cursor, batches := 0, "", 0
+	for {
+		n, next, err := e.CleanupUserCredentials(e.ctx, f.user.ID, cursor, 2)
+		must(t, err)
+		total += n
+		batches++
+		if next == "" {
+			break
+		}
+		if n != 2 {
+			t.Fatalf("a batch that isn't the last deleted %d, want 2", n)
+		}
+		cursor = next
+	}
+	if total != 6 || batches < 3 {
+		t.Fatalf("deleted %d in %d batches, want 6 in at least 3", total, batches)
+	}
+	_, err = e.GetSession(e.ctx, kept.Hash)
+	must(t, err)
+
+	// A cursor is only for its own user.
+	other := e.newUser(t, f.pool.ID, newID()+"@example.com")
+	_, _, err = e.CleanupUserCredentials(e.ctx, other.ID, cursor, 2)
+	if cursor != "" {
+		wantErr(t, err, ErrInvalidCursor)
+	}
+
+	// Once the user is deleted, even current credentials go.
+	must(t, e.DeleteUser(e.ctx, f.user.ID))
+	n, next, err := e.CleanupUserCredentials(e.ctx, f.user.ID, "", 100)
+	must(t, err)
+	if n != 1 || next != "" {
+		t.Fatalf("cleanup after delete: %d (next %q), want 1", n, next)
+	}
+	_, err = e.GetSession(e.ctx, kept.Hash)
+	wantErr(t, err, ErrNotFound)
 }

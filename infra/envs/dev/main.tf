@@ -175,6 +175,18 @@ module "admin" {
   ses_configuration_set_arn  = module.email.configuration_set_arn
 }
 
+module "jobs" {
+  source             = "../../modules/jobs"
+  name_prefix        = local.name_prefix
+  zip_path           = "${local.dist_dir}/worker.zip"
+  config_table_name  = module.tables.config_table_name
+  config_table_arn   = module.tables.config_table_arn
+  config_stream_arn  = module.tables.config_stream_arn
+  session_table_name = module.tables.session_table_name
+  session_table_arn  = module.tables.session_table_arn
+  table_kms_key_arn  = module.kms.tables_key_arn
+}
+
 output "dns_name_servers" {
   description = "NS records to add for the default host domain at the parent domain's DNS provider."
   value       = module.dns.name_servers
@@ -209,4 +221,8 @@ output "admin_function_name" {
 output "admin_url" {
   description = "Admin API endpoint (AWS_IAM auth). Use with: litelogin --endpoint <url>, or litelogin configure --environment dev."
   value       = module.admin.function_url
+}
+
+output "worker_function_name" {
+  value = module.jobs.worker_function_name
 }

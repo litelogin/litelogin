@@ -26,7 +26,7 @@ dist/litelogin --endpoint http://localhost:8081 init --org Acme --client "Acme P
   --redirect-uri http://localhost:3000/callback
 ```
 
-The admin server gives local orgs default hosts under `litelogin.localhost`, and browsers resolve every `*.localhost` name to this machine. So the client above signs users in at <http://acme.litelogin.localhost:8080/login>, the Acme org's default host. Further clients created with `--host acme.litelogin.localhost` share its sign-in. Locally, emails (verification, password reset, invites) are printed to the Auth server's output instead of being sent.
+The admin server gives local orgs default hosts under `litelogin.localhost`, and browsers resolve every `*.localhost` name to this machine. So the client above signs users in at <http://acme.litelogin.localhost:8080/login>, the Acme org's default host. Further clients created with `--host acme.litelogin.localhost` share its sign-in. Locally, emails (verification, password reset, email change, invites) are printed to the Auth server's output instead of being sent. The Worker doesn't run locally, so credentials revoked by a password change or "sign out everywhere" stay in the Session table; they're invalid all the same.
 
 Run the tests:
 

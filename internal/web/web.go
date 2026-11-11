@@ -36,7 +36,9 @@ type Store interface {
 	RecordFailedLogin(ctx context.Context, userID string, limit int64, lockFor time.Duration) (bool, error)
 	ResetFailedLogins(ctx context.Context, userID string) error
 	UpdatePasswordHash(ctx context.Context, userID, oldHash, newHash string) error
-	CleanupUserCredentials(ctx context.Context, userID string) (int, error)
+	ChangePassword(ctx context.Context, userID, newHash string) (int64, error)
+	RevokeUserCredentials(ctx context.Context, userID string) (int64, error)
+	ListActiveSessions(ctx context.Context, userID string) ([]store.SessionSummary, error)
 
 	CreateSession(ctx context.Context, sess *store.Session, lifetime, idle time.Duration) error
 	GetSession(ctx context.Context, hash string) (*store.Session, error)
@@ -55,6 +57,7 @@ type Store interface {
 	GetOneTimeToken(ctx context.Context, hash, purpose string) (*store.OneTimeToken, error)
 	VerifyEmail(ctx context.Context, hash string) (string, error)
 	CompletePasswordReset(ctx context.Context, hash, newPasswordHash string) (string, error)
+	ConfirmEmailChange(ctx context.Context, hash string) (string, error)
 }
 
 var _ Store = (*store.Store)(nil)
@@ -147,6 +150,12 @@ func (s *Server) Handler() http.Handler {
 	page("GET /logout", s.logoutForm)
 	page("POST /logout", s.logout)
 	page("GET /account", s.account)
+	page("POST /account/password", s.changePassword)
+	page("POST /account/email", s.changeEmail)
+	page("GET /account/email/confirm", s.confirmEmailForm)
+	page("POST /account/email/confirm", s.confirmEmail)
+	page("POST /account/sessions/end", s.endSession)
+	page("POST /account/sign-out-everywhere", s.signOutEverywhere)
 
 	// OAuth and OpenID Connect. These don't use the page wrapper: their
 	// POSTs come from clients, not this site's forms, so they have no
@@ -329,6 +338,8 @@ type pageData struct {
 	Token   string
 	Link    string
 	Account *store.User
+	// Sessions are the signed-in user's sessions, this browser's first.
+	Sessions []sessionView
 	// Authz is a pending authorization request's query, carried through
 	// the login form.
 	Authz string
@@ -472,8 +483,8 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, token string, maxAge in
 	})
 }
 
-func clearCookie(w http.ResponseWriter, name string) {
-	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: SessionCookie, Value: "", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 }
 
 // currentSession returns the browser's session and user if the session is

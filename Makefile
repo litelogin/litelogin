@@ -1,7 +1,7 @@
 # LiteLogin build, test and deploy targets. Run `make help` for a list.
 
 # Lambda functions to build. Each one is ./cmd/<name>, packaged as dist/<name>.zip.
-FUNCTIONS := auth rotate admin
+FUNCTIONS := auth rotate admin worker
 
 # Terraform-compatible CLI: OpenTofu if installed, otherwise Terraform. Override with TF=...
 TF ?= $(shell command -v tofu >/dev/null 2>&1 && echo tofu || echo terraform)

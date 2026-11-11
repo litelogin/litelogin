@@ -6,5 +6,50 @@
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <button type="submit">Sign out</button>
 </form>
-<div class="links"><a href="/password/forgot">Change your password</a></div>
+
+<section>
+<h2>Where you're signed in</h2>
+<ul class="sessions">
+{{range .Sessions}}<li>
+<div><strong>{{.Device}}</strong>{{if .Current}} <span class="tag">This browser</span>{{end}}</div>
+<div class="hint">{{if .App}}{{.App}} · {{end}}{{if .IP}}{{.IP}} · {{end}}signed in {{.Started}}{{if .LastSeen}}, last active {{.LastSeen}}{{end}}</div>
+{{if not .Current}}<form method="post" action="/account/sessions/end">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="session" value="{{.ID}}">
+<button type="submit" class="secondary">Sign out this session</button>
+</form>{{end}}
+</li>{{end}}
+</ul>
+<form method="post" action="/account/sign-out-everywhere">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<p class="hint">Signs you out on every device and in every app, including this browser.</p>
+<button type="submit" class="secondary">Sign out everywhere</button>
+</form>
+</section>
+
+<section>
+<h2>Change password</h2>
+<form method="post" action="/account/password">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="current_password">Current password</label>
+<input id="current_password" name="current_password" type="password" autocomplete="current-password" required>
+<label for="new_password">New password</label>
+<input id="new_password" name="new_password" type="password" autocomplete="new-password" minlength="{{.MinPassword}}" required>
+<p class="hint">At least {{.MinPassword}} characters. This signs you out everywhere else.</p>
+<button type="submit">Change password</button>
+</form>
+</section>
+
+<section>
+<h2>Change email</h2>
+<form method="post" action="/account/email">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="new_email">New email</label>
+<input id="new_email" name="new_email" type="email" autocomplete="email" value="{{.Email}}" required>
+<label for="email_password">Current password</label>
+<input id="email_password" name="password" type="password" autocomplete="current-password" required>
+<p class="hint">We'll send a link to the new address. Your email changes once you open it.</p>
+<button type="submit">Send confirmation link</button>
+</form>
+</section>
 {{end}}

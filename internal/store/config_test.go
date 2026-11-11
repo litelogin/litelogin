@@ -408,6 +408,9 @@ func TestPoolDeletion(t *testing.T) {
 		_, err := e.GetUser(e.ctx, id)
 		wantErr(t, err, ErrNotFound)
 	}
+	// Deleting a user leaves its sessions to the Worker's cleanup.
+	_, _, err = e.CleanupUserCredentials(e.ctx, u2.ID, "", 100)
+	must(t, err)
 	_, err = e.GetSession(e.ctx, sess.Hash)
 	wantErr(t, err, ErrNotFound)
 

@@ -56,7 +56,6 @@ type Store interface {
 	EnableUser(ctx context.Context, userID string) error
 	DeleteUser(ctx context.Context, userID string) error
 	RevokeUserCredentials(ctx context.Context, userID string) (int64, error)
-	CleanupUserCredentials(ctx context.Context, userID string) (int, error)
 	ListActiveSessions(ctx context.Context, userID string) ([]store.SessionSummary, error)
 
 	ListSigningKeys(ctx context.Context) ([]store.SigningKey, error)

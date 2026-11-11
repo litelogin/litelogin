@@ -215,6 +215,8 @@ Follow-ups noted while comparing with other identity providers: a short grace wi
 
 **Done when:** after a password reset, every other session and refresh token stops working on its very next use, and the cleanup job deletes the stale items.
 
+Built: the account pages (`internal/web/account.go`); the Worker (`cmd/worker`, `internal/worker`), started by user changes on the Config stream with a filtered event source mapping, bisecting and an SQS failure destination; and `infra/modules/jobs` with the continuation queue, dead-letter queues and their alarms. Request handlers no longer clean up themselves; the Worker does.
+
 ### Phase 7: Custom domains and pool deletion
 
 - Terraform support was confirmed in Phase 0: AWS provider 6.72 has `aws_cloudfront_multitenant_distribution`, `aws_cloudfront_distribution_tenant` and `aws_cloudfront_connection_group`. Terraform manages the multi-tenant distribution; the Worker creates and deletes tenants at runtime through the SDK.

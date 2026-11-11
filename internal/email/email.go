@@ -1,6 +1,6 @@
 // Package email sends LiteLogin's transactional email: email
-// verification, password reset, "you already have an account", and
-// admin invites.
+// verification, password reset, "you already have an account", admin
+// invites, and confirming a new email address.
 package email
 
 import (
@@ -42,6 +42,7 @@ const (
 	ResetPassword     Kind = "reset_password"
 	AlreadyRegistered Kind = "already_registered"
 	Invite            Kind = "invite"
+	ChangeEmail       Kind = "change_email"
 )
 
 var subjects = map[Kind]string{ //nolint:gosec // email subjects, not credentials
@@ -49,6 +50,7 @@ var subjects = map[Kind]string{ //nolint:gosec // email subjects, not credential
 	ResetPassword:     "Reset your {{.Brand}} password",
 	AlreadyRegistered: "You already have a {{.Brand}} account",
 	Invite:            "You've been invited to {{.Brand}}",
+	ChangeEmail:       "Confirm your new email for {{.Brand}}",
 }
 
 // Data fills a message template.
