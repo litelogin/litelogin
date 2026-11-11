@@ -197,7 +197,7 @@ Built before the login flows, so test orgs, clients and users can be created wit
 - `/userinfo` and `/logout` (RP-initiated).
 - CORS with `allowed_origins`, including preflight requests.
 - **OpenID Foundation conformance suite.** Run the Basic OP and Config OP test plans against `dev` and fix every failure.
-- An end-to-end test in `test/e2e` with a real OIDC client library acting as the relying party.
+- An end-to-end test in `test/e2e` with a real OIDC client library acting as the relying party (`coreos/go-oidc` and `golang.org/x/oauth2`, run by `make test-integration`).
 
 **Done when:** the conformance suite's Basic OP and Config OP plans pass, and a sample web app signs in through LiteLogin.
 

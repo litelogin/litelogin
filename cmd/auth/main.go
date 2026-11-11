@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/sesv2"
 
 	"github.com/litelogin/litelogin/internal/configcache"
@@ -27,6 +28,9 @@ import (
 	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/health"
 	"github.com/litelogin/litelogin/internal/httpx"
+	"github.com/litelogin/litelogin/internal/jwt"
+	"github.com/litelogin/litelogin/internal/keyrotation"
+	"github.com/litelogin/litelogin/internal/kmsfake"
 	"github.com/litelogin/litelogin/internal/platform"
 	"github.com/litelogin/litelogin/internal/store"
 	"github.com/litelogin/litelogin/internal/web"
@@ -67,11 +71,14 @@ func run(logger *slog.Logger) error {
 	db := platform.NewDynamoDB(cfg)
 	st := store.New(db, tables.Config, tables.Session)
 
+	keys := jwt.NewKeySet(st, nil)
 	pages := &web.Server{
-		Store:  st,
-		Config: configcache.New(st, configcache.DefaultTTL),
-		Hasher: crypto.NewPasswordHasher(crypto.DefaultArgon2Params),
-		Log:    logger,
+		Store:    st,
+		Config:   configcache.New(st, configcache.DefaultTTL),
+		Hasher:   crypto.NewPasswordHasher(crypto.DefaultArgon2Params),
+		Keys:     keys,
+		Verifier: jwt.NewVerifier(keys, nil),
+		Log:      logger,
 	}
 
 	mux := http.NewServeMux()
@@ -83,6 +90,7 @@ func run(logger *slog.Logger) error {
 		if from == "" {
 			return errors.New(EnvEmailFrom + " is not set")
 		}
+		pages.Signer = jwt.NewSigner(kms.NewFromConfig(cfg), keys)
 		pages.Email = &email.SES{
 			Client: sesv2.NewFromConfig(cfg), From: from, ConfigurationSet: os.Getenv(EnvSESConfiguration),
 		}
@@ -103,9 +111,42 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	signer, err := localSigner(ctx, st, keys, logger)
+	if err != nil {
+		return err
+	}
+	pages.Signer = signer
 	pages.Email = &email.Printer{W: os.Stderr}
 	pages.Scheme, pages.LinkPort = "http", port
 	return serveLocal(logger, addr, httpx.SetLoginHostFromHost(httpx.SecurityHeaders(mux)))
+}
+
+// localSigner signs with an in-memory fake KMS, for local development.
+// The fake's keys don't outlive the process, so signing keys left in the
+// local table by an earlier run are removed and a new one bootstrapped.
+func localSigner(ctx context.Context, st *store.Store, keys *jwt.KeySet, logger *slog.Logger) (*jwt.Signer, error) {
+	old, err := st.ListSigningKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range old {
+		if k.Status != store.KeyRetired {
+			if err := st.RetireKey(ctx, k.KID); err != nil && !errors.Is(err, store.ErrConditionFailed) {
+				return nil, err
+			}
+		}
+		// A next key can't be retired or deleted; local runs bootstrap
+		// straight to active, so they don't leave one behind.
+		if err := st.DeleteRetiredKey(ctx, k.KID); err != nil && !errors.Is(err, store.ErrConditionFailed) {
+			return nil, err
+		}
+	}
+	fake := kmsfake.New()
+	r := &keyrotation.Rotator{KMS: fake, Store: st, Policy: keyrotation.DefaultPolicy, Environment: "local", Log: logger}
+	if _, err := r.Run(ctx); err != nil {
+		return nil, err
+	}
+	return jwt.NewSigner(fake, keys), nil
 }
 
 func serveLocal(logger *slog.Logger, addr string, h http.Handler) error {

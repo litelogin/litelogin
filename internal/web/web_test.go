@@ -2,6 +2,7 @@ package web_test
 
 import (
 	"context"
+	"html"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -20,6 +22,9 @@ import (
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/httpx"
+	"github.com/litelogin/litelogin/internal/jwt"
+	"github.com/litelogin/litelogin/internal/keyrotation"
+	"github.com/litelogin/litelogin/internal/kmsfake"
 	"github.com/litelogin/litelogin/internal/platform"
 	"github.com/litelogin/litelogin/internal/store"
 	"github.com/litelogin/litelogin/internal/web"
@@ -66,8 +71,9 @@ func newEnv(t *testing.T, requireVerified bool) *env {
 	c := &store.Client{
 		ID: crypto.NewID(), OrgID: org.ID, Name: "Acme Portal", ClientType: "public", TokenEndpointAuthMethod: "none",
 		UserPoolID: pool.ID, RegistrationEnabled: true, Theme: map[string]string{web.ThemePrimary: "#2563eb"},
-		RedirectURIs: []string{"https://app.example.com/cb"}, AllowedScopes: []string{"openid"},
-		GrantTypes: []string{"authorization_code"}, AccessTokenTTL: 900, IDTokenTTL: 900,
+		RedirectURIs: []string{"https://app.example.com/cb"}, PostLogoutRedirectURIs: []string{"https://app.example.com/bye"},
+		AllowedOrigins: []string{"https://app.example.com"}, AllowedScopes: []string{"openid", "email", "offline_access"},
+		GrantTypes: []string{"authorization_code", "refresh_token"}, AccessTokenTTL: 900, IDTokenTTL: 900,
 		RefreshTokenTTL: 2592000, RefreshFamilyTTL: 7776000, SessionTTL: 604800, SessionIdleTTL: 86400,
 	}
 	for _, err := range []error{st.CreateOrg(ctx, org), st.CreatePool(ctx, pool), st.CreateClient(ctx, c, loginHost)} {
@@ -76,12 +82,23 @@ func newEnv(t *testing.T, requireVerified bool) *env {
 		}
 	}
 
+	fake := kmsfake.New()
+	rot := &keyrotation.Rotator{KMS: fake, Store: st, Policy: keyrotation.DefaultPolicy, Environment: "test"}
+	if _, err := rot.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	keys := jwt.NewKeySet(st, nil)
+
 	mail := &email.Recorder{}
 	ws := &web.Server{
-		Store:  st,
-		Config: configcache.New(st, 0),
-		Hasher: crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
-		Email:  mail,
+		Store: st,
+		// Effectively uncached, so tests see their own config changes.
+		Config:   configcache.New(st, time.Nanosecond),
+		Hasher:   crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
+		Email:    mail,
+		Keys:     keys,
+		Signer:   jwt.NewSigner(fake, keys),
+		Verifier: jwt.NewVerifier(keys, nil),
 	}
 	h := ws.Handler()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -104,10 +121,12 @@ type browser struct {
 
 func (e *env) browser() *browser {
 	jar, _ := cookiejar.New(nil)
-	c := e.srv.Client()
+	// Server.Client returns one shared client: copy it, so each browser
+	// has its own cookie jar.
+	c := *e.srv.Client()
 	c.Jar = jar
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &browser{e: e, c: c}
+	return &browser{e: e, c: &c}
 }
 
 type page struct {
@@ -141,18 +160,24 @@ func (b *browser) do(method, path string, form url.Values) page {
 
 func (b *browser) get(path string) page { return b.do(http.MethodGet, path, nil) }
 
-var csrfRE = regexp.MustCompile(`name="csrf" value="([^"]+)"`)
+var (
+	csrfRE   = regexp.MustCompile(`name="csrf" value="([^"]+)"`)
+	hiddenRE = regexp.MustCompile(`<input type="hidden" name="([^"]+)" value="([^"]*)">`)
+)
 
-// post loads the form page at formPath first, for its CSRF token, then
-// posts fields to path.
+// post loads the form page at formPath first, for its CSRF token and other
+// hidden fields, then posts them with fields to path.
 func (b *browser) post(formPath, path string, fields url.Values) page {
 	b.e.t.Helper()
 	p := b.get(formPath)
-	m := csrfRE.FindStringSubmatch(p.body)
-	if m == nil {
+	if csrfRE.FindStringSubmatch(p.body) == nil {
 		b.e.t.Fatalf("GET %s: no CSRF token (status %d)", formPath, p.status)
 	}
-	fields.Set("csrf", m[1])
+	for _, m := range hiddenRE.FindAllStringSubmatch(p.body, -1) {
+		if !fields.Has(m[1]) {
+			fields.Set(m[1], html.UnescapeString(m[2]))
+		}
+	}
 	return b.do(http.MethodPost, path, fields)
 }
 

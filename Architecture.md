@@ -117,7 +117,8 @@ The data model resolves every request from its host. Lambda never sees the viewe
 | -- | -- |
 | `/.well-known/openid-configuration` | 5 minutes, keyed on host |
 | `/.well-known/jwks.json` | 5 minutes, same response for every host |
-| Everything else | Not cached; all headers, cookies and query strings forwarded |
+| `/token`, `/userinfo` | Not cached (responses are `no-store`). CloudFront forwards `Authorization` only as part of a cache key, so these paths have a cache policy that includes it. |
+| Everything else | Not cached; cookies, query strings and the headers the Lambda uses are forwarded |
 
 ## Endpoints
 
@@ -160,6 +161,14 @@ LiteLogin implements the OAuth 2.1 authorization code flow and OpenID Connect Co
 | Refresh tokens | Rotated on every use | Rotated on every use |
 
 Authorization codes are bound to the client, the redirect URI, the PKCE challenge, the issuer and the user's `auth_version`. `state` is returned unchanged, and `nonce` is copied into the ID token. The implicit and password grants aren't supported.
+
+- **Authorization responses** carry `iss` (RFC 9207). Errors are redirected to the client only once `client_id` and `redirect_uri` are known to be valid; before that, they're shown on a page.
+- **Scopes:** scopes the client isn't allowed are dropped rather than rejected (RFC 6749 §3.3), and the token response says what was granted. `openid` is required.
+- **Refresh tokens** are issued to every client whose `grant_types` include `refresh_token`; `offline_access` isn't required.
+- **Signing in during authorization:** without a usable session, `/authorize` sends the browser to `/login`, carrying the request's query. After signing in, the browser returns to the same `/authorize` request. `prompt=login` and `max_age` are removed at that point, since the user just signed in.
+- **`prompt`:** `none` and `login` are supported. There's no consent screen: clients are configured by the operator, so `consent` is accepted and has no effect.
+- **RP-initiated logout:** `/logout` checks `id_token_hint` and `client_id` against the host's client, and `post_logout_redirect_uri` against its registered URIs. The user confirms before being signed out, so another site can't sign them out with a link.
+- **Pages' `form-action`** allows the client's redirect and post-logout redirect URI origins, because browsers apply it to the redirects that follow a form submission.
 
 ### Tokens
 

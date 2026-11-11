@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,7 +40,9 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, t *tenant) {
 // ---- Login ----
 
 func (s *Server) loginForm(w http.ResponseWriter, r *http.Request, t *tenant) {
-	s.render(w, r, t, http.StatusOK, "login", pageData{Title: "Sign in", Notice: notices[r.URL.Query().Get("n")]})
+	s.render(w, r, t, http.StatusOK, "login", pageData{
+		Title: "Sign in", Notice: notices[r.URL.Query().Get("n")], Authz: r.URL.Query().Get("authz"),
+	})
 }
 
 // login implements "Login with email and password" (Datamodel.md). Every
@@ -48,8 +51,9 @@ func (s *Server) loginForm(w http.ResponseWriter, r *http.Request, t *tenant) {
 func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 	ctx := r.Context()
 	addr, password := strings.TrimSpace(r.PostFormValue("email")), r.PostFormValue("password")
+	authz := r.PostFormValue("authz")
 	bad := func() {
-		s.render(w, r, t, http.StatusUnauthorized, "login", pageData{Title: "Sign in", Email: addr, Error: msgBadLogin})
+		s.render(w, r, t, http.StatusUnauthorized, "login", pageData{Title: "Sign in", Email: addr, Error: msgBadLogin, Authz: authz})
 	}
 	if len(password) > crypto.MaxPasswordLength {
 		bad()
@@ -119,8 +123,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 		s.fail(w, r, t, err)
 		return
 	}
-	// Phase 5 continues a pending /authorize request here.
-	http.Redirect(w, r, "/account", http.StatusSeeOther)
+	http.Redirect(w, r, continueAuthz(authz), http.StatusSeeOther) //nolint:gosec // always a path on this host: /authorize or /account
 }
 
 // startSession creates a session and sets its cookie. The browser's
@@ -432,14 +435,88 @@ func (s *Server) reset(w http.ResponseWriter, r *http.Request, t *tenant) {
 
 // ---- Logout and account ----
 
+// logoutRequest is a validated RP-initiated logout request (OpenID Connect
+// RP-Initiated Logout 1.0).
+type logoutRequest struct {
+	PostLogoutRedirectURI string
+	State                 string
+}
+
+// parseLogout validates a logout request's parameters. The login host
+// identifies the client, so a client_id or id_token_hint must match it,
+// and post_logout_redirect_uri must be one of its registered URIs.
+func (s *Server) parseLogout(r *http.Request, t *tenant) (*logoutRequest, string) {
+	q := r.Form
+	if id := q.Get("client_id"); id != "" && id != t.Client.ID {
+		return nil, "The sign-out request is for another application."
+	}
+	if hint := q.Get("id_token_hint"); hint != "" {
+		c, err := s.Verifier.VerifyIDTokenHint(r.Context(), hint, s.issuer(t))
+		if err != nil || c.Audience != t.Client.ID {
+			return nil, "The sign-out request isn't valid for this application."
+		}
+	}
+	req := &logoutRequest{State: q.Get("state")}
+	if u := q.Get("post_logout_redirect_uri"); u != "" {
+		if !slices.Contains(t.Client.PostLogoutRedirectURIs, u) {
+			return nil, "The sign-out request's return address isn't registered for this application."
+		}
+		req.PostLogoutRedirectURI = u
+	}
+	if len(req.State) > 2048 {
+		return nil, "The sign-out request is malformed."
+	}
+	return req, ""
+}
+
+// finishLogout redirects to the client's post-logout redirect URI with
+// state, or to the login page.
+func finishLogout(w http.ResponseWriter, r *http.Request, req *logoutRequest) {
+	if req.PostLogoutRedirectURI == "" {
+		http.Redirect(w, r, "/login?n=logged_out", http.StatusSeeOther)
+		return
+	}
+	u, _ := url.Parse(req.PostLogoutRedirectURI) // registered URIs parse
+	if req.State != "" {
+		q := u.Query()
+		q.Set("state", req.State)
+		u.RawQuery = q.Encode()
+	}
+	http.Redirect(w, r, u.String(), http.StatusSeeOther) //nolint:gosec // a post-logout URI registered for the client (exact match)
+}
+
+// logoutForm asks the user to confirm signing out, so another site can't
+// sign them out with a link. Without a session there's nothing to confirm.
 func (s *Server) logoutForm(w http.ResponseWriter, r *http.Request, t *tenant) {
-	s.render(w, r, t, http.StatusOK, "logout", pageData{Title: "Sign out"})
+	_ = r.ParseForm()
+	req, msg := s.parseLogout(r, t)
+	if req == nil {
+		s.render(w, r, t, http.StatusBadRequest, "error", pageData{Title: "Sign-out request not valid", Error: msg})
+		return
+	}
+	sess, _, err := s.currentSession(r, t)
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	if sess == nil {
+		clearCookie(w, SessionCookie)
+		finishLogout(w, r, req)
+		return
+	}
+	s.render(w, r, t, http.StatusOK, "logout", pageData{
+		Title: "Sign out", PostLogoutRedirectURI: req.PostLogoutRedirectURI, State: req.State,
+	})
 }
 
 // logout deletes this browser's session. Refresh tokens survive logout
-// (Datamodel.md, "Logout"). Phase 5 adds id_token_hint and
-// post_logout_redirect_uri.
+// (Datamodel.md, "Logout").
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, t *tenant) {
+	req, msg := s.parseLogout(r, t)
+	if req == nil {
+		s.render(w, r, t, http.StatusBadRequest, "error", pageData{Title: "Sign-out request not valid", Error: msg})
+		return
+	}
 	if c, err := r.Cookie(SessionCookie); err == nil && validToken(c.Value) {
 		if err := s.Store.DeleteSession(r.Context(), crypto.HashToken(c.Value)); err != nil {
 			s.fail(w, r, t, err)
@@ -447,7 +524,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, t *tenant) {
 		}
 	}
 	clearCookie(w, SessionCookie)
-	http.Redirect(w, r, "/login?n=logged_out", http.StatusSeeOther)
+	finishLogout(w, r, req)
 }
 
 func (s *Server) account(w http.ResponseWriter, r *http.Request, t *tenant) {

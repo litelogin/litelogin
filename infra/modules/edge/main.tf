@@ -130,8 +130,8 @@ resource "aws_cloudfront_origin_request_policy" "auth" {
         "x-litelogin-host", "CloudFront-Viewer-Address", "Origin", "Referer", "User-Agent",
         "Accept", "Accept-Language", "Content-Type",
       ]
-      # Authorization can't go in an origin request policy. Phase 5 adds it
-      # (through the cache policy) for /token and /userinfo.
+      # Authorization can't go in an origin request policy: /token and
+      # /userinfo get it through the api cache policy below.
     }
   }
 }
@@ -158,6 +158,48 @@ resource "aws_cloudfront_cache_policy" "well_known" {
       headers {
         items = ["x-litelogin-host"]
       }
+    }
+  }
+}
+
+# /token and /userinfo need the Authorization header (client_secret_basic,
+# bearer tokens), which CloudFront forwards only as part of a cache key.
+# Their responses are no-store, so nothing is cached.
+resource "aws_cloudfront_cache_policy" "api" {
+  name        = "${var.name_prefix}-api"
+  min_ttl     = 0
+  default_ttl = 0
+  max_ttl     = 1
+  parameters_in_cache_key_and_forwarded_to_origin {
+    cookies_config {
+      cookie_behavior = "none"
+    }
+    query_strings_config {
+      query_string_behavior = "all"
+    }
+    headers_config {
+      header_behavior = "whitelist"
+      headers {
+        items = ["Authorization", "x-litelogin-host"]
+      }
+    }
+  }
+}
+
+# The rest of what /token and /userinfo need (headers in the cache policy
+# can't be listed again here).
+resource "aws_cloudfront_origin_request_policy" "api" {
+  name = "${var.name_prefix}-api"
+  cookies_config {
+    cookie_behavior = "none"
+  }
+  query_strings_config {
+    query_string_behavior = "none"
+  }
+  headers_config {
+    header_behavior = "whitelist"
+    headers {
+      items = ["CloudFront-Viewer-Address", "Origin", "User-Agent", "Accept", "Content-Type"]
     }
   }
 }
@@ -202,6 +244,24 @@ resource "aws_cloudfront_distribution" "this" {
     function_association {
       event_type   = "viewer-request"
       function_arn = aws_cloudfront_function.host.arn
+    }
+  }
+
+  dynamic "ordered_cache_behavior" {
+    for_each = ["/token", "/userinfo"]
+    content {
+      path_pattern             = ordered_cache_behavior.value
+      target_origin_id         = "auth"
+      viewer_protocol_policy   = "https-only"
+      allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+      cached_methods           = ["GET", "HEAD"]
+      cache_policy_id          = aws_cloudfront_cache_policy.api.id
+      origin_request_policy_id = aws_cloudfront_origin_request_policy.api.id
+      compress                 = true
+      function_association {
+        event_type   = "viewer-request"
+        function_arn = aws_cloudfront_function.host.arn
+      }
     }
   }
 

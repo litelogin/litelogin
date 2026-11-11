@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/httpx"
+	"github.com/litelogin/litelogin/internal/jwt"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -40,6 +42,14 @@ type Store interface {
 	GetSession(ctx context.Context, hash string) (*store.Session, error)
 	TouchSession(ctx context.Context, sess *store.Session, idle time.Duration) (bool, error)
 	DeleteSession(ctx context.Context, hash string) error
+
+	CreateCode(ctx context.Context, c *store.AuthCode, lifetime time.Duration) error
+	GetCode(ctx context.Context, hash string) (*store.AuthCode, error)
+	RedeemCode(ctx context.Context, code *store.AuthCode, grant *store.NewRefreshGrant) (*store.RefreshFamily, error)
+	GetRefreshToken(ctx context.Context, hash string) (*store.RefreshToken, error)
+	GetRefreshFamily(ctx context.Context, familyID string) (*store.RefreshFamily, error)
+	RotateRefreshToken(ctx context.Context, old *store.RefreshToken, family *store.RefreshFamily, newHash string, lifetime time.Duration) (*store.RefreshToken, error)
+	RevokeRefreshFamily(ctx context.Context, familyID string) error
 
 	CreateOneTimeToken(ctx context.Context, t *store.OneTimeToken, lifetime time.Duration) error
 	GetOneTimeToken(ctx context.Context, hash, purpose string) (*store.OneTimeToken, error)
@@ -72,8 +82,12 @@ type Server struct {
 	Config *configcache.Cache
 	Hasher *crypto.PasswordHasher
 	Email  email.Sender
-	Log    *slog.Logger
-	Now    func() time.Time
+	// Keys, Signer and Verifier serve the JWKS and sign and verify tokens.
+	Keys     *jwt.KeySet
+	Signer   *jwt.Signer
+	Verifier *jwt.Verifier
+	Log      *slog.Logger
+	Now      func() time.Time
 	// Scheme of the links in emails: https, or http for the local
 	// development server.
 	Scheme string
@@ -133,6 +147,21 @@ func (s *Server) Handler() http.Handler {
 	page("GET /logout", s.logoutForm)
 	page("POST /logout", s.logout)
 	page("GET /account", s.account)
+
+	// OAuth and OpenID Connect. These don't use the page wrapper: their
+	// POSTs come from clients, not this site's forms, so they have no
+	// CSRF token.
+	mux.HandleFunc("GET /authorize", s.authorize)
+	mux.HandleFunc("POST /authorize", s.authorize)
+	mux.HandleFunc("POST /token", s.token)
+	mux.HandleFunc("OPTIONS /token", s.clientPreflight)
+	mux.HandleFunc("GET /userinfo", s.userinfo)
+	mux.HandleFunc("POST /userinfo", s.userinfo)
+	mux.HandleFunc("OPTIONS /userinfo", s.clientPreflight)
+	mux.HandleFunc("GET /.well-known/openid-configuration", s.discovery)
+	mux.HandleFunc("OPTIONS /.well-known/openid-configuration", s.publicPreflight)
+	mux.HandleFunc("GET /.well-known/jwks.json", s.jwks)
+	mux.HandleFunc("OPTIONS /.well-known/jwks.json", s.publicPreflight)
 	page("/", func(w http.ResponseWriter, r *http.Request, t *tenant) {
 		s.render(w, r, t, http.StatusNotFound, "error", pageData{Title: "Page not found", Error: "There's nothing at this address."})
 	})
@@ -253,6 +282,13 @@ type pageData struct {
 	Token   string
 	Link    string
 	Account *store.User
+	// Authz is a pending authorization request's query, carried through
+	// the login form.
+	Authz string
+	// Logout carries a validated RP-initiated logout through its
+	// confirmation form.
+	PostLogoutRedirectURI string
+	State                 string
 
 	// Set by render.
 	Brand        string
@@ -284,15 +320,39 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, t *tenant, statu
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
-	// form-action 'self' is enough while every form posts to this host.
-	// Phase 5 redirects to redirect_uri after login; browsers apply
-	// form-action to such redirects, so it must allow them then.
+	// Browsers apply form-action to the redirects that follow a form
+	// submission too: signing in ends at the client's redirect URI, and
+	// logging out at its post-logout redirect URI.
 	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'nonce-"+d.Nonce+"'; img-src 'self' https:; "+
-		"form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+		"form-action "+formActionSources(t)+"; frame-ancestors 'none'; base-uri 'none'")
 	w.WriteHeader(status)
 	if err := tmpl.ExecuteTemplate(w, "layout", d); err != nil {
 		s.log().ErrorContext(r.Context(), "render page", "page", name, "error", err)
 	}
+}
+
+// formActionSources lists 'self' and the origins (or, for native apps,
+// schemes) of the client's redirect and post-logout redirect URIs.
+func formActionSources(t *tenant) string {
+	sources := []string{"'self'"}
+	if t == nil {
+		return sources[0]
+	}
+	for _, raw := range append(slices.Clone(t.Client.RedirectURIs), t.Client.PostLogoutRedirectURIs...) {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme == "" {
+			continue
+		}
+		src := u.Scheme + ":"
+		if u.Host != "" {
+			src = u.Scheme + "://" + u.Host
+		}
+		if strings.ContainsAny(src, " ;,'\"") || slices.Contains(sources, src) {
+			continue
+		}
+		sources = append(sources, src)
+	}
+	return strings.Join(sources, " ")
 }
 
 // fail renders an error page. Internal errors are logged, not shown.
