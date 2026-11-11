@@ -201,7 +201,9 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	usable := sess != nil && !req.Prompt["login"]
-	if usable && req.MaxAge >= 0 && s.now().Unix()-sess.AuthTime > req.MaxAge {
+	// max_age=0 is equivalent to prompt=login (OIDC Core §3.1.2.1); without
+	// this, a sign-in in the same second would count as fresh enough.
+	if usable && (req.MaxAge == 0 || req.MaxAge > 0 && s.now().Unix()-sess.AuthTime > req.MaxAge) {
 		usable = false
 	}
 	if usable && req.IDTokenHint != "" {
