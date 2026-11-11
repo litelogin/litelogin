@@ -306,6 +306,20 @@ resource "aws_route53_record" "wildcard" {
 
 # ---- WAF ----
 
+# Common rule set rules that a loopback redirect_uri trips, and the labels
+# they add (see the "loopback-redirects" rule), and the paths that carry
+# one: /authorize and /logout in the query, the sign-in form (its pending
+# authorization request) and the logout confirmation in the body.
+locals {
+  loopback_rules = {
+    EC2MetaDataSSRF_QUERYARGUMENTS = "awswaf:managed:aws:core-rule-set:EC2MetaDataSSRF_QueryArguments"
+    GenericRFI_QUERYARGUMENTS      = "awswaf:managed:aws:core-rule-set:GenericRFI_QueryArguments"
+    EC2MetaDataSSRF_BODY           = "awswaf:managed:aws:core-rule-set:EC2MetaDataSSRF_Body"
+    GenericRFI_BODY                = "awswaf:managed:aws:core-rule-set:GenericRFI_Body"
+  }
+  loopback_paths = ["/authorize", "/login", "/logout"]
+}
+
 resource "aws_wafv2_web_acl" "this" {
   name  = "${var.name_prefix}-edge"
   scope = "CLOUDFRONT"
@@ -392,7 +406,7 @@ resource "aws_wafv2_web_acl" "this" {
           # Counted here, blocked by the next rule outside sign-in and
           # logout (see "loopback-redirects").
           dynamic "rule_action_override" {
-            for_each = rule.key == "AWSManagedRulesCommonRuleSet" ? ["EC2MetaDataSSRF_QUERYARGUMENTS"] : []
+            for_each = rule.key == "AWSManagedRulesCommonRuleSet" ? keys(local.loopback_rules) : []
             content {
               name = rule_action_override.value
               action_to_use {
@@ -410,11 +424,12 @@ resource "aws_wafv2_web_acl" "this" {
     }
   }
 
-  # EC2MetaDataSSRF_QUERYARGUMENTS blocks loopback addresses in the query
-  # string, which a native app's or CLI's loopback redirect_uri always
-  # has (http://127.0.0.1:{port}/callback, RFC 8252 section 7.3). LiteLogin
-  # never fetches a redirect URI, only redirects the browser to one, so
-  # the rule is relaxed for /authorize and /logout and blocks elsewhere.
+  # The EC2MetaDataSSRF and GenericRFI rules block a URL with a loopback
+  # address or an IP in the query string or body, which a native app's or
+  # CLI's loopback redirect_uri always is (http://127.0.0.1:{port}/callback,
+  # RFC 8252 section 7.3). LiteLogin never fetches a redirect URI, only
+  # redirects the browser to one, so the rules are relaxed on the paths
+  # that carry one and block everywhere else.
   rule {
     name     = "loopback-redirects"
     priority = 13
@@ -424,9 +439,16 @@ resource "aws_wafv2_web_acl" "this" {
     statement {
       and_statement {
         statement {
-          label_match_statement {
-            scope = "LABEL"
-            key   = "awswaf:managed:aws:core-rule-set:EC2MetaDataSSRF_QueryArguments"
+          or_statement {
+            dynamic "statement" {
+              for_each = values(local.loopback_rules)
+              content {
+                label_match_statement {
+                  scope = "LABEL"
+                  key   = statement.value
+                }
+              }
+            }
           }
         }
         statement {
@@ -434,7 +456,7 @@ resource "aws_wafv2_web_acl" "this" {
             statement {
               or_statement {
                 dynamic "statement" {
-                  for_each = ["/authorize", "/logout"]
+                  for_each = local.loopback_paths
                   content {
                     byte_match_statement {
                       search_string         = statement.value
