@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/acm"
+	acmtypes "github.com/aws/aws-sdk-go-v2/service/acm/types"
 	"github.com/aws/aws-sdk-go-v2/service/cloudfront"
 	"github.com/aws/aws-sdk-go-v2/service/cloudfront/types"
 )
@@ -37,6 +39,15 @@ type API interface {
 		opts ...func(*cloudfront.Options)) (*cloudfront.GetManagedCertificateDetailsOutput, error)
 }
 
+// ACM is the part of the ACM client used here (in us-east-1, where
+// CloudFront's certificates live).
+type ACM interface {
+	ListCertificates(ctx context.Context, in *acm.ListCertificatesInput,
+		opts ...func(*acm.Options)) (*acm.ListCertificatesOutput, error)
+	DeleteCertificate(ctx context.Context, in *acm.DeleteCertificateInput,
+		opts ...func(*acm.Options)) (*acm.DeleteCertificateOutput, error)
+}
+
 // Resolver is the part of *net.Resolver used to check DNS.
 type Resolver interface {
 	LookupCNAME(ctx context.Context, host string) (string, error)
@@ -52,6 +63,9 @@ type CloudFront struct {
 	DistributionID    string
 	ConnectionGroupID string
 	RoutingEndpoint   string
+	// ACM deletes a removed host's managed certificate, which CloudFront
+	// leaves behind when the tenant is deleted. Nil leaves it.
+	ACM ACM
 	// Resolver checks DNS; nil means net.DefaultResolver.
 	Resolver Resolver
 }
@@ -260,18 +274,21 @@ func (c *CloudFront) pointsHere(ctx context.Context, host string) bool {
 	return true
 }
 
-// Remove takes the host's tenant down. A tenant must be disabled, and the
-// change deployed, before it can be deleted, so this takes more than one
-// call: it reports done once the tenant is gone. CloudFront deletes the
-// managed certificate with the tenant.
+// Remove takes the host's tenant down, and its managed certificate. A
+// tenant must be disabled, and the change deployed, before it can be
+// deleted, and CloudFront leaves its certificate behind, so this takes more
+// than one call: it reports done once the tenant and certificate are gone.
 func (c *CloudFront) Remove(ctx context.Context, host string) (bool, error) {
 	t, etag, err := c.tenant(ctx, host)
 	if errors.Is(err, ErrOtherDistribution) {
 		// Not ours: nothing to remove.
 		return true, nil
 	}
-	if err != nil || t == nil {
-		return t == nil && err == nil, err
+	if err != nil {
+		return false, err
+	}
+	if t == nil {
+		return c.deleteCertificates(ctx, host)
 	}
 	if aws.ToBool(t.Enabled) {
 		_, err := c.API.UpdateDistributionTenant(ctx, &cloudfront.UpdateDistributionTenantInput{
@@ -295,5 +312,50 @@ func (c *CloudFront) Remove(ctx context.Context, host string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("domains: delete tenant for %s: %w", host, err)
 	}
-	return true, nil
+	return c.deleteCertificates(ctx, host)
+}
+
+// deleteCertificates deletes the CloudFront-managed certificates for host
+// that are no longer in use, and reports whether none are left. A
+// certificate still in use (CloudFront detaches it shortly after the
+// tenant is deleted) is left for the next call.
+func (c *CloudFront) deleteCertificates(ctx context.Context, host string) (bool, error) {
+	if c.ACM == nil {
+		return true, nil
+	}
+	in := &acm.ListCertificatesInput{
+		Includes: &acmtypes.Filters{
+			ManagedBy: acmtypes.CertificateManagedByCloudfront,
+			KeyTypes:  acmtypes.KeyAlgorithm("").Values(), // by default, only RSA-2048 are listed
+		},
+	}
+	done := true
+	for {
+		out, err := c.ACM.ListCertificates(ctx, in)
+		if err != nil {
+			return false, fmt.Errorf("domains: list certificates for %s: %w", host, err)
+		}
+		for _, cert := range out.CertificateSummaryList {
+			if !strings.EqualFold(aws.ToString(cert.DomainName), host) {
+				continue
+			}
+			if aws.ToBool(cert.InUse) {
+				done = false
+				continue
+			}
+			_, err := c.ACM.DeleteCertificate(ctx, &acm.DeleteCertificateInput{CertificateArn: cert.CertificateArn})
+			var inUse *acmtypes.ResourceInUseException
+			var gone *acmtypes.ResourceNotFoundException
+			switch {
+			case errors.As(err, &inUse):
+				done = false
+			case err != nil && !errors.As(err, &gone):
+				return false, fmt.Errorf("domains: delete certificate for %s: %w", host, err)
+			}
+		}
+		if out.NextToken == nil {
+			return done, nil
+		}
+		in.NextToken = out.NextToken
+	}
 }

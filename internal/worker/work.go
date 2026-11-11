@@ -70,7 +70,7 @@ func (w *Worker) removeHost(ctx context.Context, host string) error {
 		return w.attempt(ctx, store.WorkCustomDomain, host, err.Error())
 	}
 	if !done {
-		return w.attempt(ctx, store.WorkCustomDomain, host, "waiting for CloudFront to disable the host's tenant")
+		return w.attempt(ctx, store.WorkCustomDomain, host, "waiting for CloudFront to remove the host's tenant and certificate")
 	}
 	err = w.Store.DeleteRemovedHost(ctx, host)
 	switch {

@@ -262,10 +262,11 @@ func (s *Store) VerifyHost(ctx context.Context, host string) error {
 }
 
 // RemoveHost starts removing a custom login host that has no clients left.
-// It stops serving immediately; the Worker deletes it (DeleteRemovedHost)
-// after removing its CloudFront tenant. An org's default host can't be
-// removed (ErrDefaultHost), and a host with clients returns ErrHostInUse:
-// remove them first, so no client is left without a host.
+// It stops serving once cached config expires; the Worker deletes it
+// (DeleteRemovedHost) after removing its CloudFront tenant and certificate.
+// An org's default host can't be removed (ErrDefaultHost), and a host
+// with clients returns ErrHostInUse: remove them first, so no client is
+// left without a host.
 func (s *Store) RemoveHost(ctx context.Context, host string) error {
 	h, err := s.GetLoginHost(ctx, host)
 	if err != nil {

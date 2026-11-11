@@ -21,6 +21,7 @@ import (
 
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/acm"
 	"github.com/aws/aws-sdk-go-v2/service/cloudfront"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
@@ -74,6 +75,8 @@ func run(logger *slog.Logger) error {
 		}
 		w.Domains = &domains.CloudFront{
 			API: cloudfront.NewFromConfig(cfg), DistributionID: dist, ConnectionGroupID: group, RoutingEndpoint: endpoint,
+			// CloudFront's certificates are always in us-east-1.
+			ACM: acm.NewFromConfig(cfg, func(o *acm.Options) { o.Region = "us-east-1" }),
 		}
 		w.RoutingEndpoint = endpoint
 	}

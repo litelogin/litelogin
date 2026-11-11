@@ -218,7 +218,7 @@ func TestHostRemoval(t *testing.T) {
 	if err := w.Run(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := st.hosts["login.acme.com"]; !ok || !strings.Contains(st.attempts[0], "waiting for CloudFront") {
+	if _, ok := st.hosts["login.acme.com"]; !ok || !strings.Contains(st.attempts[0], "waiting for CloudFront to remove") {
 		t.Fatalf("hosts %v, attempts %q", st.hosts, st.attempts)
 	}
 

@@ -182,7 +182,8 @@ data "aws_iam_policy_document" "worker" {
 
   # Custom hosts: tenants of the multi-tenant distribution, with
   # CloudFront-managed certificates (which CloudFront requests from ACM
-  # with the caller's permissions).
+  # with the caller's permissions). CloudFront leaves a deleted tenant's
+  # certificate behind, so the Worker lists and deletes it.
   dynamic "statement" {
     for_each = var.custom_hosts == null ? [] : [var.custom_hosts]
     content {
@@ -202,7 +203,7 @@ data "aws_iam_policy_document" "worker" {
       actions = [
         "cloudfront:GetDistributionTenant", "cloudfront:GetDistributionTenantByDomain",
         "cloudfront:GetManagedCertificateDetails", "cloudfront:GetConnectionGroup",
-        "acm:RequestCertificate", "acm:DescribeCertificate", "acm:DeleteCertificate",
+        "acm:RequestCertificate", "acm:DescribeCertificate", "acm:DeleteCertificate", "acm:ListCertificates",
       ]
       resources = ["*"]
     }

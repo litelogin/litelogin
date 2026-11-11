@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/acm"
+	acmtypes "github.com/aws/aws-sdk-go-v2/service/acm/types"
 	"github.com/aws/aws-sdk-go-v2/service/cloudfront"
 	"github.com/aws/aws-sdk-go-v2/service/cloudfront/types"
 )
@@ -80,6 +82,42 @@ func (f *fakeAPI) GetManagedCertificateDetails(context.Context, *cloudfront.GetM
 	return &cloudfront.GetManagedCertificateDetailsOutput{
 		ManagedCertificateDetails: &types.ManagedCertificateDetails{CertificateStatus: f.cert, CertificateArn: aws.String("arn:cert")},
 	}, nil
+}
+
+// fakeACM holds certificates, one per page of the listing.
+type fakeACM struct {
+	certs   []acmtypes.CertificateSummary
+	deleted []string
+	filters *acmtypes.Filters
+}
+
+func (f *fakeACM) ListCertificates(_ context.Context, in *acm.ListCertificatesInput,
+	_ ...func(*acm.Options),
+) (*acm.ListCertificatesOutput, error) {
+	f.filters = in.Includes
+	i := 0
+	if in.NextToken != nil {
+		i = int(aws.ToString(in.NextToken)[0] - '0')
+	}
+	out := &acm.ListCertificatesOutput{}
+	if i < len(f.certs) {
+		out.CertificateSummaryList = f.certs[i : i+1]
+	}
+	if i+1 < len(f.certs) {
+		out.NextToken = aws.String(string(rune('0' + i + 1)))
+	}
+	return out, nil
+}
+
+func (f *fakeACM) DeleteCertificate(_ context.Context, in *acm.DeleteCertificateInput,
+	_ ...func(*acm.Options),
+) (*acm.DeleteCertificateOutput, error) {
+	f.deleted = append(f.deleted, aws.ToString(in.CertificateArn))
+	return &acm.DeleteCertificateOutput{}, nil
+}
+
+func cert(arn, domain string, inUse bool) acmtypes.CertificateSummary {
+	return acmtypes.CertificateSummary{CertificateArn: aws.String(arn), DomainName: aws.String(domain), InUse: aws.Bool(inUse)}
 }
 
 type fakeResolver struct {
@@ -205,12 +243,26 @@ func TestRemove(t *testing.T) {
 	if done, err := cf.Remove(ctx, "login.acme.com"); err != nil || done || api.deleted {
 		t.Fatalf("while deploying: done %v, err %v", done, err)
 	}
+	// The tenant is deleted, but its certificate is still in use for a
+	// moment; certificates for other domains aren't touched.
+	certs := &fakeACM{certs: []acmtypes.CertificateSummary{
+		cert("arn:other", "login.other.com", false), cert("arn:cert", "LOGIN.acme.com", true),
+	}}
+	cf.ACM = certs
 	api.tenant.Status = aws.String("Deployed")
-	if done, err := cf.Remove(ctx, "login.acme.com"); err != nil || !done || !api.deleted {
-		t.Fatalf("delete: done %v, err %v", done, err)
+	if done, err := cf.Remove(ctx, "login.acme.com"); err != nil || done || !api.deleted || len(certs.deleted) != 0 {
+		t.Fatalf("delete: done %v, err %v, certificates deleted %v", done, err, certs.deleted)
 	}
-	if done, err := cf.Remove(ctx, "login.acme.com"); err != nil || !done {
-		t.Fatalf("gone: done %v, err %v", done, err)
+	if f := certs.filters; f.ManagedBy != acmtypes.CertificateManagedByCloudfront || len(f.KeyTypes) < 2 {
+		t.Errorf("filters = %+v", f)
+	}
+	certs.certs[1].InUse = aws.Bool(false)
+	if done, err := cf.Remove(ctx, "login.acme.com"); err != nil || !done || len(certs.deleted) != 1 || certs.deleted[0] != "arn:cert" {
+		t.Fatalf("certificate: done %v, err %v, deleted %v", done, err, certs.deleted)
+	}
+	certs.certs = certs.certs[:1]
+	if done, err := cf.Remove(ctx, "login.acme.com"); err != nil || !done || len(certs.deleted) != 1 {
+		t.Fatalf("gone: done %v, err %v, deleted %v", done, err, certs.deleted)
 	}
 }
 
