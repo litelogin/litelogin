@@ -1,6 +1,6 @@
 # LiteLogin
 
-A multi-tenant OAuth 2.1 and OpenID Connect identity provider that runs entirely on AWS serverless services: Lambda, DynamoDB, KMS, CloudFront and SES. There are no servers to manage, and costs follow requests, so it's close to free when idle.
+A multi-tenant OAuth 2.1 and OpenID Connect identity provider that runs entirely on AWS serverless services: Lambda, DynamoDB, KMS, CloudFront and SES. There are no servers to manage: costs follow requests, on top of a small fixed monthly cost for the WAF, KMS keys and monitoring.
 
 One deployment serves many **orgs**. Each org has its own users, its own login hosts (`acme.login.example.com`, or a custom domain such as `login.acme.com`), and its own apps.
 
@@ -28,6 +28,41 @@ One deployment serves many **orgs**. Each org has its own users, its own login h
   - a CLI and an IAM-authenticated Admin API
   - Terraform/OpenTofu modules for the whole deployment
   - CloudWatch dashboards and alarms, and a synthetic sign-in monitor
+
+## Quickstart
+
+You need an AWS account used only for LiteLogin, a domain for login hosts that you can delegate to Route 53 (such as `login.example.com`), OpenTofu or Terraform, Go and the AWS CLI. The first deploy takes about 30 minutes, mostly waiting for the certificate and CloudFront.
+
+```sh
+git clone https://github.com/litelogin/litelogin && cd litelogin
+cp -r infra/envs/example infra/envs/prod           # then set terraform.tfvars
+scripts/bootstrap-account.sh prod --region us-east-1 --state-only
+make package cli
+# Deploy infra/envs/prod: the DNS zone first, then everything else (SelfHosting.md, step 5)
+dist/litelogin init --org "Acme" --client "Acme Portal" --redirect-uri https://app.acme.com/callback
+```
+
+`init` prints an issuer URL, a client ID and a client secret. Point any OpenID Connect library at the issuer: it finds the rest through `/.well-known/openid-configuration`. `litelogin client test` signs in end to end, as an app would. [SelfHosting.md](SelfHosting.md) has every step in full.
+
+## How it works
+
+```mermaid
+flowchart LR
+  user(["Browser or app"]) --> edge["CloudFront + WAF<br/>login hosts, custom domains"]
+  edge --> auth["Auth Lambda<br/>sign-in pages, OAuth, OIDC"]
+  auth --> config[("DynamoDB<br/>Config")]
+  auth --> sessions[("DynamoDB<br/>Sessions")]
+  auth --> kms["KMS<br/>token signing"]
+  auth --> ses["SES<br/>email"]
+  operator(["Operator: CLI"]) -- "IAM (SigV4)" --> admin["Admin Lambda<br/>Admin API"]
+  admin --> config
+  config -- "stream" --> worker["Worker Lambda<br/>revocation, custom hosts"]
+  worker --> sessions
+  schedule["EventBridge Scheduler"] --> rotate["Rotate Lambda<br/>signing keys"]
+  rotate --> kms
+```
+
+Every request is handled by a Lambda function and all state is in two on-demand DynamoDB tables, so there's no capacity to provision or servers to patch. Besides requests, only scheduled jobs run: key rotation daily, and a reconciler and the synthetic sign-in monitor every 5 minutes. Signing keys are created in KMS and never leave it. [Architecture.md](Architecture.md) explains each part.
 
 ## Documentation
 
