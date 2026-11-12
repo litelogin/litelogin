@@ -73,7 +73,22 @@ type cdpReply struct {
 
 func startChrome(t *testing.T) *chrome {
 	t.Helper()
-	dir := t.TempDir()
+	// Not t.TempDir: Chrome's helper processes can outlive the main one
+	// and write to the profile for a moment, so removal is retried, and a
+	// leftover isn't a test failure.
+	dir, err := os.MkdirTemp("", "litelogin-chrome-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for range 50 {
+			if os.RemoveAll(dir) == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Logf("couldn't remove Chrome's profile %s", dir)
+	})
 	args := []string{
 		"--headless=new", "--remote-debugging-port=0", "--remote-allow-origins=http://127.0.0.1",
 		"--user-data-dir=" + dir, "--no-first-run", "--no-default-browser-check", "--disable-gpu",
