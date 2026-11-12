@@ -463,11 +463,13 @@ resource "aws_wafv2_web_acl" "this" {
     }
   }
 
+  # Not the Known Bad Inputs group: its rules are for exploits of Java
+  # (Log4j, deserialization) and of servers this isn't, and each rule in
+  # a web ACL costs $1 a month (Cost.md).
   dynamic "rule" {
     for_each = {
       AWSManagedRulesAmazonIpReputationList = 10
       AWSManagedRulesCommonRuleSet          = 11
-      AWSManagedRulesKnownBadInputsRuleSet  = 12
     }
     content {
       name     = rule.key

@@ -39,7 +39,9 @@ variable "alarm_email" {
 variable "canary_start" {
   description = "Run the synthetic monitor. Set once its parameter holds the configuration (infra/modules/canary)."
   type        = bool
-  default     = false
+  # dev's parameter is set. The pipeline passes no variables, so a setting
+  # dev needs belongs here, not in terraform.tfvars.
+  default = true
 }
 
 variable "tracing" {

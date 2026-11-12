@@ -6,12 +6,12 @@ What one LiteLogin deployment costs per month on AWS, at 1,000, 10,000, 100,000 
 
 | Sign-ins a month | Fixed | Requests | Total |
 | --: | --: | --: | --: |
-| 1,000 | $22.80 | $0.20 | **$23.00** |
-| 10,000 | $22.80 | $1.94 | **$24.74** |
-| 100,000 | $22.80 | $19.42 | **$42.22** |
-| 1,000,000 | $22.80 | $194.21 | **$217.01** |
+| 1,000 | $21.80 | $0.20 | **$22.00** |
+| 10,000 | $21.80 | $1.94 | **$23.74** |
+| 100,000 | $21.80 | $19.42 | **$41.22** |
+| 1,000,000 | $21.80 | $194.21 | **$216.01** |
 
-At low traffic the fixed part dominates, and half of it is the WAF ($11). Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins.
+At low traffic the fixed part dominates, and almost half of it is the WAF ($10). Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins.
 
 The totals are list prices. They don't count AWS's free tier, which is shared by everything in the account (see [Free tier](#free-tier)), or taxes.
 
@@ -125,7 +125,7 @@ What a deployment costs with no sign-ins at all:
 
 | Service | What | Calculation | Cost |
 | -- | -- | -- | --: |
-| WAF | One web ACL with 6 rules (two rate limits, three AWS managed rule groups, one loopback redirect rule). The AWS managed groups used have no charge of their own. | $5 + 6 × $1 | $11.00 |
+| WAF | One web ACL with 5 rules (two rate limits, two AWS managed rule groups, one loopback redirect rule). The AWS managed groups used have no charge of their own. | $5 + 5 × $1 | $10.00 |
 | KMS | Three customer managed keys: the token signing key (RSA), table encryption and the Admin API's cursor key (HMAC). Around each 90-day rotation a second signing key exists for about 3 days; keys pending deletion aren't charged. | 3 × $1 + (3 days ÷ 90 days) × $1 | $3.03 |
 | Route 53 | One hosted zone. The login hosts are alias records to CloudFront, whose queries are free. | $0.50 | $0.50 |
 | CloudWatch alarms | 15 alarms: 12 on one metric, 3 on a sum of two (the canary's alarm is counted with the canary) | (12 + 3 × 2) × $0.10 | $1.80 |
@@ -137,9 +137,9 @@ What a deployment costs with no sign-ins at all:
 | Canary logs | Its own log: assuming 10 KB a run | 8,640 × 10 KB ÷ 1,048,576 KB/GB × $0.50 | $0.04 |
 | Canary traffic | Each run is a sign-in (5 requests), a refresh and 4 more requests (discovery, JWKS, `/userinfo` and logout), each of those 4 counted as a refresh without the KMS cost: $0.00003784 + $0.00001514 + 4 × $0.00000914 = $0.00008954 a run | 8,640 × $0.00008954 | $0.77 |
 | Background jobs | The reconcile job every 5 minutes (8,640 Worker runs, 0.3 s at 256 MB) and the daily key rotation | 8,640 × (0.3 s × 0.25 GB × $0.0000133334 + $0.0000002) | $0.01 |
-| **Total** | | | **$22.80** |
+| **Total** | | | **$21.80** |
 
-The canary costs $0.12 + $0.10 + $0.03 + $0.04 + $0.77 = **$1.06** a month, three quarters of it the sign-ins it makes. It is optional: without it (`canary_start = false`, the default until its parameter is set), the fixed part is $22.80 − $1.06 = **$21.74**. It is a plain Lambda function rather than a CloudWatch Synthetics canary, which would cost about $14 a month: $0.0012 a run is $10.37, plus an x86 Lambda function, S3 artifacts and 3 metrics.
+The canary costs $0.12 + $0.10 + $0.03 + $0.04 + $0.77 = **$1.06** a month, three quarters of it the sign-ins it makes. It is optional: without it (`canary_start = false`, the default until its parameter is set), the fixed part is $21.80 − $1.06 = **$20.74**. It is a plain Lambda function rather than a CloudWatch Synthetics canary, which would cost about $14 a month: $0.0012 a run is $10.37, plus an x86 Lambda function, S3 artifacts and 3 metrics.
 
 Not counted, because they are a few cents or less: SQS (the work queues and dead-letter queues are empty unless work is outstanding), EventBridge Scheduler (about 8,700 invocations a month), DynamoDB Streams reads (only when configuration changes), the code-signing bucket, and log storage (Lambda logs are kept 30 days, so about one month's logs are stored at a time: at 1 million sign-ins, 15 million requests × 1,131 bytes is 15.8 GB, at most $0.47 a month stored, before compression).
 
@@ -157,10 +157,10 @@ With **R = 10 refreshes per sign-in** (an app whose users stay signed in for abo
 
 | N | Sign-ins | Refreshes | Email | Requests total | Fixed | **Total** | X-Ray, if on |
 | --: | --: | --: | --: | --: | --: | --: | --: |
-| 1,000 | $0.04 | $0.15 | $0.01 | $0.20 | $22.80 | **$23.00** | + $0.08 (15,000 traces) |
-| 10,000 | $0.38 | $1.51 | $0.05 | $1.94 | $22.80 | **$24.74** | + $0.75 (150,000 traces) |
-| 100,000 | $3.78 | $15.14 | $0.50 | $19.42 | $22.80 | **$42.22** | + $7.50 (1,500,000 traces) |
-| 1,000,000 | $37.84 | $151.37 | $5.00 | $194.21 | $22.80 | **$217.01** | + $16.06 (3,212,400 traces) |
+| 1,000 | $0.04 | $0.15 | $0.01 | $0.20 | $21.80 | **$22.00** | + $0.08 (15,000 traces) |
+| 10,000 | $0.38 | $1.51 | $0.05 | $1.94 | $21.80 | **$23.74** | + $0.75 (150,000 traces) |
+| 100,000 | $3.78 | $15.14 | $0.50 | $19.42 | $21.80 | **$41.22** | + $7.50 (1,500,000 traces) |
+| 1,000,000 | $37.84 | $151.37 | $5.00 | $194.21 | $21.80 | **$216.01** | + $16.06 (3,212,400 traces) |
 
 X-Ray traces are requests = N × (5 + 10), plus the canary's 86,400 ($0.43). At 1 million sign-ins, 15 million requests is 5.8 a second on average, so it traces 2,592,000 + 5% × (15,000,000 − 2,592,000) = 3,212,400.
 
@@ -172,7 +172,7 @@ For a different refresh rate, add or remove N × $0.00001514 for each refresh pe
 - **DynamoDB writes** are the largest per-request cost: 19 write units per sign-in, 16 of them the code exchange's transaction, which saves the refresh token, the session's tokens and the code's use in one step.
 - **KMS `Sign`**: $0.000003 per token. Every sign-in and refresh signs two.
 - **X-Ray**: turning on the Auth Lambda's tracing (`tracing = true`) adds up to $0.000005 a request.
-- **The WAF** is half the fixed cost. It is shared by every login host in the deployment, so it doesn't grow with organizations or hosts.
+- **The WAF** is almost half the fixed cost. It is shared by every login host in the deployment, so it doesn't grow with organizations or hosts.
 - **Data transfer** is small: 20 KB a sign-in is 20 GB at 1 million sign-ins, $1.62.
 
 ## Free tier
