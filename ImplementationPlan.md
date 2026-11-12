@@ -233,7 +233,7 @@ Built: the account pages (`internal/web/account.go`); the Worker (`cmd/worker`, 
 
 Built: `internal/domains` (tenants with CloudFront-managed, HTTP-validated certificates, and the DNS check); the custom domain and pool deletion jobs and the reconciler in `internal/worker`; the multi-tenant distribution and its connection group in `infra/modules/edge/tenants.tf`; and the reconcile schedule, stream filters and CloudFront permissions in `infra/modules/jobs`. The admin API shows a custom host's `cname_target`, and while it's pending, `work_last_error` says what it's waiting for. Pool deletion records an attempt each run, so the reconciler restarts a run that died.
 
-Found on `dev`: CloudFront finds a tenant by domain only once the domain is active, so the Worker looks tenants up by name (each is named after its host); an issued managed certificate must be attached to the tenant before the domain becomes active; and deleting a tenant leaves its managed certificate in ACM, so the Worker deletes it.
+Found on `dev`: CloudFront finds a tenant by domain only once the domain is active, so the Worker looks tenants up by name (each is named after its host); an issued managed certificate must be attached to the tenant before the domain becomes active; and deleting a tenant leaves its managed certificate in ACM, so the Worker deletes it. A `CreateDistributionTenant` call that fails (for example with `CNAMEAlreadyExists`) still has CloudFront request a certificate for the domain; before the lookup fix, retries left one every 5 minutes. Removing the host deletes them all, since the Worker deletes every CloudFront-managed certificate for its domain that isn't in use, but a host that is never removed keeps any it accumulated.
 
 ### Phase 8: Production readiness
 
