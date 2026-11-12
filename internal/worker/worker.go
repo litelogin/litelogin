@@ -29,8 +29,11 @@ import (
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambdacontext"
 
 	"github.com/litelogin/litelogin/internal/domains"
+	"github.com/litelogin/litelogin/internal/logctx"
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -105,6 +108,9 @@ type Worker struct {
 	// ReconcileAfter is how long work goes without an attempt before the
 	// reconciler retries it. Zero means DefaultReconcileAfter.
 	ReconcileAfter time.Duration
+	// Metrics records the age of the oldest outstanding work and custom
+	// domain onboarding durations; nil records none.
+	Metrics metrics.Recorder
 
 	// BatchSize is how many items one cleanup batch deletes, and
 	// MaxBatches how many batches a job runs before it's handed on to the
@@ -124,6 +130,9 @@ func (w *Worker) log() *slog.Logger {
 // and reports the records it couldn't process, so only those are retried
 // (ReportBatchItemFailures).
 func (w *Worker) Handle(ctx context.Context, raw json.RawMessage) (any, error) {
+	if lc, ok := lambdacontext.FromContext(ctx); ok {
+		ctx = logctx.New(ctx, slog.String(logctx.RequestID, lc.AwsRequestID))
+	}
 	var probe struct {
 		Records []struct {
 			EventSource string `json:"eventSource"`

@@ -414,6 +414,7 @@ If a deployment needs instant client or org disablement, shorten the cache time 
   - spikes in refresh token reuse
 - **Synthetic monitoring:** a CloudWatch Synthetics canary runs the full flow every 5 minutes against a dedicated test client: discovery, JWKS, `/authorize`, login, code exchange, `/userinfo`, refresh and logout. It catches failures that per-component metrics miss.
 - **Tracing:** AWS X-Ray on the Auth Lambda.
+- **Where:** each environment has a dashboard named after it, and every alarm notifies one SNS topic (`litelogin-<env>-alarms`); set `alarm_email` to subscribe an address. The work age alarm also fires if the reconciler stops reporting.
 
 ## Quotas to check before launch
 

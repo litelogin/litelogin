@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/litelogin/litelogin/internal/crypto"
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -231,6 +232,15 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 	// A reused code fails, and revokes the refresh tokens it issued.
 	expectTokenError(t, e.exchange(code2, verifier2), 400, "invalid_grant")
 	expectTokenError(t, e.refresh(r3.body["refresh_token"].(string)), 400, "invalid_grant")
+
+	// Reuse is counted, as a security event, not an error.
+	m := e.metrics
+	if m.Sum(metrics.CodeReuse) != 1 || m.Sum(metrics.RefreshReuse) != 1 || m.Sum(metrics.LoginSucceeded) < 1 ||
+		m.Sum(metrics.TokensIssued, metrics.Dim{Name: "GrantType", Value: "authorization_code"}) != 2 ||
+		m.Sum(metrics.TokensIssued, metrics.Dim{Name: "GrantType", Value: "refresh_token"}) != 1 ||
+		m.Sum(metrics.TokenFailed, metrics.Reason("invalid_grant")) < 4 || !m.Has(metrics.TokenLatency) {
+		t.Errorf("metrics = %+v", m.Records)
+	}
 }
 
 func TestAuthorizeErrors(t *testing.T) {

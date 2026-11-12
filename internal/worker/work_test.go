@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-lambda-go/events"
 
 	"github.com/litelogin/litelogin/internal/domains"
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -235,6 +236,20 @@ func TestHostRemoval(t *testing.T) {
 	}
 }
 
+// With no outstanding work, the oldest age is reported as zero.
+func TestReconcileNothing(t *testing.T) {
+	w, st, _ := newWorker()
+	st.init()
+	m := &metrics.Memory{}
+	w.Metrics = m
+	if err := w.Run(context.Background(), &Job{Type: JobReconcile}); err != nil {
+		t.Fatal(err)
+	}
+	if !m.Has(metrics.OldestWorkAge) || m.Sum(metrics.OldestWorkAge) != 0 {
+		t.Errorf("metrics = %+v", m.Records)
+	}
+}
+
 func TestNoDomainsConfigured(t *testing.T) {
 	w, st, _ := newWorker()
 	st.init()
@@ -291,9 +306,16 @@ func TestReconcile(t *testing.T) {
 	d.status["dns.acme.com"] = &domains.Status{Certificate: "pending-validation"}
 	d.removeCalls = 1
 
+	m := &metrics.Memory{}
+	w.Metrics = m
+
 	// Scheduled events arrive without Records.
 	if _, err := w.Handle(ctx, []byte(`{"type":"reconcile"}`)); err != nil {
 		t.Fatal(err)
+	}
+	// The fake's work started at the epoch; ready.acme.com was verified.
+	if m.Sum(metrics.OldestWorkAge) < float64(time.Now().Unix()-60) || !m.Has(metrics.CustomDomainOnboard) {
+		t.Errorf("metrics = %+v", m.Records)
 	}
 	if st.hosts["ready.acme.com"] != store.HostVerified || st.hosts["dns.acme.com"] != store.HostPending {
 		t.Errorf("hosts %v", st.hosts)

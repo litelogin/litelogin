@@ -6,12 +6,16 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambdacontext"
+
+	"github.com/litelogin/litelogin/internal/logctx"
 )
 
 // FunctionURLHandlerFunc is the signature aws-lambda-go expects for a
@@ -32,6 +36,12 @@ func FunctionURLRequestContext(ctx context.Context) (events.LambdaFunctionURLReq
 // as a local HTTP server and inside Lambda.
 func FunctionURLHandler(h http.Handler) FunctionURLHandlerFunc {
 	return func(ctx context.Context, event events.LambdaFunctionURLRequest) (events.LambdaFunctionURLResponse, error) {
+		// Every log line for the request carries the Lambda request ID.
+		if lc, ok := lambdacontext.FromContext(ctx); ok {
+			ctx = logctx.New(ctx, slog.String(logctx.RequestID, lc.AwsRequestID))
+		} else {
+			ctx = logctx.New(ctx)
+		}
 		req, err := NewRequest(ctx, event)
 		if err != nil {
 			return events.LambdaFunctionURLResponse{

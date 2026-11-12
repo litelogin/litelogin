@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -30,14 +32,14 @@ func (w *Worker) customDomain(ctx context.Context, host string) error {
 	}
 	switch h.Status {
 	case store.HostPending:
-		return w.onboard(ctx, h.Host)
+		return w.onboard(ctx, h.Host, time.Unix(h.CreatedAt, 0))
 	case store.HostRemoving:
 		return w.removeHost(ctx, h.Host)
 	}
 	return nil // verified: nothing to do
 }
 
-func (w *Worker) onboard(ctx context.Context, host string) error {
+func (w *Worker) onboard(ctx context.Context, host string, created time.Time) error {
 	if w.Domains == nil {
 		return w.attempt(ctx, store.WorkCustomDomain, host, "custom hosts aren't configured in this deployment")
 	}
@@ -56,7 +58,8 @@ func (w *Worker) onboard(ctx context.Context, host string) error {
 	if err != nil {
 		return err
 	}
-	w.log().InfoContext(ctx, "custom domain verified", "host", host, "tenant_id", st.TenantID)
+	metrics.Seconds(w.Metrics, metrics.CustomDomainOnboard, time.Since(created))
+	w.log().InfoContext(ctx, "custom domain verified", "host", host, "tenant_id", st.TenantID, "after", time.Since(created).Round(time.Second))
 	return nil
 }
 
@@ -140,17 +143,29 @@ func (w *Worker) attempt(ctx context.Context, workType, id, lastError string) er
 	return err
 }
 
-// reconcile retries outstanding work that hasn't been attempted lately.
-// One item failing doesn't stop the others; the first error is returned.
+// reconcile retries outstanding work that hasn't been attempted lately,
+// and records the age of the oldest outstanding work (zero when there's
+// none, so the metric is always reported). One item failing doesn't stop
+// the others; the first error is returned.
 func (w *Worker) reconcile(ctx context.Context) error {
 	after := w.ReconcileAfter
 	if after <= 0 {
 		after = DefaultReconcileAfter
 	}
-	work, err := w.Store.ListStaleWork(ctx, after)
+	all, err := w.Store.ListStaleWork(ctx, 0)
 	if err != nil {
 		return err
 	}
+	now := time.Now()
+	var oldest time.Duration
+	var work []store.WorkItem
+	for _, it := range all {
+		oldest = max(oldest, now.Sub(time.Unix(it.StartedAt, 0)))
+		if now.Sub(time.Unix(it.UpdatedAt, 0)) >= after {
+			work = append(work, it)
+		}
+	}
+	metrics.Seconds(w.Metrics, metrics.OldestWorkAge, oldest)
 	var first error
 	for _, it := range work {
 		if !timeLeft(ctx) {
@@ -172,6 +187,6 @@ func (w *Worker) reconcile(ctx context.Context) error {
 			}
 		}
 	}
-	w.log().InfoContext(ctx, "reconciled", "stale", len(work))
+	w.log().InfoContext(ctx, "reconciled", "outstanding", len(all), "stale", len(work), "oldest", oldest.Round(time.Second))
 	return first
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/jwt"
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -432,6 +433,7 @@ var errInvalidGrant = &tokenError{http.StatusBadRequest, "invalid_grant", "the g
 
 // token implements the token endpoint.
 func (s *Server) token(w http.ResponseWriter, r *http.Request) {
+	defer metrics.Since(s.Metrics, metrics.TokenLatency, time.Now())
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
@@ -465,7 +467,8 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var resp *tokenResponse
-	switch gt := r.PostForm.Get("grant_type"); {
+	gt := r.PostForm.Get("grant_type")
+	switch {
 	case gt == grantCode && slices.Contains(t.Client.GrantTypes, grantCode):
 		resp, err = s.exchangeCode(r, t)
 	case gt == grantRefresh && slices.Contains(t.Client.GrantTypes, grantRefresh):
@@ -481,6 +484,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		fail(err, basic)
 		return
 	}
+	metrics.Count(s.Metrics, metrics.TokensIssued, 1, metrics.Dim{Name: "GrantType", Value: gt})
 	s.requestCORS(w, r, t)
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -566,6 +570,7 @@ func (s *Server) exchangeCode(r *http.Request, t *tenant) (*tokenResponse, error
 			}
 		}
 		s.log().WarnContext(ctx, "authorization code reused", "client_id", t.Client.ID)
+		metrics.Count(s.Metrics, metrics.CodeReuse, 1)
 		return nil, errInvalidGrant
 	}
 	if code.ClientID != t.Client.ID || code.RedirectURI != f.Get("redirect_uri") || code.Iss != s.issuer(t) ||
@@ -593,6 +598,10 @@ func (s *Server) exchangeCode(r *http.Request, t *tenant) (*tokenResponse, error
 		}
 	}
 	if _, err := s.Store.RedeemCode(ctx, code, grant); err != nil {
+		if errors.Is(err, store.ErrReused) {
+			// Another request redeemed it at the same moment.
+			metrics.Count(s.Metrics, metrics.CodeReuse, 1)
+		}
 		if errors.Is(err, store.ErrReused) || errors.Is(err, store.ErrConditionFailed) {
 			return nil, errInvalidGrant
 		}
@@ -656,6 +665,7 @@ func (s *Server) refresh(r *http.Request, t *tenant) (*tokenResponse, error) {
 			return nil, err
 		}
 		s.log().WarnContext(ctx, "refresh token reused; family revoked", "client_id", t.Client.ID)
+		metrics.Count(s.Metrics, metrics.RefreshReuse, 1)
 		return nil, errInvalidGrant
 	}
 	family, err := s.Store.GetRefreshFamily(ctx, old.FamilyID)
@@ -691,9 +701,16 @@ func (s *Server) refresh(r *http.Request, t *tenant) (*tokenResponse, error) {
 	}
 	next := crypto.NewToken()
 	if _, err := s.Store.RotateRefreshToken(ctx, old, family, crypto.HashToken(next), seconds(t.Client.RefreshTokenTTL)); err != nil {
-		if errors.Is(err, store.ErrReused) || errors.Is(err, store.ErrConditionFailed) {
+		switch {
+		case errors.Is(err, store.ErrReused):
+			// Another request rotated it at the same moment.
+			metrics.Count(s.Metrics, metrics.RefreshReuse, 1)
+			return nil, errInvalidGrant
+		case errors.Is(err, store.ErrConditionFailed):
+			metrics.Count(s.Metrics, metrics.RefreshRotationFailed, 1, metrics.Reason("condition"))
 			return nil, errInvalidGrant
 		}
+		metrics.Count(s.Metrics, metrics.RefreshRotationFailed, 1, metrics.Reason("error"))
 		return nil, err
 	}
 	return s.issue(r, t, u, family.Iss, scope, family.AuthTime, "", next)
@@ -732,6 +749,7 @@ func (s *Server) tokenFail(w http.ResponseWriter, r *http.Request, err error, ba
 		s.log().ErrorContext(r.Context(), "token request failed", "error", err)
 		te = &tokenError{http.StatusInternalServerError, "server_error", "the request couldn't be completed"}
 	}
+	metrics.Count(s.Metrics, metrics.TokenFailed, 1, metrics.Reason(te.code))
 	if te.status == http.StatusUnauthorized && basic {
 		w.Header().Set("WWW-Authenticate", `Basic realm="token"`)
 	}

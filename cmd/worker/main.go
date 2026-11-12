@@ -26,6 +26,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 
 	"github.com/litelogin/litelogin/internal/domains"
+	"github.com/litelogin/litelogin/internal/logctx"
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/platform"
 	"github.com/litelogin/litelogin/internal/store"
 	"github.com/litelogin/litelogin/internal/worker"
@@ -39,7 +41,7 @@ const (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(logctx.NewHandler(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := run(logger); err != nil {
 		logger.Error("worker exited", "error", err)
 		os.Exit(1)
@@ -63,10 +65,12 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	rec := metrics.NewEMF(os.Stdout, "worker")
 	w := &worker.Worker{
-		Store: store.New(platform.NewDynamoDB(cfg), tables.Config, tables.Session),
-		Queue: &sqsQueue{client: sqs.NewFromConfig(cfg), url: queueURL},
-		Log:   logger,
+		Store:   store.New(platform.NewDynamoDB(cfg), tables.Config, tables.Session, store.WithMetrics(rec)),
+		Queue:   &sqsQueue{client: sqs.NewFromConfig(cfg), url: queueURL},
+		Log:     logger,
+		Metrics: rec,
 	}
 	if dist := os.Getenv(envDistributionID); dist != "" {
 		group, endpoint := os.Getenv(envConnectionGroup), os.Getenv(envRoutingEndpoint)

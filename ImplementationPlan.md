@@ -55,7 +55,8 @@ infra/
     edge/        CloudFront distribution, CloudFront Function, WAF, origin secret
     jobs/        Stream mapping, SQS queues and DLQs, EventBridge schedules
     email/       SES identity and configuration set
-    monitoring/  Alarms, dashboard, Synthetics canary
+    monitoring/  Alarm topic, alarms, dashboard
+    canary/      Synthetics canary and its alarm
   envs/
     dev/  qa/  prod/
 test/
@@ -252,6 +253,8 @@ Found on `dev`: CloudFront finds a tenant by domain only once the domain is acti
   - promotion from qa to prod in the pipeline
   - Lambda aliases with gradual traffic shifting and alarm-based rollback
 - Documentation for self-hosting: prerequisites, `tofu apply`, `litelogin init`, adding a custom domain, upgrading.
+
+Built so far (observability): `internal/metrics` (embedded metric format records in the `LiteLogin` namespace, with a `Service` dimension), recorded by the login and token handlers, the store (conditional check failures by access pattern), KMS signing, email sending and the Worker; `internal/logctx`, which puts the Lambda request ID, the login host, org ID and client ID on every log line of a request; X-Ray active tracing on the Auth Lambda; `infra/modules/monitoring` (an SNS alarm topic, the alarms and a dashboard); and `infra/modules/canary`, which drives the sign-in forms over plain HTTPS. The canary's configuration, including the test user's password, is a Secrets Manager secret that Terraform creates but never writes, so it stays out of state; it runs once `canary_start` is set.
 
 **Done when:** load tests meet the latency targets with no throttling, the canary has been green in qa for a week, and the self-hosting guide has been followed from scratch by someone who didn't write it.
 

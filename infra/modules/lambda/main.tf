@@ -54,6 +54,12 @@ variable "log_retention_days" {
   default = 30
 }
 
+variable "tracing" {
+  description = "Trace invocations with AWS X-Ray (active tracing)."
+  type        = bool
+  default     = false
+}
+
 variable "function_url_auth_type" {
   description = "NONE or AWS_IAM to create a function URL, or null for no function URL."
   type        = string
@@ -121,6 +127,13 @@ resource "aws_lambda_function" "this" {
     variables = var.environment
   }
 
+  dynamic "tracing_config" {
+    for_each = var.tracing ? [1] : []
+    content {
+      mode = "Active"
+    }
+  }
+
   # The functions write JSON logs with log/slog.
   logging_config {
     log_format = "JSON"
@@ -146,6 +159,12 @@ resource "aws_lambda_permission" "public_url" {
   function_name          = aws_lambda_function.this.function_name
   principal              = "*"
   function_url_auth_type = "NONE"
+}
+
+resource "aws_iam_role_policy_attachment" "xray" {
+  count      = var.tracing ? 1 : 0
+  role       = aws_iam_role.this.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
 }
 
 output "function_name" {

@@ -328,8 +328,9 @@ func TestWorkAttempts(t *testing.T) {
 		t.Fatalf("work listed as stale right after an attempt: %+v, %v", w, err)
 	}
 	w := listWork(t, e)
-	if len(w) != 1 || w[0].Attempts != 1 || w[0].LastError != "DNS not pointing here yet" || w[0].UpdatedAt != e.unix() {
-		t.Fatalf("work = %+v", w)
+	if len(w) != 1 || w[0].Attempts != 1 || w[0].LastError != "DNS not pointing here yet" || w[0].UpdatedAt != e.unix() ||
+		w[0].StartedAt != e.unix()-int64((11*time.Minute).Seconds()) {
+		t.Fatalf("work = %+v", w) // attempts don't move the start
 	}
 	must(t, e.RecordWorkAttempt(e.ctx, WorkCustomDomain, "login.customer.com", ""))
 	w = listWork(t, e)

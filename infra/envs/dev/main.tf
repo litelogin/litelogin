@@ -30,6 +30,18 @@ variable "region" {
   type        = string
 }
 
+variable "alarm_email" {
+  description = "Address that gets alarm notifications (it must confirm the SNS subscription). Empty: none; subscribe to the alarm topic another way."
+  type        = string
+  default     = ""
+}
+
+variable "canary_start" {
+  description = "Run the synthetic monitor. Set once its secret holds the configuration (infra/modules/canary)."
+  type        = bool
+  default     = false
+}
+
 variable "default_host_domain" {
   description = "Parent domain of default login hosts ({label}.{domain}). Its DNS is a Route 53 zone in this account, delegated from the parent domain."
   type        = string
@@ -134,6 +146,7 @@ module "auth" {
   policy_json            = data.aws_iam_policy_document.auth.json
   memory_size            = 1024
   function_url_auth_type = "NONE"
+  tracing                = true
 
   environment = {
     LITELOGIN_CONFIG_TABLE         = module.tables.config_table_name
@@ -194,6 +207,28 @@ module "jobs" {
     connection_group_arn = module.edge.connection_group_arn
     routing_endpoint     = module.edge.routing_endpoint
   }
+
+  alarm_actions = [module.monitoring.alarm_topic_arn]
+}
+
+module "monitoring" {
+  source      = "../../modules/monitoring"
+  name_prefix = local.name_prefix
+  alarm_email = var.alarm_email
+  function_names = {
+    auth   = module.auth.function_name
+    admin  = module.admin.function_name
+    worker = module.jobs.worker_function_name
+    rotate = module.signing.rotate_function_name
+  }
+  table_names = [module.tables.config_table_name, module.tables.session_table_name]
+}
+
+module "canary" {
+  source        = "../../modules/canary"
+  name_prefix   = local.name_prefix
+  start         = var.canary_start
+  alarm_actions = [module.monitoring.alarm_topic_arn]
 }
 
 output "dns_name_servers" {
@@ -239,4 +274,14 @@ output "worker_function_name" {
 output "custom_host_cname_target" {
   description = "Where custom login hosts' CNAME records point."
   value       = module.edge.routing_endpoint
+}
+
+output "dashboard" {
+  description = "The environment's CloudWatch dashboard."
+  value       = "https://${var.region}.console.aws.amazon.com/cloudwatch/home?region=${var.region}#dashboards/dashboard/${module.monitoring.dashboard_name}"
+}
+
+output "canary_secret_arn" {
+  description = "Secret holding the synthetic monitor's configuration (infra/modules/canary)."
+  value       = module.canary.secret_arn
 }

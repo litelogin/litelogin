@@ -11,6 +11,7 @@ import (
 
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/email"
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -72,18 +73,19 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 	addr, password := strings.TrimSpace(r.PostFormValue("email")), r.PostFormValue("password")
 	authz := r.PostFormValue("authz")
 	s.useAuthzClient(r, t, authz)
-	bad := func() {
+	bad := func(reason string) {
+		metrics.Count(s.Metrics, metrics.LoginFailed, 1, metrics.Reason(reason))
 		s.render(w, r, t, http.StatusUnauthorized, "login", pageData{Title: "Sign in", Email: addr, Error: msgBadLogin, Authz: authz})
 	}
 	if len(password) > crypto.MaxPasswordLength {
-		bad()
+		bad("bad_credentials")
 		return
 	}
 
 	u, err := s.Store.GetUserByEmail(ctx, t.Pool.ID, addr)
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidEmail) {
 		s.Hasher.VerifyDummy(password)
-		bad()
+		bad("bad_credentials")
 		return
 	}
 	if err != nil {
@@ -91,26 +93,29 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 		return
 	}
 	now := s.now()
-	if u.LockedUntil > now.Unix() || u.PasswordHash == "" {
-		// Locked, or invited without a password yet.
+	if u.LockedUntil > now.Unix() {
 		s.Hasher.VerifyDummy(password)
-		bad()
+		bad("locked")
 		return
 	}
-	ok, rehash, err := s.Hasher.Verify(password, u.PasswordHash)
+	if u.PasswordHash == "" {
+		// Invited without a password yet.
+		s.Hasher.VerifyDummy(password)
+		bad("bad_credentials")
+		return
+	}
+	ok, rehash, err := s.verifyPassword(password, u.PasswordHash)
 	if err != nil {
 		s.fail(w, r, t, err)
 		return
 	}
 	if !ok {
-		if _, err := s.Store.RecordFailedLogin(ctx, u.ID, MaxFailedLogins, LockoutDuration); err != nil && !errors.Is(err, store.ErrNotFound) {
-			s.log().ErrorContext(ctx, "record failed login", "error", err)
-		}
-		bad()
+		s.recordFailedLogin(ctx, u.ID)
+		bad("bad_credentials")
 		return
 	}
 	if u.Status != store.UserActive {
-		bad()
+		bad("inactive")
 		return
 	}
 	if u.FailedLoginCount != 0 {
@@ -143,7 +148,27 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 		s.fail(w, r, t, err)
 		return
 	}
+	metrics.Count(s.Metrics, metrics.LoginSucceeded, 1)
 	http.Redirect(w, r, continueAuthz(authz), http.StatusSeeOther) //nolint:gosec // always a path on this host: /authorize or /account
+}
+
+// verifyPassword checks a password against its hash, recording how long it
+// took (for tuning argon2id).
+func (s *Server) verifyPassword(password, hash string) (ok, rehash bool, err error) {
+	start := time.Now()
+	defer metrics.Since(s.Metrics, metrics.PasswordVerifyLatency, start)
+	return s.Hasher.Verify(password, hash)
+}
+
+// recordFailedLogin counts a wrong password towards the user's lockout.
+func (s *Server) recordFailedLogin(ctx context.Context, userID string) {
+	locked, err := s.Store.RecordFailedLogin(ctx, userID, MaxFailedLogins, LockoutDuration)
+	switch {
+	case err != nil && !errors.Is(err, store.ErrNotFound):
+		s.log().ErrorContext(ctx, "record failed login", "error", err)
+	case locked:
+		metrics.Count(s.Metrics, metrics.Lockout, 1)
+	}
 }
 
 // startSession creates a session and sets its cookie. The browser's

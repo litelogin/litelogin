@@ -25,6 +25,7 @@ import (
 	"github.com/litelogin/litelogin/internal/jwt"
 	"github.com/litelogin/litelogin/internal/keyrotation"
 	"github.com/litelogin/litelogin/internal/kmsfake"
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/platform"
 	"github.com/litelogin/litelogin/internal/store"
 	"github.com/litelogin/litelogin/internal/web"
@@ -39,6 +40,8 @@ type env struct {
 	srv    *httptest.Server
 	client *store.Client
 	pool   *store.Pool
+	// metrics holds what the server recorded.
+	metrics *metrics.Memory
 }
 
 func newEnv(t *testing.T, requireVerified bool) *env {
@@ -85,8 +88,10 @@ func newEnv(t *testing.T, requireVerified bool) *env {
 	keys := jwt.NewKeySet(st, nil)
 
 	mail := &email.Recorder{}
+	e.metrics = &metrics.Memory{}
 	ws := &web.Server{
-		Store: st,
+		Metrics: e.metrics,
+		Store:   st,
 		// Effectively uncached, so tests see their own config changes.
 		Config:   configcache.New(st, time.Nanosecond),
 		Hasher:   crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
@@ -340,6 +345,13 @@ func TestLockout(t *testing.T) {
 	}
 	// Locked: even the right password fails, with the same message.
 	expect(t, b.post("/login", "/login", creds("carol@example.com", "the password")), 401, "Incorrect email or password")
+
+	m := e.metrics
+	if m.Sum(metrics.LoginFailed, metrics.Reason("bad_credentials")) != web.MaxFailedLogins ||
+		m.Sum(metrics.LoginFailed, metrics.Reason("locked")) != 1 || m.Sum(metrics.Lockout) != 1 ||
+		m.Has(metrics.LoginSucceeded) || !m.Has(metrics.PasswordVerifyLatency) {
+		t.Errorf("metrics = %+v", m.Records)
+	}
 }
 
 func TestUnverifiedLoginAllowedWhenPoolDoesNotRequireIt(t *testing.T) {

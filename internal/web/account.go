@@ -155,7 +155,7 @@ func (s *Server) checkCurrentPassword(r *http.Request, u *store.User, password s
 		s.Hasher.VerifyDummy(password)
 		return false, nil
 	}
-	ok, _, err := s.Hasher.Verify(password, u.PasswordHash)
+	ok, _, err := s.verifyPassword(password, u.PasswordHash)
 	if err != nil {
 		return false, err
 	}
@@ -167,9 +167,7 @@ func (s *Server) checkCurrentPassword(r *http.Request, u *store.User, password s
 		}
 		return true, nil
 	}
-	if _, err := s.Store.RecordFailedLogin(r.Context(), u.ID, MaxFailedLogins, LockoutDuration); err != nil && !errors.Is(err, store.ErrNotFound) {
-		s.log().ErrorContext(r.Context(), "record failed password check", "error", err)
-	}
+	s.recordFailedLogin(r.Context(), u.ID)
 	return false, nil
 }
 

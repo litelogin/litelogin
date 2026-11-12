@@ -251,8 +251,8 @@ func (s *Store) VerifyHost(ctx context.Context, host string) error {
 	}
 	err = s.transact(ctx, []types.TransactWriteItem{
 		update(s.config, key(pfxLoginHost+h, skDetails),
-			"SET #status = :verified REMOVE GSI2PK, GSI2SK, #work_attempts, #work_updated_at, #work_last_error",
-			"#status = :pending", names("status", "work_attempts", "work_updated_at", "work_last_error"),
+			"SET #status = :verified REMOVE GSI2PK, GSI2SK, #work_attempts, #work_updated_at, #work_started_at, #work_last_error",
+			"#status = :pending", names("status", "work_attempts", "work_updated_at", "work_started_at", "work_last_error"),
 			map[string]types.AttributeValue{":verified": avS(HostVerified), ":pending": avS(HostPending)}),
 	})
 	if asTxFailure(err) != nil {
@@ -284,8 +284,8 @@ func (s *Store) RemoveHost(ctx context.Context, host string) error {
 	}
 	err = s.transact(ctx, []types.TransactWriteItem{
 		update(s.config, key(pfxLoginHost+h.Host, skDetails),
-			"SET #status = :removing, GSI2PK = :work, GSI2SK = :sk, #work_attempts = :zero, #work_updated_at = :now REMOVE #work_last_error",
-			"#status <> :removing", names("status", "work_attempts", "work_updated_at", "work_last_error"),
+			"SET #status = :removing, GSI2PK = :work, GSI2SK = :sk, #work_attempts = :zero, #work_updated_at = :now, #work_started_at = :now REMOVE #work_last_error",
+			"#status <> :removing", names("status", "work_attempts", "work_updated_at", "work_started_at", "work_last_error"),
 			map[string]types.AttributeValue{
 				":removing": avS(HostRemoving), ":work": avS(gsi2Work), ":sk": avS(WorkCustomDomain + "#" + h.Host),
 				":zero": avN(0), ":now": avN(s.unix()),

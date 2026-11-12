@@ -24,11 +24,14 @@ type workAttrs struct {
 	GSI2SK        string `dynamodbav:"GSI2SK,omitempty"`
 	WorkAttempts  int64  `dynamodbav:"work_attempts,omitempty"`
 	WorkUpdatedAt int64  `dynamodbav:"work_updated_at,omitempty"`
+	// WorkStartedAt is when the work started; attempts don't change it.
+	// It isn't projected into GSI2 (ListStaleWork reads it from the item).
+	WorkStartedAt int64  `dynamodbav:"work_started_at,omitempty"`
 	WorkLastError string `dynamodbav:"work_last_error,omitempty"`
 }
 
 func newWork(workType, id string, now int64) workAttrs {
-	return workAttrs{GSI2PK: gsi2Work, GSI2SK: workType + "#" + id, WorkUpdatedAt: now}
+	return workAttrs{GSI2PK: gsi2Work, GSI2SK: workType + "#" + id, WorkUpdatedAt: now, WorkStartedAt: now}
 }
 
 // WorkItem is outstanding background work, as listed by GSI2.
@@ -38,6 +41,9 @@ type WorkItem struct {
 	Status    string // the item's status: pending or removing (hosts), deleting (pools)
 	Attempts  int64
 	UpdatedAt int64
+	// StartedAt is when the work started (UpdatedAt for work recorded
+	// before it was kept).
+	StartedAt int64
 	LastError string
 }
 
@@ -83,11 +89,47 @@ func (s *Store) ListStaleWork(ctx context.Context, olderThan time.Duration) ([]W
 		}
 		work = append(work, WorkItem{
 			Type: workType, ID: id, Status: it.Status,
-			Attempts: it.WorkAttempts, UpdatedAt: it.WorkUpdatedAt, LastError: it.WorkLastError,
+			Attempts: it.WorkAttempts, UpdatedAt: it.WorkUpdatedAt, StartedAt: it.WorkUpdatedAt, LastError: it.WorkLastError,
 		})
 		return nil
 	})
-	return work, err
+	if err != nil || len(work) == 0 {
+		return work, err
+	}
+	return work, s.addWorkStart(ctx, work)
+}
+
+// addWorkStart reads each work item's start time from its item, which
+// GSI2 doesn't project.
+func (s *Store) addWorkStart(ctx context.Context, work []WorkItem) error {
+	ids := make([]string, len(work))
+	for i, w := range work {
+		ids[i] = w.Type + "#" + w.ID
+	}
+	items, err := s.batchGet(ctx, s.config, ids, func(sk string) map[string]types.AttributeValue {
+		workType, id, _ := strings.Cut(sk, "#")
+		k, _ := workKey(workType, id)
+		return k
+	})
+	if err != nil {
+		return err
+	}
+	started := make(map[string]int64, len(items))
+	for _, raw := range items {
+		var it workAttrs
+		if err := unmarshal(raw, &it); err != nil {
+			return err
+		}
+		if it.WorkStartedAt != 0 {
+			started[it.GSI2SK] = it.WorkStartedAt
+		}
+	}
+	for i := range work {
+		if t, ok := started[work[i].Type+"#"+work[i].ID]; ok {
+			work[i].StartedAt = t
+		}
+	}
+	return nil
 }
 
 // RecordWorkAttempt records an attempt at outstanding work: it increments

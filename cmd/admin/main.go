@@ -28,6 +28,8 @@ import (
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/httpx"
+	"github.com/litelogin/litelogin/internal/logctx"
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/platform"
 	"github.com/litelogin/litelogin/internal/store"
 )
@@ -45,7 +47,7 @@ const (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(logctx.NewHandler(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := run(logger); err != nil {
 		logger.Error("admin exited", "error", err)
 		os.Exit(1)
@@ -90,8 +92,12 @@ func run(logger *slog.Logger) error {
 		}
 	}
 
+	var rec metrics.Recorder
+	if inLambda {
+		rec = metrics.NewEMF(os.Stdout, "admin")
+	}
 	srv := &admin.Server{
-		Store:             store.New(platform.NewDynamoDB(cfg), tables.Config, tables.Session),
+		Store:             store.New(platform.NewDynamoDB(cfg), tables.Config, tables.Session, store.WithMetrics(rec)),
 		Hasher:            crypto.NewPasswordHasher(crypto.DefaultArgon2Params),
 		Cursor:            cursor,
 		DefaultHostDomain: domain,
@@ -102,7 +108,9 @@ func run(logger *slog.Logger) error {
 	if inLambda {
 		// Invites are sent only when email is configured.
 		if from := os.Getenv("LITELOGIN_EMAIL_FROM"); from != "" {
-			srv.Email = &email.SES{Client: sesv2.NewFromConfig(cfg), From: from, ConfigurationSet: os.Getenv("LITELOGIN_SES_CONFIGURATION")}
+			srv.Email = email.Metered(&email.SES{
+				Client: sesv2.NewFromConfig(cfg), From: from, ConfigurationSet: os.Getenv("LITELOGIN_SES_CONFIGURATION"),
+			}, rec)
 		}
 		lambda.Start(httpx.FunctionURLHandler(srv.Handler()))
 		return nil

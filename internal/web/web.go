@@ -23,6 +23,8 @@ import (
 	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/httpx"
 	"github.com/litelogin/litelogin/internal/jwt"
+	"github.com/litelogin/litelogin/internal/logctx"
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -90,7 +92,9 @@ type Server struct {
 	Signer   *jwt.Signer
 	Verifier *jwt.Verifier
 	Log      *slog.Logger
-	Now      func() time.Time
+	// Metrics records the service's metrics; nil records none.
+	Metrics metrics.Recorder
+	Now     func() time.Time
 	// Scheme of the links in emails: https, or http for the local
 	// development server.
 	Scheme string
@@ -222,6 +226,8 @@ func (s *Server) resolve(r *http.Request) (*tenant, error) {
 	if err != nil || pool.Status != store.PoolActive {
 		return nil, unavailable(err)
 	}
+	logctx.Set(ctx, logctx.Host, host)
+	logctx.Set(ctx, logctx.OrgID, org.ID)
 	return &tenant{Host: host, Login: h, Org: org, Pool: pool, Theme: ThemeFor(h, org)}, nil
 }
 
@@ -238,6 +244,7 @@ func (s *Server) hostClient(ctx context.Context, t *tenant, clientID string) (*s
 	if err != nil || c.Status != store.ClientActive || c.UserPoolID != t.Pool.ID {
 		return nil, unavailable(err)
 	}
+	logctx.Set(ctx, logctx.ClientID, c.ID)
 	return c, nil
 }
 

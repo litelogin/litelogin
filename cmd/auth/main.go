@@ -31,6 +31,8 @@ import (
 	"github.com/litelogin/litelogin/internal/jwt"
 	"github.com/litelogin/litelogin/internal/keyrotation"
 	"github.com/litelogin/litelogin/internal/kmsfake"
+	"github.com/litelogin/litelogin/internal/logctx"
+	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/platform"
 	"github.com/litelogin/litelogin/internal/store"
 	"github.com/litelogin/litelogin/internal/web"
@@ -50,7 +52,7 @@ const (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(logctx.NewHandler(slog.NewJSONHandler(os.Stdout, nil)))
 	if err := run(logger); err != nil {
 		logger.Error("auth exited", "error", err)
 		os.Exit(1)
@@ -69,7 +71,13 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	db := platform.NewDynamoDB(cfg)
-	st := store.New(db, tables.Config, tables.Session)
+	// Metrics go to stdout, where CloudWatch Logs turns them into metrics.
+	// Outside Lambda nothing collects them, so they're not recorded.
+	var rec metrics.Recorder
+	if platform.InLambda() {
+		rec = metrics.NewEMF(os.Stdout, "auth")
+	}
+	st := store.New(db, tables.Config, tables.Session, store.WithMetrics(rec))
 
 	keys := jwt.NewKeySet(st, nil)
 	pages := &web.Server{
@@ -79,6 +87,7 @@ func run(logger *slog.Logger) error {
 		Keys:     keys,
 		Verifier: jwt.NewVerifier(keys, nil),
 		Log:      logger,
+		Metrics:  rec,
 	}
 
 	mux := http.NewServeMux()
@@ -90,10 +99,10 @@ func run(logger *slog.Logger) error {
 		if from == "" {
 			return errors.New(EnvEmailFrom + " is not set")
 		}
-		pages.Signer = jwt.NewSigner(kms.NewFromConfig(cfg), keys)
-		pages.Email = &email.SES{
+		pages.Signer = jwt.NewSigner(jwt.MeteredKMS(kms.NewFromConfig(cfg), rec), keys)
+		pages.Email = email.Metered(&email.SES{
 			Client: sesv2.NewFromConfig(cfg), From: from, ConfigurationSet: os.Getenv(EnvSESConfiguration),
-		}
+		}, rec)
 		hashes := strings.Split(os.Getenv(EnvOriginSecretHashes), ",")
 		h := httpx.RequireOriginSecret(hashes, httpx.SecurityHeaders(mux))
 		lambda.Start(httpx.FunctionURLHandler(h))

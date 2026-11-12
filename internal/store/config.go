@@ -371,9 +371,9 @@ func (s *Store) MarkPoolDeleting(ctx context.Context, poolID string) error {
 		TableName: aws.String(s.config),
 		Key:       key(pfxPool+poolID, skDetails),
 		UpdateExpression: aws.String("SET #status = :deleting, #updated_at = :now, #version = #version + :one, " +
-			"GSI2PK = :work, GSI2SK = :sk, #work_attempts = :zero, #work_updated_at = :now"),
+			"GSI2PK = :work, GSI2SK = :sk, #work_attempts = :zero, #work_updated_at = :now, #work_started_at = :now"),
 		ConditionExpression:      aws.String("#status = :active"),
-		ExpressionAttributeNames: names("status", "updated_at", "version", "work_attempts", "work_updated_at"),
+		ExpressionAttributeNames: names("status", "updated_at", "version", "work_attempts", "work_updated_at", "work_started_at"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":deleting": avS(PoolDeleting), ":active": avS(PoolActive), ":now": avN(now),
 			":one": avN(1), ":zero": avN(0), ":work": avS(gsi2Work), ":sk": avS(WorkPoolDeletion + "#" + poolID),
