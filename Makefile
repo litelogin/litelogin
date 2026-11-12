@@ -14,6 +14,14 @@ LOCAL_ENV := \
 	LITELOGIN_CONFIG_TABLE=litelogin-local-config \
 	LITELOGIN_SESSION_TABLE=litelogin-local-session
 
+# Build, test and scan with the toolchain go.mod pins, whatever Go is
+# installed (it downloads it if needed), so local builds are byte-for-byte
+# the same as the pipeline's and get its security fixes.
+export GOTOOLCHAIN := $(shell sed -n 's/^toolchain //p' go.mod)
+
+# Tool versions.
+GOVULNCHECK_VERSION := v1.9.0
+
 GO_BUILD_ENV := GOOS=linux GOARCH=arm64 CGO_ENABLED=0
 GO_BUILD_FLAGS := -tags lambda.norpc -trimpath -ldflags="-s -w -buildid="
 
@@ -55,7 +63,7 @@ lint: vet ## Run golangci-lint
 
 .PHONY: vuln
 vuln: ## Check dependencies for known vulnerabilities
-	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...
 
 .PHONY: tf-fmt
 tf-fmt: ## Format Terraform files

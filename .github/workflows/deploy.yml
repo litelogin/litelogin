@@ -18,29 +18,70 @@ permissions:
   id-token: write
 
 jobs:
-  dev:
+  # Builds the Lambda packages once. Every environment deploys these exact
+  # files after checking their checksums, so what reaches prod is what qa
+  # ran; each environment's Terraform then signs them with its AWS Signer
+  # profile, and its Lambdas only accept code that profile signed
+  # (infra/modules/codesigning). The build is reproducible: `make package`
+  # from a clean clone of the commit gives the same bytes.
+  build:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    name: Build
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.name.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build Lambda packages
+        run: |
+          make package
+          (cd dist && sha256sum *.zip | tee SHA256SUMS)
+
+      - id: name
+        run: echo "artifact=lambda-packages-$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.name.outputs.artifact }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+
+  dev:
+    needs: build
     uses: ./.github/workflows/_apply.yml
     with:
       environment: dev
       ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      artifact: ${{ needs.build.outputs.artifact }}
 
   # Enable qa and prod after bootstrapping their accounts
   # (scripts/bootstrap-account.sh qa|prod --github) and adding
   # infra/envs/qa and infra/envs/prod:
   #
   # qa:
-  #   needs: dev
+  #   needs: [build, dev]
   #   uses: ./.github/workflows/_apply.yml
   #   with:
   #     environment: qa
   #     ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+  #     artifact: ${{ needs.build.outputs.artifact }}
   #
   # prod:
-  #   needs: qa
+  #   needs: [build, qa]
   #   uses: ./.github/workflows/_apply.yml
   #   with:
   #     environment: prod
   #     ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+  #     artifact: ${{ needs.build.outputs.artifact }}

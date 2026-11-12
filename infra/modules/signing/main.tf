@@ -30,6 +30,16 @@ variable "zip_path" {
   type        = string
 }
 
+variable "code_signing" {
+  description = "The codesigning module's code_signing output; null to deploy unsigned."
+  type = object({
+    bucket       = string
+    profile_name = string
+    config_arn   = string
+  })
+  default = null
+}
+
 variable "config_table_name" {
   type = string
 }
@@ -148,12 +158,13 @@ data "aws_iam_policy_document" "rotate" {
 }
 
 module "rotate" {
-  source      = "../lambda"
-  name        = "${var.name_prefix}-rotate"
-  zip_path    = var.zip_path
-  policy_json = data.aws_iam_policy_document.rotate.json
-  memory_size = 256
-  timeout     = 60
+  source       = "../lambda"
+  name         = "${var.name_prefix}-rotate"
+  zip_path     = var.zip_path
+  code_signing = var.code_signing
+  policy_json  = data.aws_iam_policy_document.rotate.json
+  memory_size  = 256
+  timeout      = 60
 
   environment = {
     LITELOGIN_CONFIG_TABLE  = var.config_table_name

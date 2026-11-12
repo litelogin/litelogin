@@ -386,6 +386,14 @@ If a deployment needs instant client or org disablement, shorten the cache time 
   - `Cache-Control: no-store` on all `/token` responses and authenticated pages.
 - **Secrets:** there are no long-lived credentials in environment variables. The Auth Lambda holds only the origin secret's hashes (see "Origin: Lambda function URLs").
 - **Logging:** never log passwords, tokens, codes, cookies or client secrets. Log hashed identifiers instead.
+- **Threats:** ThreatModel.md maps each threat to its control and where it's implemented.
+
+### Supply chain
+
+- **Pinned inputs:** the Go toolchain (`go.mod`, enforced by the Makefile), modules (`go.sum`), Terraform providers (lock files), third-party GitHub Actions (by commit SHA), and tools and images (by version and digest). Dependabot proposes updates as pull requests.
+- **Vulnerability checks:** `govulncheck` runs in CI on every change.
+- **Build once:** the pipeline builds the Lambda packages once per commit and deploys those files, checked against their SHA-256 checksums, to every environment. Builds are reproducible: `make package` from a clean clone of the commit produces the same bytes.
+- **Code signing:** each environment has an AWS Signer profile. Terraform signs every package with it and deploys the signed copy, and the functions' code signing configuration is set to `Enforce`, so Lambda rejects code the profile didn't sign, whoever uploads it.
 
 ## Observability
 

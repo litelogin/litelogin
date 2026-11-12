@@ -94,6 +94,7 @@ module "signing" {
   name_prefix        = local.name_prefix
   environment        = "dev"
   zip_path           = "${local.dist_dir}/rotate.zip"
+  code_signing       = module.codesigning.code_signing
   config_table_name  = module.tables.config_table_name
   config_table_arn   = module.tables.config_table_arn
   session_table_name = module.tables.session_table_name
@@ -145,10 +146,16 @@ data "aws_iam_policy_document" "auth" {
   }
 }
 
+module "codesigning" {
+  source      = "../../modules/codesigning"
+  name_prefix = local.name_prefix
+}
+
 module "auth" {
   source                 = "../../modules/lambda"
   name                   = "${local.name_prefix}-auth"
   zip_path               = "${local.dist_dir}/auth.zip"
+  code_signing           = module.codesigning.code_signing
   policy_json            = data.aws_iam_policy_document.auth.json
   memory_size            = 1024
   function_url_auth_type = "NONE"
@@ -184,6 +191,7 @@ module "admin" {
   source              = "../../modules/admin"
   name_prefix         = local.name_prefix
   zip_path            = "${local.dist_dir}/admin.zip"
+  code_signing        = module.codesigning.code_signing
   config_table_name   = module.tables.config_table_name
   config_table_arn    = module.tables.config_table_arn
   session_table_name  = module.tables.session_table_name
@@ -201,6 +209,7 @@ module "jobs" {
   source             = "../../modules/jobs"
   name_prefix        = local.name_prefix
   zip_path           = "${local.dist_dir}/worker.zip"
+  code_signing       = module.codesigning.code_signing
   config_table_name  = module.tables.config_table_name
   config_table_arn   = module.tables.config_table_arn
   config_stream_arn  = module.tables.config_stream_arn

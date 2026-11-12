@@ -1,4 +1,4 @@
-# Reusable: build, apply and smoke-test one environment.
+# Reusable: verify the build, apply and smoke-test one environment.
 #
 # Runs in the GitHub environment named by `environment`. Only jobs in that
 # environment can assume the account's litelogin-deploy role, and the
@@ -16,6 +16,10 @@ on:
         type: string
       ref:
         description: Commit to deploy
+        required: true
+        type: string
+      artifact:
+        description: Name of the build's Lambda packages artifact (deploy.yml's build job)
         required: true
         type: string
 
@@ -45,26 +49,33 @@ jobs:
           [[ "$ENVIRONMENT" =~ ^(dev|qa|prod)$ ]] || { echo "unknown environment: $ENVIRONMENT"; exit 1; }
           [[ -n "$STATE_BUCKET" && -n "$REGION" ]] || { echo "environment variables are missing; run scripts/bootstrap-account.sh --github"; exit 1; }
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
 
-      - uses: hashicorp/setup-terraform@v4
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
-      - uses: aws-actions/configure-aws-credentials@v6
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Build Lambda packages
-        run: make package
+      # The packages the build job made, not a new build: check they're
+      # intact. Terraform signs them with this account's Signer profile.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+
+      - name: Verify Lambda packages
+        run: (cd dist && sha256sum --check --strict SHA256SUMS)
 
       - name: Terraform init
         working-directory: infra/envs/${{ inputs.environment }}

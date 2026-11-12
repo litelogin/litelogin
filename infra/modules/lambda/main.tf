@@ -54,6 +54,16 @@ variable "log_retention_days" {
   default = 30
 }
 
+variable "code_signing" {
+  description = "Sign the package and only accept signed code (the codesigning module's code_signing output). Null: deploy the zip unsigned."
+  type = object({
+    bucket       = string
+    profile_name = string
+    config_arn   = string
+  })
+  default = null
+}
+
 variable "tracing" {
   description = "Trace invocations with AWS X-Ray (active tracing)."
   type        = bool
@@ -110,16 +120,61 @@ resource "aws_iam_role_policy" "permissions" {
   policy = var.policy_json
 }
 
+# ---- Signed package ----
+
+locals {
+  signed = var.code_signing != null
+}
+
+# Keyed by content, so a new build is a new object and a new signing job,
+# and an unchanged one is neither.
+resource "aws_s3_object" "package" {
+  count       = local.signed ? 1 : 0
+  bucket      = var.code_signing.bucket
+  key         = "packages/${var.name}/${filesha256(var.zip_path)}.zip"
+  source      = var.zip_path
+  source_hash = filemd5(var.zip_path)
+}
+
+resource "aws_signer_signing_job" "package" {
+  count        = local.signed ? 1 : 0
+  profile_name = var.code_signing.profile_name
+
+  source {
+    s3 {
+      bucket  = aws_s3_object.package[0].bucket
+      key     = aws_s3_object.package[0].key
+      version = aws_s3_object.package[0].version_id
+    }
+  }
+
+  destination {
+    s3 {
+      bucket = var.code_signing.bucket
+      prefix = "signed/${var.name}/"
+    }
+  }
+
+  ignore_signing_job_failure = false
+}
+
 resource "aws_lambda_function" "this" {
-  function_name    = var.name
-  role             = aws_iam_role.this.arn
-  runtime          = "provided.al2023"
-  handler          = "bootstrap"
-  architectures    = ["arm64"]
-  filename         = var.zip_path
-  source_code_hash = filebase64sha256(var.zip_path)
-  memory_size      = var.memory_size
-  timeout          = var.timeout
+  function_name = var.name
+  role          = aws_iam_role.this.arn
+  runtime       = "provided.al2023"
+  handler       = "bootstrap"
+  architectures = ["arm64"]
+  memory_size   = var.memory_size
+  timeout       = var.timeout
+
+  # Unsigned: the local zip. Signed: the signing job's copy, which changes
+  # whenever the package does.
+  filename         = local.signed ? null : var.zip_path
+  source_code_hash = local.signed ? null : filebase64sha256(var.zip_path)
+  s3_bucket        = local.signed ? aws_signer_signing_job.package[0].signed_object[0].s3[0].bucket : null
+  s3_key           = local.signed ? aws_signer_signing_job.package[0].signed_object[0].s3[0].key : null
+
+  code_signing_config_arn = local.signed ? var.code_signing.config_arn : null
 
   reserved_concurrent_executions = var.reserved_concurrency
 

@@ -26,6 +26,16 @@ variable "zip_path" {
   type        = string
 }
 
+variable "code_signing" {
+  description = "The codesigning module's code_signing output; null to deploy unsigned."
+  type = object({
+    bucket       = string
+    profile_name = string
+    config_arn   = string
+  })
+  default = null
+}
+
 variable "config_table_name" {
   type = string
 }
@@ -145,6 +155,7 @@ module "admin" {
   source                 = "../lambda"
   name                   = "${var.name_prefix}-admin"
   zip_path               = var.zip_path
+  code_signing           = var.code_signing
   policy_json            = data.aws_iam_policy_document.admin.json
   function_url_auth_type = "AWS_IAM"
   # Creating a user hashes a password with argon2id (see "Memory sized for
