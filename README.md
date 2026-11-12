@@ -1,6 +1,6 @@
 # LiteLogin
 
-A multi-tenant OAuth 2.1 and OpenID Connect identity provider that runs entirely on AWS serverless services: Lambda, DynamoDB, KMS, CloudFront and SES. There are no servers to manage: costs follow requests, on top of a small fixed monthly cost for the WAF, KMS keys and monitoring.
+A multi-tenant OAuth 2.1 and OpenID Connect identity provider that runs entirely on AWS serverless services: Lambda, DynamoDB, KMS, CloudFront and SES. There are no servers to manage: costs follow requests, on top of a small fixed monthly cost for the WAF, KMS keys and monitoring. [Cost.md](Cost.md) works out the monthly cost at 1,000 to 1 million sign-ins.
 
 One deployment serves many **orgs**. Each org has its own users, its own login hosts (`acme.login.example.com`, or a custom domain such as `login.acme.com`), and its own apps.
 
@@ -69,6 +69,7 @@ Every request is handled by a Lambda function and all state is in two on-demand 
 - [SelfHosting.md](SelfHosting.md): deploy LiteLogin in your own AWS account
 - [Architecture.md](Architecture.md): how it works
 - [Datamodel.md](Datamodel.md): the DynamoDB tables and every access pattern
+- [Cost.md](Cost.md): the monthly cost on AWS, fixed and per request
 - [ThreatModel.md](ThreatModel.md): threats, controls and accepted risks
 - [CONTRIBUTING.md](CONTRIBUTING.md): building, testing and the code layout
 - [test/load/README.md](test/load/README.md): load testing, and measured results

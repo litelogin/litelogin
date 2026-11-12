@@ -48,9 +48,25 @@ type env struct {
 	// ws is the server's configuration, for tests that serve it again
 	// differently.
 	ws *web.Server
+	// kms signs the tokens; it counts Sign calls.
+	kms *kmsfake.KMS
+}
+
+// envOptions change how newEnvWith sets up the server.
+type envOptions struct {
+	// db adds options to the DynamoDB client, e.g. middleware.
+	db func(*dynamodb.Options)
+	// configTTL is the config cache's lifetime: effectively none by
+	// default, so tests see their own config changes at once.
+	configTTL time.Duration
 }
 
 func newEnv(t *testing.T, requireVerified bool) *env {
+	t.Helper()
+	return newEnvWith(t, requireVerified, envOptions{})
+}
+
+func newEnvWith(t *testing.T, requireVerified bool, opts envOptions) *env {
 	t.Helper()
 	endpoint := os.Getenv(platform.EnvDynamoDBEndpoint)
 	if endpoint == "" {
@@ -62,6 +78,10 @@ func newEnv(t *testing.T, requireVerified bool) *env {
 		Region: "us-east-1", BaseEndpoint: aws.String(endpoint),
 		Credentials:                     credentials.NewStaticCredentialsProvider("local", "local", ""),
 		DisableValidateResponseChecksum: true,
+	}, func(o *dynamodb.Options) {
+		if opts.db != nil {
+			opts.db(o)
+		}
 	})
 	suffix := crypto.NewID()
 	configTable, sessionTable := "web-config-"+suffix, "web-session-"+suffix
@@ -99,8 +119,9 @@ func newEnv(t *testing.T, requireVerified bool) *env {
 		Metrics: e.metrics,
 		Now:     func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) },
 		Store:   st,
-		// Effectively uncached, so tests see their own config changes.
-		Config:   configcache.New(st, time.Nanosecond),
+		// Effectively uncached by default, so tests see their own config
+		// changes.
+		Config:   configcache.New(st, max(opts.configTTL, time.Nanosecond)),
 		Hasher:   crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
 		Email:    mail,
 		Keys:     keys,
@@ -117,7 +138,7 @@ func newEnv(t *testing.T, requireVerified bool) *env {
 		h.ServeHTTP(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	e.mail, e.srv, e.ws = mail, srv, ws
+	e.mail, e.srv, e.ws, e.kms = mail, srv, ws, fake
 	return e
 }
 
