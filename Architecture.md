@@ -186,6 +186,53 @@ Authorization codes are bound to the client, the redirect URI, the PKCE challeng
 - **RP-initiated logout:** `/logout` checks `id_token_hint` and `client_id` against the host's client, and `post_logout_redirect_uri` against its registered URIs. The user confirms before being signed out, so another site can't sign them out with a link.
 - **Pages' `form-action`** allows the client's redirect and post-logout redirect URI origins, because browsers apply it to the redirects that follow a form submission.
 
+### Sign-in flow
+
+One authorization code sign-in, from `/authorize` through login and the code exchange at `/token`, then a refresh. It follows `authorize`, `login`, `exchangeCode` and `refresh` in `internal/web/oidc.go` and `internal/web/flows.go`. CloudFront forwards every request to the Auth Lambda; the diagram shows it once per hop.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant App as App (relying party)
+    participant B as Browser
+    participant CF as CloudFront
+    participant L as Auth Lambda
+    participant DB as DynamoDB
+    participant K as KMS
+
+    App->>B: Redirect to /authorize (client_id, redirect_uri, state, PKCE challenge, scope)
+    B->>CF: GET /authorize
+    CF->>L: Forward, with the login host in x-litelogin-host
+    L->>DB: Read the client; read the session named by the cookie
+    alt No usable session
+        L-->>B: 303 to /login, carrying the request's query
+        B->>CF: POST /login (email, password)
+        CF->>L: Forward
+        L->>DB: Check the user and password hash; create the session
+        L-->>B: Set the session cookie; 303 back to /authorize (prompt=login and max_age removed)
+        B->>CF: GET /authorize (same request)
+        CF->>L: Forward
+        L->>DB: Read the session
+    end
+    L->>DB: Store the authorization code (hashed, single use, 60-second lifetime)
+    L-->>B: 303 to redirect_uri with code, state and iss
+    B->>App: GET redirect_uri?code=...
+    App->>CF: POST /token (code, code_verifier, redirect_uri, client authentication)
+    CF->>L: Forward
+    L->>DB: Look the code up by its hash and redeem it once, creating a refresh token family if the client has the refresh_token grant
+    L->>K: Sign the access token, and the ID token with the openid scope
+    L-->>App: access_token, id_token, refresh_token
+
+    Note over App,L: Later, when the access token has expired
+    App->>CF: POST /token (grant_type=refresh_token)
+    CF->>L: Forward
+    L->>DB: Rotate the refresh token (a reused one revokes the whole family)
+    L->>K: Sign new tokens
+    L-->>App: New access_token and refresh_token
+```
+
+The app checks the tokens locally with the keys from `/.well-known/jwks.json`, so it doesn't call LiteLogin again until the refresh.
+
 ### Tokens
 
 | | Access token | ID token | Refresh token |
