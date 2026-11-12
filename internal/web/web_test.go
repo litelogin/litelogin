@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,6 +43,8 @@ type env struct {
 	pool   *store.Pool
 	// metrics holds what the server recorded.
 	metrics *metrics.Memory
+	// skew moves the server's clock (not the store's) forward.
+	skew atomic.Int64
 }
 
 func newEnv(t *testing.T, requireVerified bool) *env {
@@ -91,6 +94,7 @@ func newEnv(t *testing.T, requireVerified bool) *env {
 	e.metrics = &metrics.Memory{}
 	ws := &web.Server{
 		Metrics: e.metrics,
+		Now:     func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) },
 		Store:   st,
 		// Effectively uncached, so tests see their own config changes.
 		Config:   configcache.New(st, time.Nanosecond),

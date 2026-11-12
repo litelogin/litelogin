@@ -138,7 +138,9 @@ All of these are served by the Auth Lambda on every login host.
 | `/token` | POST, OPTIONS | Authorization code and refresh token grants |
 | `/userinfo` | GET, POST, OPTIONS | User claims for an access token |
 | `/logout` | GET, POST | RP-initiated logout |
-| `/account/*` | GET, POST | Signed-in user: change password, change email (confirmed by a link to the new address), list sessions, sign one out, sign out everywhere |
+| `/account/*` | GET, POST | Signed-in user: change password, change email (confirmed by a link to the new address), list sessions, sign one out, sign out everywhere; list, rename and remove passkeys |
+| `/passkey/login/options`, `/passkey/login` | POST | Sign in with a passkey (if the host's `passkeys_enabled`) |
+| `/passkey/register/options`, `/passkey/register` | POST | Signed-in user: add a passkey |
 
 **CORS:**
 - `/.well-known/*` is public and allows any origin.
@@ -146,6 +148,19 @@ All of these are served by the Auth Lambda on every login host.
 - Preflight `OPTIONS` requests carry no `client_id`, so they're allowed for the `allowed_origins` of every client on the login host. The response to the request itself then allows only its own client's origins. Requests from any other origin get no CORS headers.
 
 The admin API is served separately by the Admin Lambda (see [Admin API](#admin-api)). It isn't reachable on login hosts.
+
+### Passkeys
+
+Passkeys (WebAuthn) are an extra way to sign in; users keep their passwords. A host turns them on with `passkeys_enabled`. Ceremonies are verified by `github.com/go-webauthn/webauthn`.
+
+- **Relying party:** the login host itself, e.g. `login.acme.com`. A passkey works only on the host it was made on, so one made on an org's default host doesn't work on its custom domain. Sharing a parent domain would let one org's pages ask for passkeys made on another's.
+- **Options:** discoverable credentials (resident keys) are required, so sign-in needs no email first. User verification is required, so the device's biometric or PIN makes a passkey sign-in two factors in one step. Attestation isn't requested.
+- **Script:** the login and account pages, when the host allows passkeys, carry one small embedded script, allowed by the CSP's nonce (`script-src 'nonce-…'; connect-src 'self'`). Other pages, and hosts without passkeys, have no `script-src`. Without JavaScript the pages work as before, password only.
+- **Endpoints:** the script posts forms (with the CSRF token) to `/passkey/*` and gets JSON back. Each ceremony has a challenge that lasts 5 minutes and works once.
+- **Adding one:** needs a sign-in within the last 10 minutes, or the password, so a stolen session can't add the thief's passkey. The user is emailed whenever a passkey is added. A user can have up to 20.
+- **Signing in:** the passkey's user handle is the user ID. The user must be in the host's pool, active, and verified if the pool requires it. The password lockout doesn't apply. A signature counter that goes backwards (other than 0, which synced passkeys always report) is refused as a possible clone.
+- **`amr`:** `["swk", "user"]` for a passkey that can be synced, `["hwk", "user"]` for one bound to a device (RFC 8176), told apart by the backup-eligible flag.
+- **Removing one** signs the user out everywhere else (it increments `auth_version`), since sessions and tokens aren't linked to the passkey they came from, and the usual reason is a lost device.
 
 ## Protocol
 
@@ -233,12 +248,13 @@ The admin API is for deployment operators.
 | `/v1/clients/{client}/secret` | Rotate (returns the new secret once) |
 | `/v1/clients/{client}/hosts` | List the client's login hosts |
 | `/v1/orgs/{org}/hosts` | List, add a custom host |
-| `/v1/hosts/{host}` | Get (including verification status), update settings (theme, registration, session lifetimes), remove (a custom host with no clients) |
+| `/v1/hosts/{host}` | Get (including verification status), update settings (theme, registration, passkeys, session lifetimes), remove (a custom host with no clients) |
 | `/v1/hosts/{host}/clients` | List the host's clients |
 | `/v1/hosts/{host}/clients/{client}` | Add (`PUT`, idempotent) or remove (`DELETE`; not the client's last host) |
 | `/v1/pools/{pool}/users` | Create (with an initial password, or by emailing a password-set link), list, search by `email_prefix` |
 | `/v1/users/{user}` | Get, update, disable, enable, delete |
 | `/v1/users/{user}/sessions` | List, revoke all (increments `auth_version`) |
+| `/v1/users/{user}/passkeys` | List; remove one (`DELETE /v1/users/{user}/passkeys/{passkey}`, which also revokes the user's sessions) |
 | `/v1/keys` | List signing keys and their status |
 
 ### Conventions
@@ -375,14 +391,14 @@ If a deployment needs instant client or org disablement, shorten the cache time 
 ## Security
 
 - **Edge:**
-  - WAF rate-based rules per IP on `/login`, `/register`, `/password/*` and `/token`, plus AWS managed rule groups.
+  - WAF rate-based rules per IP on `/login`, `/register`, `/password/*`, `/passkey/*` and `/token`, plus AWS managed rule groups.
   - TLS 1.2 minimum.
   - HSTS on every host.
 - **Cookies:**
   - The session cookie is host-only, with `HttpOnly`, `Secure` and `SameSite=Lax`, using the `__Host-` prefix.
   - Every POST form carries a CSRF token tied to the session or a pre-login cookie.
 - **Response headers:**
-  - A strict `Content-Security-Policy` on HTML pages, plus `frame-ancestors 'none'` to prevent clickjacking.
+  - A strict `Content-Security-Policy` on HTML pages, plus `frame-ancestors 'none'` to prevent clickjacking. Pages run no scripts, except the passkey script (see "Passkeys").
   - `Cache-Control: no-store` on all `/token` responses and authenticated pages.
 - **Secrets:** there are no long-lived credentials in environment variables. The Auth Lambda holds only the origin secret's hashes (see "Origin: Lambda function URLs").
 - **Logging:** never log passwords, tokens, codes, cookies or client secrets. Log hashed identifiers instead.
@@ -400,6 +416,7 @@ If a deployment needs instant client or org disablement, shorten the cache time 
 - **Logs:** structured JSON with a request ID, org ID and client ID on every line. Use CloudWatch Logs with a retention policy.
 - **Metrics** (CloudWatch embedded metric format):
   - logins succeeded and failed
+  - passkeys added, and passkey sign-ins succeeded and failed (including suspected clones)
   - lockouts
   - tokens issued, and token issuance failures
   - token exchange latency
@@ -462,4 +479,4 @@ SelfHosting.md says which to raise before deploying, and test/load/README.md wha
 
 - **Custom domain scale.** Custom hosts are tenants of one CloudFront multi-tenant distribution (CloudFront SaaS Manager), within its quotas for tenants and certificates. Beyond them, the fallback would be more distributions.
 - **One Region.** An environment runs in us-east-1 only; there's no multi-Region failover.
-- **Passwords only.** There's no multi-factor authentication, passkeys or social sign-in yet.
+- **Passwords and passkeys.** There's no separate multi-factor authentication or social sign-in yet, and an account always has a password. A passkey works only on the login host it was made on.

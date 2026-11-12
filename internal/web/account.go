@@ -23,6 +23,9 @@ var accountNotices = map[string]string{
 	"password_changed": "Your password was changed. You're still signed in here; every other session was signed out.",
 	"email_changed":    "Your email address was changed.",
 	"session_ended":    "That session was signed out.",
+	"passkey_added":    "Your passkey was added. You can use it to sign in here.",
+	"passkey_renamed":  "The passkey was renamed.",
+	"passkey_removed":  "The passkey was removed. You're still signed in here; every other session was signed out.",
 }
 
 // sessionView is one of the user's sessions on the account page.
@@ -89,7 +92,14 @@ func (s *Server) renderAccount(w http.ResponseWriter, r *http.Request, t *tenant
 		v.Current = true
 		views = append([]sessionView{v}, views...)
 	}
+	passkeys, err := s.Store.ListPasskeys(r.Context(), u.ID)
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
 	d.Title, d.Account, d.Sessions = "Your account", u, views
+	d.Passkeys, d.PasskeyPassword, d.MaxPasskeys = passkeyViews(passkeys), !s.recentSignIn(sess), store.MaxPasskeysPerUser
+	d.Script = pageScript(t)
 	s.render(w, r, t, status, "account", d)
 }
 
@@ -208,7 +218,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, t *tenan
 		return
 	}
 	u.AuthVersion = v
-	if err := s.startSession(w, r, t, u); err != nil {
+	if err := s.startSession(w, r, t, u, amrPassword, 0); err != nil {
 		s.fail(w, r, t, err)
 		return
 	}

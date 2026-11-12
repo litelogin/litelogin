@@ -30,16 +30,22 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 
 | Threat | Control | Status |
 | -- | -- | -- |
-| Password guessing and credential stuffing | WAF rate limit per IP on `/login`, `/register`, `/password/*`, `/token` (infra/modules/edge); account lockout after 5 failures for 15 minutes (internal/web/web.go) | verified |
+| Password guessing and credential stuffing | WAF rate limit per IP on `/login`, `/register`, `/password/*`, `/passkey/*`, `/token` (infra/modules/edge); account lockout after 5 failures for 15 minutes (internal/web/web.go) | verified |
 | Account enumeration through sign-in | One message for unknown, locked and inactive accounts; a dummy argon2id verification so timing matches (internal/web/flows.go, internal/crypto/password.go) | verified |
 | Enumeration through registration and password reset | Same response either way; the existing owner is emailed instead (internal/web/flows.go, `register`, `forgot`) | verified |
 | Enumeration through email change (signed in) | The request gets the same response either way; only the confirmation link, sent to the new address, says if another account already uses it, so only that address's owner can learn it (internal/web/account.go) | verified |
-| Locking a victim out by failing their password on purpose | Lockout is per account and lasts 15 minutes; WAF limits each IP | accepted (F2) |
+| Locking a victim out by failing their password on purpose | Lockout is per account and lasts 15 minutes; WAF limits each IP. A user with a passkey can still sign in with it: the lockout doesn't apply to passkeys. | accepted (F2) |
 | Offline cracking of stolen hashes | argon2id, m = 19 MiB, t = 2, p = 1; constant-time comparison (internal/crypto) | verified |
 | Session fixation | A new session ID on every sign-in | verified |
 | Session theft through cookies | `__Host-` prefix, `Secure`, `HttpOnly`, `SameSite=Lax` (internal/web/web.go) | verified |
 | CSRF | A token on every POST form, tied to the session or a pre-login cookie; `Origin` checked | verified |
-| Clickjacking and XSS | `frame-ancestors 'none'`, strict CSP, `html/template` escaping | verified |
+| Clickjacking and XSS | `frame-ancestors 'none'`, strict CSP, `html/template` escaping. The only script is the passkey script on the login and account pages, embedded and allowed by a per-response nonce (internal/web/passkeys.go) | verified |
+| Phishing | A passkey is bound to its login host: the browser won't use it on another origin, and the server checks the origin and RP ID (internal/web/passkeys.go). Passwords can still be phished. | verified |
+| A passkey from another tenant | The RP ID is the full login host, so the browser offers only that host's passkeys; the server also requires the passkey's host to match and its user to be in the host's pool | verified |
+| A stolen session adding the thief's passkey | Adding a passkey needs a sign-in within 10 minutes or the password; the challenge is tied to the session; the user is emailed whenever one is added | verified |
+| Cloned authenticators | A signature counter that goes backwards is refused (synced passkeys report 0, which can't be checked) | verified |
+| Replayed passkey responses | Each challenge is single use (a conditional delete) and lasts 5 minutes | verified |
+| Account recovery | The password reset link still opens an account that has passkeys, so email is the weakest way in. Removing a passkey signs the user out everywhere else. | accepted (F7) |
 | Reset and verification links leaking | Stored hashed; single use; reset links last 30 minutes, verification 24 hours; `Referrer-Policy: no-referrer` | verified |
 
 ### OAuth and OIDC
@@ -96,6 +102,8 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 **F5 — Unpinned build inputs (fixed).** Actions were on movable tags, `golangci-lint` and `govulncheck` ran `latest`, and local builds used whatever Go was installed: on one machine that was Go 1.27.3, affected by GO-2026-6859 (net/http). The pipeline's builds used the pinned 1.26.11, which isn't affected. All are now pinned.
 
 **F6 — Reset tokens in WAF samples (accepted).** WAF keeps sampled requests, URI included, for 3 hours, visible to anyone with WAF read access. Reset links last 30 minutes and work once. *Recommendation:* keep WAF read access to operators; don't enable full WAF logging without redacting the query string.
+
+**F7 — Email is the weakest way in (accepted).** A user with a passkey can still reset their password by email, and every account has a password. So an attacker with the user's email account doesn't need the passkey. *Later:* passkey-only accounts, with a recovery path that doesn't rely on email alone.
 
 ## Not covered here
 

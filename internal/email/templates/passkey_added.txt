@@ -1,0 +1,8 @@
+A passkey was added to your account
+
+A passkey named "{{.Name}}" was added to your {{.Brand}} account. It can be used to sign in on {{.Host}}.
+
+If you added it, there's nothing to do. If you didn't, someone else may have access to your account: open your account page, remove the passkey and change your password.
+{{.Link}}
+
+-- {{.Brand}} ({{.Host}})

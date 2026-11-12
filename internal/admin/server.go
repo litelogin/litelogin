@@ -57,6 +57,8 @@ type Store interface {
 	DeleteUser(ctx context.Context, userID string) error
 	RevokeUserCredentials(ctx context.Context, userID string) (int64, error)
 	ListActiveSessions(ctx context.Context, userID string) ([]store.SessionSummary, error)
+	ListPasskeys(ctx context.Context, userID string) ([]store.Passkey, error)
+	DeletePasskey(ctx context.Context, userID, id string) error
 
 	ListSigningKeys(ctx context.Context) ([]store.SigningKey, error)
 
@@ -145,6 +147,8 @@ func (s *Server) Handler() http.Handler {
 	route("POST /v1/users/{user}/enable", s.enableUser)
 	route("GET /v1/users/{user}/sessions", s.listSessions)
 	route("DELETE /v1/users/{user}/sessions", s.revokeSessions)
+	route("GET /v1/users/{user}/passkeys", s.listPasskeys)
+	route("DELETE /v1/users/{user}/passkeys/{passkey}", s.deletePasskey)
 
 	route("GET /v1/keys", s.listKeys)
 

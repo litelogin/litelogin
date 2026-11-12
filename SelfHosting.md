@@ -197,6 +197,16 @@ A client on a new host has a new issuer (`https://login.acme.com`), so its app m
 
 To remove a host, move its clients off it, then run `dist/litelogin host remove login.acme.com`. **Tell the domain's owner to delete the CNAME** once it's removed: a record left pointing at LiteLogin can't be claimed by anyone else without an operator, but it shouldn't linger.
 
+## Passkeys
+
+Passkeys are off by default. Turn them on per login host:
+
+```sh
+dist/litelogin host update login.acme.com --passkeys
+```
+
+Users can then add a passkey on their account page and sign in with it. A passkey works only on the host it was made on: moving an org's clients to a new host means its users add new passkeys there. To remove a lost passkey for a user, use `dist/litelogin user passkey list USER` and `user passkey remove USER PASSKEY`, which also signs the user out everywhere.
+
 ## Monitoring
 
 - **Dashboard:** `tofu output dashboard` links to the environment's CloudWatch dashboard. It shows sign-ins, token issuance, latency, security events (such as reused refresh tokens), failures and background work.

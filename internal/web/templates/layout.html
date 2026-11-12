@@ -52,7 +52,7 @@ main{
 .brand img{max-height:56px;max-width:200px}
 h1{font-size:22px;font-weight:600;text-align:center;margin:0 0 24px}
 label{display:block;font-size:13px;font-weight:500;color:var(--muted);margin:16px 0 6px}
-input[type=email],input[type=password]{
+input[type=email],input[type=password],input[type=text]{
   width:100%;padding:12px 14px;font:inherit;color:var(--field-text);
   background:var(--field);border:1px solid var(--field-line);border-radius:.25em;
   transition:box-shadow .15s ease;
@@ -81,6 +81,12 @@ button.secondary{margin-top:12px;background:transparent;color:var(--link);border
 .sessions{list-style:none;margin:0 0 8px;padding:0}
 .sessions li{padding:12px 0;border-bottom:1px solid rgba(127,127,127,.3)}
 .sessions li:last-child{border-bottom:0}
+[hidden]{display:none!important}
+.or{display:flex;align-items:center;gap:12px;margin:24px 0 0;font-size:13px;color:var(--muted)}
+.or::before,.or::after{content:"";flex:1;border-top:1px solid rgba(127,127,127,.4)}
+.row{display:flex;gap:8px;align-items:center}
+.row input{flex:1}
+.row button{width:auto;margin-top:0;padding:11px 14px}
 .tag{font-size:12px;padding:1px 8px;border-radius:999px;background:var(--ok-bg);color:var(--ok);margin-left:6px}
 @media (prefers-reduced-transparency:reduce){main{-webkit-backdrop-filter:none;backdrop-filter:none;background:rgba(30,34,90,.92)}}
 </style>
@@ -93,5 +99,6 @@ button.secondary{margin-top:12px;background:transparent;color:var(--link);border
 {{if .Notice}}<p class="msg notice" role="status">{{.Notice}}</p>{{end}}
 {{template "content" .}}
 </main>
+{{if .Script}}<script nonce="{{.Nonce}}">{{.Script}}</script>{{end}}
 </body>
 </html>{{end}}

@@ -36,6 +36,9 @@ const (
 	EmailFailed           = "EmailSendFailed"
 	OldestWorkAge         = "OldestOutstandingWorkAge"
 	CustomDomainOnboard   = "CustomDomainOnboardingDuration"
+	PasskeyAdded          = "PasskeyAdded"
+	PasskeyLoginSucceeded = "PasskeyLoginSucceeded" //nolint:gosec // a metric name, not a credential
+	PasskeyLoginFailed    = "PasskeyLoginFailed"    // Reason: unknown_passkey, invalid, expired, cloned, inactive, unverified_email
 )
 
 // Units.

@@ -31,6 +31,7 @@ type Host struct {
 	Issuer              string            `json:"issuer"`
 	Theme               map[string]string `json:"theme"`
 	RegistrationEnabled bool              `json:"registration_enabled"`
+	PasskeysEnabled     bool              `json:"passkeys_enabled"`
 	SessionTTL          int64             `json:"session_ttl"`
 	SessionIdleTTL      int64             `json:"session_idle_ttl"`
 	CreatedAt           string            `json:"created_at"`
@@ -54,7 +55,7 @@ func (s *Server) hostJSON(h *store.LoginHost) Host {
 		theme = map[string]string{}
 	}
 	return Host{Host: h.Host, OrgID: h.OrgID, UserPoolID: h.PoolID, Type: h.Type, Status: h.Status, Issuer: "https://" + h.Host,
-		Theme: theme, RegistrationEnabled: h.RegistrationEnabled, SessionTTL: h.SessionTTL, SessionIdleTTL: h.SessionIdleTTL,
+		Theme: theme, RegistrationEnabled: h.RegistrationEnabled, PasskeysEnabled: h.PasskeysEnabled, SessionTTL: h.SessionTTL, SessionIdleTTL: h.SessionIdleTTL,
 		CreatedAt: timestamp(h.CreatedAt), UpdatedAt: timestamp(h.UpdatedAt), Version: h.Version,
 		WorkAttempts: h.WorkAttempts, WorkUpdatedAt: timestamp(h.WorkUpdatedAt), WorkLastError: h.WorkLastError,
 		CNAMETarget: s.customHostTarget(h)}
@@ -73,6 +74,7 @@ func (s *Server) customHostTarget(h *store.LoginHost) string {
 type HostSettingsInput struct {
 	Theme               *map[string]string `json:"theme"`
 	RegistrationEnabled *bool              `json:"registration_enabled"`
+	PasskeysEnabled     *bool              `json:"passkeys_enabled"`
 	SessionTTL          *int64             `json:"session_ttl"`
 	SessionIdleTTL      *int64             `json:"session_idle_ttl"`
 }
@@ -91,6 +93,9 @@ func (in *HostSettingsInput) apply(h *store.HostSettings) error {
 	}
 	if in.RegistrationEnabled != nil {
 		h.RegistrationEnabled = *in.RegistrationEnabled
+	}
+	if in.PasskeysEnabled != nil {
+		h.PasskeysEnabled = *in.PasskeysEnabled
 	}
 	if in.SessionTTL != nil {
 		h.SessionTTL = *in.SessionTTL

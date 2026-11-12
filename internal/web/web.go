@@ -56,6 +56,15 @@ type Store interface {
 	RevokeRefreshFamily(ctx context.Context, familyID string) error
 
 	CreateOneTimeToken(ctx context.Context, t *store.OneTimeToken, lifetime time.Duration) error
+
+	CreatePasskey(ctx context.Context, p *store.Passkey, authVersion int64) error
+	ListPasskeys(ctx context.Context, userID string) ([]store.Passkey, error)
+	GetPasskey(ctx context.Context, userID string, credentialID []byte) (*store.Passkey, error)
+	RecordPasskeyUse(ctx context.Context, userID, id string, signCount uint32, backupState bool) error
+	RenamePasskey(ctx context.Context, userID, id, name string) error
+	DeletePasskey(ctx context.Context, userID, id string) error
+	CreateWebAuthnChallenge(ctx context.Context, c *store.WebAuthnChallenge, lifetime time.Duration) error
+	ConsumeWebAuthnChallenge(ctx context.Context, hash, purpose, host string) (*store.WebAuthnChallenge, error)
 	GetOneTimeToken(ctx context.Context, hash, purpose string) (*store.OneTimeToken, error)
 	VerifyEmail(ctx context.Context, hash string) (string, error)
 	CompletePasswordReset(ctx context.Context, hash, newPasswordHash string) (string, error)
@@ -160,6 +169,13 @@ func (s *Server) Handler() http.Handler {
 	page("POST /account/email/confirm", s.confirmEmail)
 	page("POST /account/sessions/end", s.endSession)
 	page("POST /account/sign-out-everywhere", s.signOutEverywhere)
+	page("POST /account/passkeys/rename", s.renamePasskey)
+	page("POST /account/passkeys/remove", s.removePasskey)
+	// Passkey ceremonies, called by the pages' script. They answer JSON.
+	page("POST /passkey/login/options", s.passkeyLoginOptions)
+	page("POST /passkey/login", s.passkeyLogin)
+	page("POST /passkey/register/options", s.passkeyRegisterOptions)
+	page("POST /passkey/register", s.passkeyRegister)
 
 	// OAuth and OpenID Connect. These don't use the page wrapper: their
 	// POSTs come from clients, not this site's forms, so they have no
@@ -347,6 +363,12 @@ type pageData struct {
 	Account *store.User
 	// Sessions are the signed-in user's sessions, this browser's first.
 	Sessions []sessionView
+	// Passkeys are the signed-in user's passkeys.
+	Passkeys []passkeyView
+	// PasskeyPassword: adding a passkey needs the password (the sign-in
+	// isn't recent).
+	PasskeyPassword bool
+	MaxPasskeys     int
 	// Authz is a pending authorization request's query, carried through
 	// the login form.
 	Authz string
@@ -363,10 +385,16 @@ type pageData struct {
 	Nonce        string
 	Registration bool
 	MinPassword  int
+	// PasskeysEnabled: the host allows passkeys.
+	PasskeysEnabled bool
+	// Script is the page's script: the passkey script on the login and
+	// account pages, if the host allows passkeys.
+	Script template.JS
 }
 
 // render writes an HTML page. Pages are never cached and can't be framed;
-// the CSP allows no scripts, and styles only through the page's nonce.
+// the CSP allows styles only through the page's nonce, and scripts only
+// when the page has one (d.Script), also through the nonce.
 func (s *Server) render(w http.ResponseWriter, r *http.Request, t *tenant, status int, name string, d pageData) {
 	tmpls, err := loadPages()
 	tmpl := tmpls[name]
@@ -379,6 +407,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, t *tenant, statu
 	d.MinPassword = MinPasswordLength
 	if t != nil {
 		d.Theme, d.Brand, d.Registration = t.Theme, t.Theme.Brand, t.Login.RegistrationEnabled
+		d.PasskeysEnabled = t.Login.PasskeysEnabled
 		d.CSRF = s.ensureCSRF(w, r)
 	} else {
 		d.Theme, d.Brand = DefaultTheme(), "LiteLogin"
@@ -389,7 +418,12 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, t *tenant, statu
 	// Browsers apply form-action to the redirects that follow a form
 	// submission too: signing in ends at the client's redirect URI, and
 	// logging out at its post-logout redirect URI.
-	h.Set("Content-Security-Policy", "default-src 'none'; style-src 'nonce-"+d.Nonce+"'; img-src 'self' https:; "+
+	scripts := ""
+	if d.Script != "" {
+		// The script's fetches go to this host only.
+		scripts = "script-src 'nonce-" + d.Nonce + "'; connect-src 'self'; "
+	}
+	h.Set("Content-Security-Policy", "default-src 'none'; "+scripts+"style-src 'nonce-"+d.Nonce+"'; img-src 'self' https:; "+
 		"form-action "+formActionSources(t)+"; frame-ancestors 'none'; base-uri 'none'")
 	w.WriteHeader(status)
 	if err := tmpl.ExecuteTemplate(w, "layout", d); err != nil {

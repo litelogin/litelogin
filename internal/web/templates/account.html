@@ -27,6 +27,39 @@
 </form>
 </section>
 
+{{if or .PasskeysEnabled .Passkeys}}<section>
+<h2>Passkeys</h2>
+<p class="hint">Sign in with your fingerprint, face or device PIN instead of your password.</p>
+{{if .Passkeys}}<ul class="sessions">
+{{range .Passkeys}}<li>
+<div><strong>{{.Name}}</strong>{{if .Synced}} <span class="tag">Synced</span>{{end}}</div>
+<div class="hint">For {{.Host}} · added {{.Created}}{{if .LastUsed}}, last used {{.LastUsed}}{{end}}</div>
+<form method="post" action="/account/passkeys/rename" class="row">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="passkey" value="{{.ID}}">
+<input name="name" type="text" value="{{.Name}}" maxlength="64" aria-label="Passkey name" required>
+<button type="submit" class="secondary">Rename</button>
+</form>
+<form method="post" action="/account/passkeys/remove">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="passkey" value="{{.ID}}">
+<button type="submit" class="secondary">Remove this passkey</button>
+</form>
+</li>{{end}}
+</ul>
+<p class="hint">Removing a passkey signs you out everywhere else.</p>{{end}}
+{{if and .PasskeysEnabled (lt (len .Passkeys) .MaxPasskeys)}}<form id="passkey-add" hidden>
+<label for="passkey_name">Name (optional)</label>
+<input id="passkey_name" name="name" type="text" maxlength="64" placeholder="Work laptop">
+<div id="passkey-password-field"{{if not .PasskeyPassword}} hidden{{end}}>
+<label for="passkey_password">Current password</label>
+<input id="passkey_password" name="password" type="password" autocomplete="current-password">
+</div>
+<p class="msg error" id="passkey-add-error" role="alert" hidden></p>
+<button type="submit">Add a passkey</button>
+</form>{{end}}
+</section>{{end}}
+
 <section>
 <h2>Change password</h2>
 <form method="post" action="/account/password">

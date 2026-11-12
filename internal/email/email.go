@@ -43,6 +43,7 @@ const (
 	AlreadyRegistered Kind = "already_registered"
 	Invite            Kind = "invite"
 	ChangeEmail       Kind = "change_email"
+	PasskeyAdded      Kind = "passkey_added"
 )
 
 var subjects = map[Kind]string{ //nolint:gosec // email subjects, not credentials
@@ -51,13 +52,15 @@ var subjects = map[Kind]string{ //nolint:gosec // email subjects, not credential
 	AlreadyRegistered: "You already have a {{.Brand}} account",
 	Invite:            "You've been invited to {{.Brand}}",
 	ChangeEmail:       "Confirm your new email for {{.Brand}}",
+	PasskeyAdded:      "A passkey was added to your {{.Brand}} account",
 }
 
 // Data fills a message template.
 type Data struct {
 	Brand   string // the client's name, or its theme's brand name
 	Host    string // the login host the link points to
-	Link    string // the action link (verification, reset)
+	Link    string // the action link (verification, reset), or the account page
+	Name    string // a passkey's name
 	Expires string // how long the link works, e.g. "24 hours"
 }
 

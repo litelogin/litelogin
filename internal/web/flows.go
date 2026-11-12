@@ -26,6 +26,9 @@ var notices = map[string]string{
 
 const msgBadLogin = "Incorrect email or password."
 
+// amrPassword is the amr (RFC 8176) of a password sign-in.
+var amrPassword = []string{"pwd"}
+
 func (s *Server) home(w http.ResponseWriter, r *http.Request, t *tenant) {
 	sess, _, err := s.currentSession(r, t)
 	if err != nil {
@@ -45,7 +48,7 @@ func (s *Server) loginForm(w http.ResponseWriter, r *http.Request, t *tenant) {
 	authz := r.URL.Query().Get("authz")
 	s.useAuthzClient(r, t, authz)
 	s.render(w, r, t, http.StatusOK, "login", pageData{
-		Title: "Sign in", Notice: notices[r.URL.Query().Get("n")], Authz: authz,
+		Title: "Sign in", Notice: notices[r.URL.Query().Get("n")], Authz: authz, Script: pageScript(t),
 	})
 }
 
@@ -75,7 +78,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 	s.useAuthzClient(r, t, authz)
 	bad := func(reason string) {
 		metrics.Count(s.Metrics, metrics.LoginFailed, 1, metrics.Reason(reason))
-		s.render(w, r, t, http.StatusUnauthorized, "login", pageData{Title: "Sign in", Email: addr, Error: msgBadLogin, Authz: authz})
+		s.render(w, r, t, http.StatusUnauthorized, "login", pageData{Title: "Sign in", Email: addr, Error: msgBadLogin, Authz: authz, Script: pageScript(t)})
 	}
 	if len(password) > crypto.MaxPasswordLength {
 		bad("bad_credentials")
@@ -144,7 +147,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 		return
 	}
 
-	if err := s.startSession(w, r, t, u); err != nil {
+	if err := s.startSession(w, r, t, u, amrPassword, 0); err != nil {
 		s.fail(w, r, t, err)
 		return
 	}
@@ -173,8 +176,9 @@ func (s *Server) recordFailedLogin(ctx context.Context, userID string) {
 
 // startSession creates a session and sets its cookie. The browser's
 // previous session, if any, is deleted: a new login always gets a new
-// session token (no session fixation).
-func (s *Server) startSession(w http.ResponseWriter, r *http.Request, t *tenant, u *store.User) error {
+// session token (no session fixation). amr says how the user signed in
+// (RFC 8176), and authTime when: 0 is now.
+func (s *Server) startSession(w http.ResponseWriter, r *http.Request, t *tenant, u *store.User, amr []string, authTime int64) error {
 	ctx := r.Context()
 	if c, err := r.Cookie(SessionCookie); err == nil && validToken(c.Value) {
 		if err := s.Store.DeleteSession(ctx, crypto.HashToken(c.Value)); err != nil {
@@ -184,7 +188,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, t *tenant,
 	token := crypto.NewToken()
 	sess := &store.Session{
 		Hash: crypto.HashToken(token), OrgID: t.Org.ID, PoolID: t.Pool.ID, UserID: u.ID, ClientID: t.clientID(),
-		LoginHost: t.Host, AuthVersion: u.AuthVersion, AMR: []string{"pwd"},
+		LoginHost: t.Host, AuthVersion: u.AuthVersion, AuthTime: authTime, AMR: amr,
 		IP: viewerIP(r), UserAgent: truncate(r.UserAgent(), 256),
 	}
 	lifetime := time.Duration(t.Login.SessionTTL) * time.Second

@@ -44,6 +44,7 @@ erDiagram
         string status
         object theme
         boolean registration_enabled
+        boolean passkeys_enabled
         number session_ttl
         number session_idle_ttl
     }
@@ -153,7 +154,7 @@ erDiagram
 | POOL#{pool}#EMAIL#{email} | EMAIL | user_id |
 | USER#{user} | PASSKEY#{passkey_id} | credential_id, rp_id, public_key (COSE), attestation_type, transports, aaguid, attachment, sign_count, backup_eligible, backup_state, name, created_at, last_used_at |
 | CLIENT#{client} | DETAILS | org_id, name=LiteLogin, description, status=active\|disabled, client_type=public\|confidential, client_secret_hash, token_endpoint_auth_method=none\|client_secret_basic\|client_secret_post, grant_types=[authorization_code, refresh_token], redirect_uris=[https://login.microsoftonline.com/common/oauth2/nativeclient], post_logout_redirect_uris=[], allowed_origins=[https://app.acme.com], allowed_scopes=[openid, email, offline_access], user_pool_id={pool} (the pool of the host it was created on; fixed), pkce_optional (absent = PKCE required; only on confidential clients), access_token_ttl=900, id_token_ttl=900, refresh_token_ttl=2592000, refresh_family_ttl=7776000, host_count=1, created_at, updated_at, version |
-| LOGIN_HOST#{login_host} | DETAILS | org_id, pool_id, type=default\|custom, status=pending\|verified\|removing, theme={...}, registration_enabled=true, session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version, (while pending or removing) GSI2PK=WORK, GSI2SK=custom_domain#{login_host}, work_attempts, work_updated_at, work_last_error |
+| LOGIN_HOST#{login_host} | DETAILS | org_id, pool_id, type=default\|custom, status=pending\|verified\|removing, theme={...}, registration_enabled=true, passkeys_enabled=false, session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version, (while pending or removing) GSI2PK=WORK, GSI2SK=custom_domain#{login_host}, work_attempts, work_updated_at, work_last_error |
 | LOGIN_HOST#{login_host} | CLIENT#{client} | client_id |
 | CLIENT#{client} | LOGIN_HOST#{login_host} |  |
 | KEYS | KID#{kid} | status=next\|active\|retired, alg=RS256, kms_key_arn, public_jwk, created_at, activated_at, retired_at |
@@ -163,7 +164,7 @@ erDiagram
 - **Passkeys:** a user's WebAuthn credentials. `{passkey_id}` is the hex SHA-256 of the credential ID, because credential IDs can be up to 1,023 bytes and a sort key at most 1,024. `rp_id` is the login host the passkey was registered on; it works only there. Only the public key is stored. A user can have up to 20. Passkey items have no GSI keys and no `version`: adding one doesn't change the user item.
 - **`version`:** used for optimistic locking. Every admin update increments it, with the condition `version = :expected`.
 - **Login hosts:** a host belongs to an org and serves one of its pools. Every org has a default host, `{label}.login.example.com`, created with the org (with the org's default pool) and never removed; further hosts are custom domains. A custom host is `verified` only when both its certificate has been issued and its DNS (CNAME) points to LiteLogin. Only `verified` hosts serve requests.
-- **Host settings:** the theme, `registration_enabled` and session lifetimes are the host's, and apply to every client on it: a host's pages and sessions are shared by its clients.
+- **Host settings:** the theme, `registration_enabled`, `passkeys_enabled` and session lifetimes are the host's, and apply to every client on it: a host's pages and sessions are shared by its clients.
 - **Memberships:** a client is on a host when `LOGIN_HOST#{host}` / `CLIENT#{client}` exists (with the reverse item `CLIENT#{client}` / `LOGIN_HOST#{host}` for listing a client's hosts). Only clients of the host's org and pool can join it. A client is created on one host and is always on at least one: `host_count` counts its memberships, and removing the last one is refused.
 - **`allowed_origins`:** the browser origins allowed to call `/token` and `/userinfo` cross-origin (CORS). It is configured separately from `redirect_uris`, and is empty for clients that never call these endpoints from a browser.
 - **Signing keys:** private keys never leave KMS. Tokens are signed with the KMS `Sign` API (`RSASSA_PKCS1_V1_5_SHA_256`), and the table holds only the public JWK and the rotation state. KMS returns RSA signatures as raw bytes, which go straight into the JWT. If ES256 is ever added, note that KMS returns ECDSA signatures DER-encoded; they must be converted to the 64-byte `R || S` form that JWTs require.
@@ -428,7 +429,7 @@ Admin invites use the same token: the user is created without a password, and a 
 | Add a passkey | Query `PK=USER#{user}`, `begins_with(SK, "PASSKEY#")` (Select COUNT) and reject at 20. Then TransactWriteItems: Put `USER#{user}` / `PASSKEY#{passkey_id}`, condition `attribute_not_exists(PK)`; ConditionCheck `USER#{user}` / `DETAILS` `status = active AND auth_version = :v`, so a revoked session can't add one. Concurrent adds can exceed 20 by a few; the limit only bounds abuse. |
 | Sign in with a passkey | The assertion's `userHandle` is the user ID: GetItem `USER#{user}` / `DETAILS`, then GetItem `USER#{user}` / `PASSKEY#{passkey_id}`. After verifying, UpdateItem the passkey SET `sign_count`, `backup_state`, `last_used_at`, condition `attribute_exists(PK)` |
 | List a user's passkeys | Query `PK=USER#{user}`, `begins_with(SK, "PASSKEY#")` (strongly consistent) |
-| Rename or remove a passkey | UpdateItem SET `name`, or DeleteItem, `USER#{user}` / `PASSKEY#{passkey_id}`, condition `attribute_exists(PK)` |
+| Rename or remove a passkey | UpdateItem SET `name`, or DeleteItem, `USER#{user}` / `PASSKEY#{passkey_id}`, condition `attribute_exists(PK)`. Removing one then revokes the user's credentials (see "Revoke everything for a user"); on the account page, the browser gets a new session. |
 | Delete a user | The Worker's revocation cleanup, once the user's sessions and refresh families are gone, queries the user's `PASSKEY#` items and deletes them, but only if the user item no longer exists. Revoking sessions never removes passkeys. |
 
 ### Admin: organization, clients and pools
@@ -464,7 +465,7 @@ Admin invites use the same token: the user is created without a password, and a 
 | List a client's hosts | Query `PK=CLIENT#{client}`, `begins_with(SK, "LOGIN_HOST#")`, then BatchGetItem the hosts |
 | List a host's clients | Query `PK=LOGIN_HOST#{host}`, `begins_with(SK, "CLIENT#")` |
 | Add custom host | TransactWriteItems: Put `LOGIN_HOST#{host}` / `DETAILS` (`org_id`, `pool_id`, `type=custom`, `status=pending`, settings, GSI2 work attributes), condition `attribute_not_exists(PK)`; Put `ORG#{org}` / `LOGIN_HOST#{host}`; ConditionCheck `POOL#{pool}` / `DETAILS` `status = active AND org_id = :org`. Hosts under the default host domain can't be added. |
-| Update host settings | UpdateItem `LOGIN_HOST#{host}` / `DETAILS` SET `theme`, `registration_enabled`, `session_ttl`, `session_idle_ttl`, condition `version = :expected` |
+| Update host settings | UpdateItem `LOGIN_HOST#{host}` / `DETAILS` SET `theme`, `registration_enabled`, `passkeys_enabled`, `session_ttl`, `session_idle_ttl`, condition `version = :expected` |
 | Verify custom host | When the certificate has been issued and the host's CNAME points to LiteLogin, UpdateItem SET `status=verified` and REMOVE the GSI2 attributes, condition `status = pending` |
 | Remove custom host | Reject the org's default host, and a host that still has clients (take them off first, so no client is left without a host). Otherwise UpdateItem SET `status=removing` and the GSI2 work attributes. The host stops serving within the config cache's lifetime (30 seconds), because only `verified` hosts resolve, and no client can join it. Once its CloudFront tenant and managed certificate have been removed, the Worker deletes the host and its org index item. |
 | Add client to host | GetItem the host and the client; reject unless they have the same org and pool. TransactWriteItems: Put `LOGIN_HOST#{host}` / `CLIENT#{client}` (condition `attribute_not_exists(PK)`; if it fails, the client is already on the host and nothing changes), Put the reverse item, ConditionCheck the host (`status <> removing`, same org and pool), Update the client ADD `host_count 1` (condition same org and pool). |

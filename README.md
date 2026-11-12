@@ -13,7 +13,7 @@ One deployment serves many **orgs**. Each org has its own users, its own login h
   - refresh tokens, rotated on every use, with reuse detection
   - discovery, JWKS, `/userinfo` and RP-initiated logout
   - an issuer per login host
-- **Sign-in pages:** registration, email verification, password reset, account settings (change password or email, sign out everywhere), and per-host theming.
+- **Sign-in pages:** registration, email verification, password reset, passkeys (WebAuthn), account settings (change password or email, manage passkeys, sign out everywhere), and per-host theming.
 - **Multi-tenant:**
   - orgs, user pools, clients and login hosts
   - single sign-on across the clients on a host

@@ -438,6 +438,32 @@ func TestUsers(t *testing.T) {
 	if out := e.run("", "user", "sessions", u.ID); !strings.Contains(out, "CLIENT_ID") {
 		t.Fatalf("sessions: %s", out)
 	}
+
+	// Passkeys: list, and remove (which revokes the user's sessions).
+	pk := &store.Passkey{UserID: u.ID, CredentialID: []byte("cred"), RPID: "acme.login.test", PublicKey: []byte("k"), Name: "Phone"}
+	stored, _ = e.store.GetUser(context.Background(), u.ID)
+	if err := e.store.CreatePasskey(context.Background(), pk, stored.AuthVersion); err != nil {
+		t.Fatal(err)
+	}
+	var passkeys struct{ Items []admin.Passkey }
+	e.json(&passkeys, "", "user", "passkey", "list", u.ID)
+	if len(passkeys.Items) != 1 || passkeys.Items[0].ID != pk.ID || passkeys.Items[0].RPID != "acme.login.test" || passkeys.Items[0].Name != "Phone" {
+		t.Fatalf("passkey list: %+v", passkeys)
+	}
+	if out := e.run("", "user", "passkey", "remove", u.ID, pk.ID); !strings.Contains(out, "removed passkey") {
+		t.Fatalf("passkey remove: %s", out)
+	}
+	after, _ := e.store.GetUser(context.Background(), u.ID)
+	if after.AuthVersion != stored.AuthVersion+1 {
+		t.Fatalf("removing a passkey didn't revoke: %d -> %d", stored.AuthVersion, after.AuthVersion)
+	}
+	if _, errOut, code := e.try("", "user", "passkey", "remove", u.ID, pk.ID); code == 0 || !strings.Contains(errOut, "not_found") {
+		t.Fatalf("removing again: %q", errOut)
+	}
+	if _, errOut, code := e.try("", "user", "passkey", "list", "no-such-user"); code == 0 || !strings.Contains(errOut, "not_found") {
+		t.Fatalf("unknown user: %q", errOut)
+	}
+
 	e.run("", "user", "delete", u.ID)
 	if _, errOut, code := e.try("", "user", "get", u.ID); code == 0 || !strings.Contains(errOut, "not_found") {
 		t.Fatalf("deleted user: %q", errOut)

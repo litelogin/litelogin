@@ -442,3 +442,65 @@ func (s *Server) revokeSessions(w http.ResponseWriter, r *http.Request) error {
 	writeJSON(w, http.StatusOK, RevokeResult{AuthVersion: v})
 	return nil
 }
+
+// Passkey is the API representation of one of a user's passkeys.
+type Passkey struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// RPID is the login host the passkey was made on, and works on.
+	RPID string `json:"rp_id"`
+	// BackupEligible: the passkey can be synced between devices.
+	BackupEligible bool     `json:"backup_eligible"`
+	BackupState    bool     `json:"backup_state"`
+	Transports     []string `json:"transports"`
+	CreatedAt      string   `json:"created_at"`
+	LastUsedAt     string   `json:"last_used_at,omitempty"`
+}
+
+func (s *Server) listPasskeys(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathValue(r, "user")
+	if err != nil {
+		return err
+	}
+	// 404 for a user that doesn't exist, rather than an empty list.
+	if _, err := s.Store.GetUser(r.Context(), id); err != nil {
+		return err
+	}
+	passkeys, err := s.Store.ListPasskeys(r.Context(), id)
+	if err != nil {
+		return err
+	}
+	out := list[Passkey]{Items: make([]Passkey, 0, len(passkeys))}
+	for _, p := range passkeys {
+		transports := p.Transports
+		if transports == nil {
+			transports = []string{}
+		}
+		out.Items = append(out.Items, Passkey{ID: p.ID, Name: p.Name, RPID: p.RPID, BackupEligible: p.BackupEligible,
+			BackupState: p.BackupState, Transports: transports, CreatedAt: timestamp(p.CreatedAt), LastUsedAt: timestamp(p.LastUsedAt)})
+	}
+	writeJSON(w, http.StatusOK, out)
+	return nil
+}
+
+// deletePasskey removes one of a user's passkeys and, as on the account
+// page, revokes their sessions and refresh tokens: they may have come from
+// it, and the usual reason is a lost device.
+func (s *Server) deletePasskey(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathValue(r, "user")
+	if err != nil {
+		return err
+	}
+	passkey, err := pathValue(r, "passkey")
+	if err != nil {
+		return err
+	}
+	if err := s.Store.DeletePasskey(r.Context(), id, passkey); err != nil {
+		return err
+	}
+	if _, err := s.Store.RevokeUserCredentials(r.Context(), id); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}

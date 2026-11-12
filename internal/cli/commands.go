@@ -379,6 +379,7 @@ func (f *clientFlags) body(cmd *cobra.Command) map[string]any {
 type hostSettingsFlags struct {
 	theme               map[string]string
 	registration        bool
+	passkeys            bool
 	sessionTTL, idleTTL int64
 }
 
@@ -386,17 +387,22 @@ func (f *hostSettingsFlags) register(cmd *cobra.Command) {
 	fl := cmd.Flags()
 	fl.StringToStringVar(&f.theme, "theme", nil, "theme, as key=value pairs (brand_name, primary_color, background_color, logo_url; replaces the theme)")
 	fl.BoolVar(&f.registration, "registration", true, "allow users to register on the login pages")
+	fl.BoolVar(&f.passkeys, "passkeys", false, "let users add passkeys and sign in with them")
 	fl.Int64Var(&f.sessionTTL, "session-ttl", 0, "login session lifetime in seconds")
 	fl.Int64Var(&f.idleTTL, "session-idle-ttl", 0, "login session idle timeout in seconds")
 }
 
 func (f *hostSettingsFlags) body(cmd *cobra.Command) map[string]any {
 	body := changed(cmd, map[string]any{
-		"registration": &f.registration, "session-ttl": &f.sessionTTL, "session-idle-ttl": &f.idleTTL,
+		"registration": &f.registration, "passkeys": &f.passkeys, "session-ttl": &f.sessionTTL, "session-idle-ttl": &f.idleTTL,
 	})
 	if v, ok := body["registration"]; ok {
 		delete(body, "registration")
 		body["registration_enabled"] = v
+	}
+	if v, ok := body["passkeys"]; ok {
+		delete(body, "passkeys")
+		body["passkeys_enabled"] = v
 	}
 	if cmd.Flags().Changed("theme") {
 		body["theme"] = f.theme
@@ -494,7 +500,7 @@ func (a *App) clientCommand() *cobra.Command {
 
 // ---- host ----
 
-var hostColumns = []string{"host", "type", "status", "user_pool_id", "registration_enabled", "version"}
+var hostColumns = []string{"host", "type", "status", "user_pool_id", "registration_enabled", "passkeys_enabled", "version"}
 
 func (a *App) hostCommand() *cobra.Command {
 	var org, client, pool string
@@ -701,13 +707,37 @@ func (a *App) userCommand() *cobra.Command {
 		},
 	}
 
+	passkeys := group("passkey", "Manage a user's passkeys",
+		&cobra.Command{
+			Use: "list USER", Short: "List a user's passkeys", Args: cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				var out struct{ Items []admin.Passkey }
+				if _, err := a.get(cmd, "/v1/users/"+esc(args[0])+"/passkeys", &out); err != nil {
+					return err
+				}
+				return printList(a.Stdout, a.output, out.Items, "", "id", "name", "rp_id", "backup_eligible", "created_at", "last_used_at")
+			},
+		},
+		&cobra.Command{
+			Use: "remove USER PASSKEY", Short: "Remove a user's passkey and log them out everywhere", Args: cobra.ExactArgs(2),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if _, err := a.do(cmd, Request{Method: http.MethodDelete,
+					Path: "/v1/users/" + esc(args[0]) + "/passkeys/" + esc(args[1]), IdempotencyKey: a.NewID()}); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(a.Stdout, "removed passkey %s of user %s\n", args[1], args[0])
+				return nil
+			},
+		},
+	)
+
 	return group("user", "Manage users",
 		create, list,
 		getCommand[admin.User](a, "get USER", "Show a user", "/v1/users/"),
 		upd,
 		actionCommand[admin.User](a, "disable USER", "Disable a user and log them out everywhere", "/v1/users/", "/disable"),
 		actionCommand[admin.User](a, "enable USER", "Enable a disabled user", "/v1/users/", "/enable"),
-		sessions, revoke,
+		sessions, revoke, passkeys,
 		deleteCommand(a, "delete USER", "Delete a user", "/v1/users/", "user"),
 	)
 }

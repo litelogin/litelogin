@@ -16,8 +16,10 @@ import (
 type HostSettings struct {
 	Theme               map[string]string `dynamodbav:"theme,omitempty"`
 	RegistrationEnabled bool              `dynamodbav:"registration_enabled"`
-	SessionTTL          int64             `dynamodbav:"session_ttl"`
-	SessionIdleTTL      int64             `dynamodbav:"session_idle_ttl"`
+	// PasskeysEnabled lets users add passkeys and sign in with them.
+	PasskeysEnabled bool  `dynamodbav:"passkeys_enabled"`
+	SessionTTL      int64 `dynamodbav:"session_ttl"`
+	SessionIdleTTL  int64 `dynamodbav:"session_idle_ttl"`
 }
 
 // LoginHost is a host that serves login pages: LOGIN_HOST#{host} / DETAILS.
@@ -204,6 +206,7 @@ func (s *Store) UpdateHostSettings(ctx context.Context, h *LoginHost) error {
 	err = s.updateVersioned(ctx, key(pfxLoginHost+h.Host, skDetails), h.Version, map[string]types.AttributeValue{
 		"theme":                themeAV,
 		"registration_enabled": avB(h.RegistrationEnabled),
+		"passkeys_enabled":     avB(h.PasskeysEnabled),
 		"session_ttl":          avN(h.SessionTTL),
 		"session_idle_ttl":     avN(h.SessionIdleTTL),
 	}, &it)

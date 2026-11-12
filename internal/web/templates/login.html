@@ -3,10 +3,15 @@
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 {{if .Authz}}<input type="hidden" name="authz" value="{{.Authz}}">{{end}}
 <label for="email">Email</label>
-<input id="email" name="email" type="email" value="{{.Email}}" autocomplete="username" required autofocus>
+<input id="email" name="email" type="email" value="{{.Email}}" autocomplete="{{if .PasskeysEnabled}}username webauthn{{else}}username{{end}}" required autofocus>
 <label for="password">Password</label>
 <input id="password" name="password" type="password" autocomplete="current-password" required>
 <button type="submit">Sign in</button>
 </form>
+{{if .PasskeysEnabled}}<div id="passkey-login" hidden>
+<div class="or">or</div>
+<button type="button" id="passkey-login-button" class="secondary">Sign in with a passkey</button>
+<p class="msg error" id="passkey-error" role="alert" hidden></p>
+</div>{{end}}
 <div class="links"><a href="/password/forgot">Forgot your password?</a>{{if .Registration}}<a href="/register">Create an account</a>{{end}}</div>
 {{end}}
