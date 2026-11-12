@@ -50,6 +50,12 @@ variable "tracing" {
   default     = false
 }
 
+variable "custom_hosts" {
+  description = "Support custom login hosts (e.g. login.example.com), served through a CloudFront multi-tenant distribution. Remove every custom host before turning it off."
+  type        = bool
+  default     = true
+}
+
 variable "rate_limit_exempt_cidrs" {
   description = "Addresses exempt from WAF rate limits, only while a load test runs (test/load/README.md)."
   type        = list(string)
@@ -76,6 +82,7 @@ module "litelogin" {
   alarm_email             = var.alarm_email
   canary_start            = var.canary_start
   tracing                 = var.tracing
+  custom_hosts            = var.custom_hosts
   rate_limit_exempt_cidrs = var.rate_limit_exempt_cidrs
 }
 
@@ -108,7 +115,7 @@ output "auth_function_url" {
 }
 
 output "custom_host_cname_target" {
-  description = "Where custom login hosts' CNAME records point."
+  description = "Where custom login hosts' CNAME records point. Null without custom hosts."
   value       = module.litelogin.custom_host_cname_target
 }
 

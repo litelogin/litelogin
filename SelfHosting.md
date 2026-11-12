@@ -197,6 +197,8 @@ A client on a new host has a new issuer (`https://login.acme.com`), so its app m
 
 To remove a host, move its clients off it, then run `dist/litelogin host remove login.acme.com`. **Tell the domain's owner to delete the CNAME** once it's removed: a record left pointing at LiteLogin can't be claimed by anyone else without an operator, but it shouldn't linger.
 
+Custom hosts are optional. Set `custom_hosts = false` to deploy without them: Terraform doesn't create the multi-tenant distribution and connection group they're served through, `host add` answers that custom hosts aren't configured, and default hosts work as before. Before turning it off in a deployment that has custom hosts, remove every one and wait until `host list` no longer shows them, as in [Removing a deployment](#removing-a-deployment). Turning it off saves nothing by itself, but it leaves the default hosts' distribution as the only user of its web ACL and host function, which a CloudFront flat-rate plan requires ([Cost.md](Cost.md#cloudfront-flat-rate-plans)).
+
 ## Passkeys
 
 Passkeys are off by default. Turn them on per login host:

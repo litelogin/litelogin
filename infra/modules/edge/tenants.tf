@@ -9,14 +9,38 @@
 #
 # The distribution serves requests exactly as the default hosts' one does:
 # the same origin, origin secret, policies, host function and WAF.
+#
+# Optional (custom_hosts): without them, the default hosts' distribution
+# is the only one, and nothing else uses its web ACL or host function,
+# which a CloudFront flat-rate plan requires (Cost.md).
+
+variable "custom_hosts" {
+  description = "Create the multi-tenant distribution and connection group custom login hosts are served through. Remove every custom host before turning it off."
+  type        = bool
+  default     = true
+}
+
+moved {
+  from = aws_cloudfront_connection_group.tenants
+  to   = aws_cloudfront_connection_group.tenants[0]
+}
+
+moved {
+  from = aws_cloudfront_multitenant_distribution.tenants
+  to   = aws_cloudfront_multitenant_distribution.tenants[0]
+}
 
 resource "aws_cloudfront_connection_group" "tenants" {
+  count = var.custom_hosts ? 1 : 0
+
   name         = "${var.name_prefix}-custom-hosts"
   enabled      = true
   ipv6_enabled = true
 }
 
 resource "aws_cloudfront_multitenant_distribution" "tenants" {
+  count = var.custom_hosts ? 1 : 0
+
   enabled      = true
   comment      = "${var.name_prefix} custom login hosts"
   web_acl_id   = aws_wafv2_web_acl.this.arn
@@ -105,24 +129,26 @@ resource "aws_cloudfront_multitenant_distribution" "tenants" {
   }
 }
 
+# The outputs are null without custom hosts.
+
 output "tenant_distribution_id" {
   description = "The multi-tenant distribution custom hosts are tenants of."
-  value       = aws_cloudfront_multitenant_distribution.tenants.id
+  value       = one(aws_cloudfront_multitenant_distribution.tenants[*].id)
 }
 
 output "tenant_distribution_arn" {
-  value = aws_cloudfront_multitenant_distribution.tenants.arn
+  value = one(aws_cloudfront_multitenant_distribution.tenants[*].arn)
 }
 
 output "connection_group_id" {
-  value = aws_cloudfront_connection_group.tenants.id
+  value = one(aws_cloudfront_connection_group.tenants[*].id)
 }
 
 output "connection_group_arn" {
-  value = aws_cloudfront_connection_group.tenants.arn
+  value = one(aws_cloudfront_connection_group.tenants[*].arn)
 }
 
 output "routing_endpoint" {
   description = "Where custom hosts' CNAME records point."
-  value       = aws_cloudfront_connection_group.tenants.routing_endpoint
+  value       = one(aws_cloudfront_connection_group.tenants[*].routing_endpoint)
 }

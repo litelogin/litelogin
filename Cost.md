@@ -145,7 +145,7 @@ Not counted, because they are a few cents or less: SQS (the work queues and dead
 
 **Storage** depends on users, not sign-ins. DynamoDB storage is free up to 25 GB, and point-in-time recovery on the Config table costs $0.20 per GB-month of that table. At about 1 KB a user, 100,000 users are 0.1 GB: $0.02 a month.
 
-**Custom login hosts** are tenants of a CloudFront multi-tenant distribution. The first 10 tenants have no charge; see the CloudFront pricing page for more.
+**Custom login hosts** are tenants of a CloudFront multi-tenant distribution. The first 10 tenants have no charge; see the CloudFront pricing page for more. They are optional (`custom_hosts = false` leaves the distribution out), which costs nothing either way.
 
 ## Totals
 
@@ -195,7 +195,8 @@ So on the Free plan, LiteLogin would lose its stricter rate limit on the sign-in
 Not tested:
 
 - **Pro** lists header-based filtering, and may allow these rules. At $15 a month it costs more than pay-as-you-go up to about 450,000 sign-ins a month, where the WAF ($10 + $0.60 per million requests), the zone and CloudFront's function and request charges add up to $15. At 1 million sign-ins they are $25.80, so Pro would save about $11, though 15 million requests is over Pro's 10 million allowance, which has no overage charge but may slow delivery if exceeded for months.
-- A **wildcard custom domain** (`*.<domain>`) on a plan, and **custom login hosts**: the multi-tenant distribution can't be on a plan, and a plan's web ACL can't be shared with another distribution, so custom hosts would need a web ACL of their own on pay-as-you-go pricing.
+- A **wildcard custom domain** (`*.<domain>`) on a plan.
+- **Custom login hosts**: the multi-tenant distribution can't be on a plan, and a plan's web ACL and CloudFront Function can't be shared with another distribution, so with custom hosts the plan would save nothing: they would need a web ACL of their own at the same $10 a month. A deployment without them (`custom_hosts = false`) has only the default hosts' distribution, which is what a plan needs.
 
 ## Free tier
 
