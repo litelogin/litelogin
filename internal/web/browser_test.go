@@ -329,11 +329,28 @@ func TestPasskeyInChrome(t *testing.T) {
 		t.Fatalf("authenticator credentials = %+v", creds)
 	}
 
-	// Sign out, then sign in with the passkey.
+	// Sign out, then sign in with the passkey button, in a browser
+	// without passkey autofill (as some report): the page then makes no
+	// conditional request.
+	var noAutofill struct {
+		ID string `json:"identifier"`
+	}
+	c.call("Page.addScriptToEvaluateOnNewDocument", map[string]any{
+		"source": `PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false)`,
+	}, &noAutofill)
 	c.eval(`document.querySelector('form[action="/logout"]').submit()`)
 	c.waitFor(`location.pathname === '/login' && !document.querySelector('#passkey-login').hidden`)
 	c.eval(`document.querySelector('#passkey-login-button').click()`)
 	c.waitFor(`location.pathname === '/account'`)
+
+	// Sign out again, and sign in through autofill: Chrome completes the
+	// page's conditional request on its own, since the virtual
+	// authenticator approves every request.
+	c.call("Page.removeScriptToEvaluateOnNewDocument", map[string]any{"identifier": noAutofill.ID}, nil)
+	// The mark tells the account page before signing out from the one
+	// after, which can follow too quickly to see the login page between.
+	c.eval(`window.beforeSignOut = true; document.querySelector('form[action="/logout"]').submit()`)
+	c.waitFor(`!window.beforeSignOut && location.pathname === '/account'`)
 	if body, _ := c.eval(`document.body.innerText`).(string); !strings.Contains(body, "alice@example.com") || !strings.Contains(body, "last used") {
 		t.Fatalf("account page after passkey sign-in:\n%s", body)
 	}
