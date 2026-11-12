@@ -42,6 +42,12 @@ variable "canary_start" {
   default     = false
 }
 
+variable "rate_limit_exempt_cidrs" {
+  description = "Addresses exempt from WAF rate limits, only while a load test runs (test/load/README.md)."
+  type        = list(string)
+  default     = []
+}
+
 variable "default_host_domain" {
   description = "Parent domain of default login hosts ({label}.{domain}). Its DNS is a Route 53 zone in this account, delegated from the parent domain."
   type        = string
@@ -163,6 +169,8 @@ module "edge" {
   domain       = var.default_host_domain
   zone_id      = module.dns.zone_id
   function_url = module.auth.function_url
+
+  rate_limit_exempt_cidrs = var.rate_limit_exempt_cidrs
 }
 
 module "email" {

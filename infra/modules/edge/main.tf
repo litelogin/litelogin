@@ -321,6 +321,26 @@ locals {
   loopback_paths = ["/authorize", "/login", "/logout", "/token"]
 }
 
+variable "rate_limit_exempt_cidrs" {
+  description = "IPv4 CIDRs the rate-based rules don't apply to, e.g. a load generator's address while a load test runs. Keep it empty otherwise."
+  type        = list(string)
+  default     = []
+}
+
+locals {
+  rate_exempt      = length(var.rate_limit_exempt_cidrs) > 0
+  auth_rate_prefix = ["/login", "/register", "/password/", "/token"]
+}
+
+resource "aws_wafv2_ip_set" "rate_exempt" {
+  count              = local.rate_exempt ? 1 : 0
+  name               = "${var.name_prefix}-rate-exempt"
+  description        = "Addresses exempt from the rate-based rules (load testing)."
+  scope              = "CLOUDFRONT"
+  ip_address_version = "IPV4"
+  addresses          = var.rate_limit_exempt_cidrs
+}
+
 resource "aws_wafv2_web_acl" "this" {
   name  = "${var.name_prefix}-edge"
   scope = "CLOUDFRONT"
@@ -340,19 +360,57 @@ resource "aws_wafv2_web_acl" "this" {
         limit              = var.auth_rate_limit
         aggregate_key_type = "IP"
         scope_down_statement {
-          or_statement {
-            dynamic "statement" {
-              for_each = ["/login", "/register", "/password/", "/token"]
-              content {
-                byte_match_statement {
-                  search_string         = statement.value
-                  positional_constraint = "STARTS_WITH"
-                  field_to_match {
-                    uri_path {}
+          dynamic "or_statement" {
+            for_each = local.rate_exempt ? [] : [1]
+            content {
+              dynamic "statement" {
+                for_each = local.auth_rate_prefix
+                content {
+                  byte_match_statement {
+                    search_string         = statement.value
+                    positional_constraint = "STARTS_WITH"
+                    field_to_match {
+                      uri_path {}
+                    }
+                    text_transformation {
+                      priority = 0
+                      type     = "LOWERCASE"
+                    }
                   }
-                  text_transformation {
-                    priority = 0
-                    type     = "LOWERCASE"
+                }
+              }
+            }
+          }
+          # With exempt addresses: the auth endpoints, from anywhere else.
+          dynamic "and_statement" {
+            for_each = local.rate_exempt ? [1] : []
+            content {
+              statement {
+                or_statement {
+                  dynamic "statement" {
+                    for_each = local.auth_rate_prefix
+                    content {
+                      byte_match_statement {
+                        search_string         = statement.value
+                        positional_constraint = "STARTS_WITH"
+                        field_to_match {
+                          uri_path {}
+                        }
+                        text_transformation {
+                          priority = 0
+                          type     = "LOWERCASE"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              statement {
+                not_statement {
+                  statement {
+                    ip_set_reference_statement {
+                      arn = aws_wafv2_ip_set.rate_exempt[0].arn
+                    }
                   }
                 }
               }
@@ -378,6 +436,18 @@ resource "aws_wafv2_web_acl" "this" {
       rate_based_statement {
         limit              = var.global_rate_limit
         aggregate_key_type = "IP"
+        dynamic "scope_down_statement" {
+          for_each = local.rate_exempt ? [1] : []
+          content {
+            not_statement {
+              statement {
+                ip_set_reference_statement {
+                  arn = aws_wafv2_ip_set.rate_exempt[0].arn
+                }
+              }
+            }
+          }
+        }
       }
     }
     visibility_config {
