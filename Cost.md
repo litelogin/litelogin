@@ -172,8 +172,30 @@ For a different refresh rate, add or remove N × $0.00001514 for each refresh pe
 - **DynamoDB writes** are the largest per-request cost: 19 write units per sign-in, 16 of them the code exchange's transaction, which saves the refresh token, the session's tokens and the code's use in one step.
 - **KMS `Sign`**: $0.000003 per token. Every sign-in and refresh signs two.
 - **X-Ray**: turning on the Auth Lambda's tracing (`tracing = true`) adds up to $0.000005 a request.
-- **The WAF** is almost half the fixed cost. It is shared by every login host in the deployment, so it doesn't grow with organizations or hosts.
+- **The WAF** is almost half the fixed cost. It is shared by every login host in the deployment, so it doesn't grow with organizations or hosts. A CloudFront flat-rate plan could include it, but not on the Free plan: see below.
 - **Data transfer** is small: 20 KB a sign-in is 20 GB at 1 million sign-ins, $1.62.
+
+## CloudFront flat-rate plans
+
+CloudFront's flat-rate plans include the web ACL, its rules and requests, CloudFront's requests and data, and the Route 53 hosted zone, for a monthly price per distribution: Free ($0, 1 million requests a month), Pro ($15, 10 million), Business ($200) and Premium ($1,000). They have no overage charges. On the Free plan, LiteLogin would save the WAF's $10 and the zone's $0.50 a month.
+
+A spike on 2026-11-12 subscribed a copy of LiteLogin's main distribution and web ACL, in the dev account, to the Free plan (`aws pricing-plan-manager create-subscription`; Terraform's AWS provider has `aws_pricingplanmanager_subscription`). It found:
+
+| | On the Free plan |
+| -- | -- |
+| The Auth Lambda's function URL as the origin, a CloudFront Function of its own, HTTP/3, IPv6 | Allowed |
+| `PriceClass_100` | Not allowed: a distribution on a plan uses every edge location (at no extra cost) |
+| A rate-based rule per IP, without a scope-down (`global-rate`) | Allowed |
+| AWS managed rule groups (IP reputation, the Common rule set with rules overridden to count) | Allowed |
+| A rate-based rule scoped down to paths (`auth-endpoints-rate`) | Not allowed (`WAFFeatureNotIncludedInPricingPlanException`) |
+| Any other rule with a match statement: a URI path, or a label (`loopback-redirects`) | Not allowed |
+
+So on the Free plan, LiteLogin would lose its stricter rate limit on the sign-in endpoints (300 requests per 5 minutes per IP, against 3,000 for everything), and the four Common rule set rules that `loopback-redirects` blocks outside sign-in and logout would have to count everywhere. Per-account lockout would still protect passwords, but per-IP credential stuffing would meet a limit ten times higher. That isn't worth $10.50 a month, so LiteLogin stays on pay-as-you-go pricing.
+
+Not tested:
+
+- **Pro** lists header-based filtering, and may allow these rules. At $15 a month it costs more than pay-as-you-go up to about 450,000 sign-ins a month, where the WAF ($10 + $0.60 per million requests), the zone and CloudFront's function and request charges add up to $15. At 1 million sign-ins they are $25.80, so Pro would save about $11, though 15 million requests is over Pro's 10 million allowance, which has no overage charge but may slow delivery if exceeded for months.
+- A **wildcard custom domain** (`*.<domain>`) on a plan, and **custom login hosts**: the multi-tenant distribution can't be on a plan, and a plan's web ACL can't be shared with another distribution, so custom hosts would need a web ACL of their own on pay-as-you-go pricing.
 
 ## Free tier
 
