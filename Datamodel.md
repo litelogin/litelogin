@@ -151,6 +151,7 @@ erDiagram
 | POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, created_at, updated_at, version, (while deleting) GSI2PK=WORK, GSI2SK=pool_deletion#{pool}, work_attempts, work_updated_at |
 | USER#{user} | DETAILS | pool_id, email=example@example.com, password_hash="$argon2id$v=19$m=19456,t=2,p=1$...", email_verified=true, status=active\|disabled, auth_version=1, failed_login_count, locked_until, password_updated_at, created_at, updated_at, version, GSI1PK=POOL#{pool}, GSI1SK=EMAIL#{email} |
 | POOL#{pool}#EMAIL#{email} | EMAIL | user_id |
+| USER#{user} | PASSKEY#{passkey_id} | credential_id, rp_id, public_key (COSE), attestation_type, transports, aaguid, attachment, sign_count, backup_eligible, backup_state, name, created_at, last_used_at |
 | CLIENT#{client} | DETAILS | org_id, name=LiteLogin, description, status=active\|disabled, client_type=public\|confidential, client_secret_hash, token_endpoint_auth_method=none\|client_secret_basic\|client_secret_post, grant_types=[authorization_code, refresh_token], redirect_uris=[https://login.microsoftonline.com/common/oauth2/nativeclient], post_logout_redirect_uris=[], allowed_origins=[https://app.acme.com], allowed_scopes=[openid, email, offline_access], user_pool_id={pool} (the pool of the host it was created on; fixed), pkce_optional (absent = PKCE required; only on confidential clients), access_token_ttl=900, id_token_ttl=900, refresh_token_ttl=2592000, refresh_family_ttl=7776000, host_count=1, created_at, updated_at, version |
 | LOGIN_HOST#{login_host} | DETAILS | org_id, pool_id, type=default\|custom, status=pending\|verified\|removing, theme={...}, registration_enabled=true, session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version, (while pending or removing) GSI2PK=WORK, GSI2SK=custom_domain#{login_host}, work_attempts, work_updated_at, work_last_error |
 | LOGIN_HOST#{login_host} | CLIENT#{client} | client_id |
@@ -159,6 +160,7 @@ erDiagram
 
 - **Times:** all times are epoch seconds and all TTLs are in seconds.
 - **Client secrets:** a client secret is a 256-bit random value, so it's stored as a SHA-256 hash (a slow password hash isn't needed) and compared in constant time. Public clients have no secret and `token_endpoint_auth_method=none`.
+- **Passkeys:** a user's WebAuthn credentials. `{passkey_id}` is the hex SHA-256 of the credential ID, because credential IDs can be up to 1,023 bytes and a sort key at most 1,024. `rp_id` is the login host the passkey was registered on; it works only there. Only the public key is stored. A user can have up to 20. Passkey items have no GSI keys and no `version`: adding one doesn't change the user item.
 - **`version`:** used for optimistic locking. Every admin update increments it, with the condition `version = :expected`.
 - **Login hosts:** a host belongs to an org and serves one of its pools. Every org has a default host, `{label}.login.example.com`, created with the org (with the org's default pool) and never removed; further hosts are custom domains. A custom host is `verified` only when both its certificate has been issued and its DNS (CNAME) points to LiteLogin. Only `verified` hosts serve requests.
 - **Host settings:** the theme, `registration_enabled` and session lifetimes are the host's, and apply to every client on it: a host's pages and sessions are shared by its clients.
@@ -205,6 +207,7 @@ Holds short-lived authentication state: browser sessions, authorization codes, r
 | REFRESH_FAMILY#{family} | DETAILS | iss, client_id, pool_id, user_id, scope, auth_version, auth_time, amr (copied from the code), created_at, expires_at (absolute lifetime), GSI1PK=USER#{user}, GSI1SK=REFRESH_FAMILY#{created_at} |
 | REFRESH#{token_hash} | DETAILS | family_id, client_id, used_at, expires_at |
 | OTT#{token_hash} | DETAILS | purpose=verify_email\|reset_password\|change_email, pool_id, user_id, email, new_email, expires_at |
+| WEBAUTHN#{challenge_hash} | DETAILS | purpose=passkey_register\|passkey_login, host, user_id and session_hash (registration only), data (the ceremony's WebAuthn session data), expires_at (now + 5 min) |
 | IDEMPOTENCY#{caller_hash}#{key} | DETAILS | request_hash, status=in_progress\|completed, response_status, response_body, expires_at (now + 24h) |
 
 - **Idempotency keys:** `IDEMPOTENCY` items record admin API requests sent with an `Idempotency-Key` header. `{caller_hash}` is a SHA-256 of the caller's IAM principal ARN, so keys are scoped per caller.
@@ -415,6 +418,18 @@ Admin invites use the same token: the user is created without a password, and a 
    - Delete `POOL#{pool}#EMAIL#{old_email}` / `EMAIL`, condition `user_id = :user`
    - Update `USER#{user}` / `DETAILS` SET `email = :new`, `GSI1SK = EMAIL#{new_email}`, `email_verified = true`, condition `email = :old`
 3. If the transaction fails on the new email item, show "email already in use."
+
+### Passkeys
+
+| Operation | DynamoDB |
+| -- | -- |
+| Start a ceremony | Put `WEBAUTHN#{challenge_hash}` / `DETAILS` (`purpose`, `host`, the session data; for registration also `user_id` and `session_hash`), condition `attribute_not_exists(PK)` |
+| Finish a ceremony | DeleteItem `WEBAUTHN#{challenge_hash}` / `DETAILS`, condition `purpose = :purpose AND host = :host AND expires_at > :now`, ReturnValues `ALL_OLD`. Exactly one concurrent attempt gets the session data, so each challenge works once. |
+| Add a passkey | Query `PK=USER#{user}`, `begins_with(SK, "PASSKEY#")` (Select COUNT) and reject at 20. Then TransactWriteItems: Put `USER#{user}` / `PASSKEY#{passkey_id}`, condition `attribute_not_exists(PK)`; ConditionCheck `USER#{user}` / `DETAILS` `status = active AND auth_version = :v`, so a revoked session can't add one. Concurrent adds can exceed 20 by a few; the limit only bounds abuse. |
+| Sign in with a passkey | The assertion's `userHandle` is the user ID: GetItem `USER#{user}` / `DETAILS`, then GetItem `USER#{user}` / `PASSKEY#{passkey_id}`. After verifying, UpdateItem the passkey SET `sign_count`, `backup_state`, `last_used_at`, condition `attribute_exists(PK)` |
+| List a user's passkeys | Query `PK=USER#{user}`, `begins_with(SK, "PASSKEY#")` (strongly consistent) |
+| Rename or remove a passkey | UpdateItem SET `name`, or DeleteItem, `USER#{user}` / `PASSKEY#{passkey_id}`, condition `attribute_exists(PK)` |
+| Delete a user | The Worker's revocation cleanup, once the user's sessions and refresh families are gone, queries the user's `PASSKEY#` items and deletes them, but only if the user item no longer exists. Revoking sessions never removes passkeys. |
 
 ### Admin: organization, clients and pools
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 // left; a call returns a cursor until the last one.
 type fakeStore struct {
 	calls     []string // "user cursor"
+	passkeys  []string // users whose passkeys were cleaned up
 	remaining map[string]int
 	fail      map[string]bool
 
@@ -36,6 +38,13 @@ func (f *fakeStore) CleanupUserCredentials(_ context.Context, userID, cursor str
 		return limit, fmt.Sprintf("c%d", len(f.calls)), nil
 	}
 	return 1, "", nil
+}
+
+// CleanupDeletedUserPasskeys records that the user's passkeys were cleaned
+// up, after their credentials.
+func (f *fakeStore) CleanupDeletedUserPasskeys(_ context.Context, userID string) (int, error) {
+	f.passkeys = append(f.passkeys, userID)
+	return 0, nil
 }
 
 type fakeQueue struct{ sent []Job }
@@ -111,13 +120,19 @@ func TestStreamCleanup(t *testing.T) {
 	if len(q.sent) != 1 || q.sent[0].UserID != "u2" || q.sent[0].Cursor != "c4" {
 		t.Fatalf("continuations = %+v", q.sent)
 	}
+	// Passkeys are cleaned up once a user's credentials are done, not
+	// while a job continues.
+	if !slices.Equal(st.passkeys, []string{"u1"}) {
+		t.Fatalf("passkey cleanups = %q, want [u1]", st.passkeys)
+	}
 
 	// The continuation carries on from its cursor.
 	body, _ := json.Marshal(q.sent[0])
 	q.sent = nil
 	sqsResp := w.HandleQueue(context.Background(), events.SQSEvent{Records: []events.SQSMessage{{MessageId: "m1", Body: string(body)}}})
-	if len(sqsResp.BatchItemFailures) != 0 || st.calls[4] != "u2 c4" || st.remaining["u2"] != 0 || len(q.sent) != 0 {
-		t.Fatalf("continuation: failures %+v, calls %q, sent %+v", sqsResp.BatchItemFailures, st.calls, q.sent)
+	if len(sqsResp.BatchItemFailures) != 0 || st.calls[4] != "u2 c4" || st.remaining["u2"] != 0 || len(q.sent) != 0 ||
+		!slices.Equal(st.passkeys, []string{"u1", "u2"}) {
+		t.Fatalf("continuation: failures %+v, calls %q, sent %+v, passkeys %q", sqsResp.BatchItemFailures, st.calls, q.sent, st.passkeys)
 	}
 }
 

@@ -40,6 +40,7 @@ import (
 // Store is the part of *store.Store the Worker uses.
 type Store interface {
 	CleanupUserCredentials(ctx context.Context, userID, cursor string, limit int) (int, string, error)
+	CleanupDeletedUserPasskeys(ctx context.Context, userID string) (int, error)
 
 	GetLoginHost(ctx context.Context, host string) (*store.LoginHost, error)
 	VerifyHost(ctx context.Context, host string) error
@@ -315,7 +316,13 @@ func (w *Worker) cleanup(ctx context.Context, job *Job) error {
 		deleted += n
 		cursor = next
 		if cursor == "" {
-			w.log().InfoContext(ctx, "revocation cleanup done", "user_id", job.UserID, "deleted", deleted)
+			// A deleted user's passkeys go too (a user that still exists
+			// keeps them: revoking sessions doesn't remove passkeys).
+			passkeys, err := w.Store.CleanupDeletedUserPasskeys(ctx, job.UserID)
+			if err != nil {
+				return err
+			}
+			w.log().InfoContext(ctx, "revocation cleanup done", "user_id", job.UserID, "deleted", deleted, "passkeys_deleted", passkeys)
 			return nil
 		}
 	}

@@ -211,3 +211,15 @@ func countErrs(errs []error, target error) int {
 	}
 	return n
 }
+
+func TestRaceConsumeWebAuthnChallenge(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	c := &WebAuthnChallenge{Hash: newHash(), Purpose: ChallengePasskeyLogin, Host: f.host, Data: []byte("d")}
+	must(t, e.CreateWebAuthnChallenge(e.ctx, c, time.Minute))
+	errs := race(func(int) error {
+		_, err := e.ConsumeWebAuthnChallenge(e.ctx, c.Hash, ChallengePasskeyLogin, f.host)
+		return err
+	})
+	oneWinner(t, errs, ErrNotFound)
+}

@@ -142,6 +142,11 @@ data "aws_iam_policy_document" "worker" {
     actions   = ["dynamodb:BatchWriteItem"]
     resources = [var.session_table_arn]
   }
+  # A deleted user's passkeys (USER#{user} / PASSKEY#*), found with Query.
+  statement {
+    actions   = ["dynamodb:BatchWriteItem"]
+    resources = [var.config_table_arn]
+  }
 
   # Custom hosts and pool deletion: hosts, pools and their org index items,
   # outstanding work (GSI2), a pool's users (GSI1) and their memberships.
