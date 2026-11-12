@@ -303,6 +303,8 @@ func (e *env) serveOnLocalhost() string {
 func TestPasskeyInChrome(t *testing.T) {
 	e := newEnv(t, false)
 	c := startChrome(t)
+	// Chrome versions differ in their passkey autofill, so say which ran.
+	t.Logf("browser: %v", c.eval(`navigator.userAgent`))
 	base := e.serveOnLocalhost()
 
 	c.call("WebAuthn.enable", map[string]any{"enableUI": false}, nil)
@@ -346,12 +348,22 @@ func TestPasskeyInChrome(t *testing.T) {
 
 	// Sign out, then sign in with the passkey button, in a browser
 	// without passkey autofill (as some report): the page then makes no
-	// conditional request.
+	// conditional request. Some Chrome versions run the page's autofill
+	// request even so, and the virtual authenticator approves it at once,
+	// signing in before the login page can be seen: so a conditional
+	// request also never completes.
 	var noAutofill struct {
 		ID string `json:"identifier"`
 	}
 	c.call("Page.addScriptToEvaluateOnNewDocument", map[string]any{
-		"source": `PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false)`,
+		"source": `
+			Object.defineProperty(PublicKeyCredential, 'isConditionalMediationAvailable', {
+				value: () => Promise.resolve(false), configurable: true, writable: true,
+			});
+			const get = CredentialsContainer.prototype.get;
+			CredentialsContainer.prototype.get = function (options) {
+				return options && options.mediation === 'conditional' ? new Promise(() => {}) : get.call(this, options);
+			};`,
 	}, &noAutofill)
 	c.eval(`document.querySelector('form[action="/logout"]').submit()`)
 	c.waitFor(`location.pathname === '/login' && !document.querySelector('#passkey-login').hidden`)
