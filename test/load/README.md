@@ -38,7 +38,7 @@ and an error rate under 0.1% for every step, no skipped arrivals, and at least 9
    terraform apply exempt.tfplan
    ```
 
-   and plan and apply without the variable afterwards. (A deploy from the pipeline also removes it.)
+   and plan and apply without the variable afterwards. (A deploy from the pipeline also removes it.) The IP set is deleted only after the web ACL stops using it (`create_before_destroy`). An IP set created before that setting was added can't be removed in one apply, because WAF refuses to delete a set that's still in use (`WAFAssociatedItemException`). In that case, run `terraform state rm 'module.edge.aws_wafv2_ip_set.rate_exempt[0]'`, then plan and apply the edge module, then delete the set with `aws wafv2 delete-ip-set`.
 4. **A client and users.** A public client on the login host with redirect URI `http://127.0.0.1/callback` (never requested) and `offline_access`, and test users in its pool, verified, with known passwords. Sign-ins rotate through the users, so 100 users at 50 sign-ins/s is one sign-in per user every 2 seconds. Use addresses at `simulator.amazonses.com`, so that nothing reaches a real mailbox. Write them to a CSV of `email,password`.
 
 ## Run
@@ -51,3 +51,18 @@ go run ./test/load -issuer https://<login host> -client-id <client> -users users
 Before the timed run, the tool signs in once and seeds the refresh chains (4 seconds' worth of refreshes, at the sign-in rate). It exits 0 if every target is met, 1 if not, and 2 on a setup error.
 
 Each run leaves sessions, codes and refresh tokens in the Session table; they expire with its TTL.
+
+## Results
+
+`dev`, 2026-11-12: 50 sign-ins/s and 200 refreshes/s for 5 minutes after a 1-minute ramp, from one machine through CloudFront. **Passed**, with no errors and no skipped arrivals.
+
+| Step | p50 | p99 |
+| -- | -- | -- |
+| `authorize` | 25 ms | 72 ms |
+| `login_page` | 26 ms | 50 ms |
+| `login_post` | 118 ms | 164 ms |
+| `authorize_return` | 35 ms | 60 ms |
+| `token_code` | 63 ms | 114 ms |
+| `token_refresh` | 65 ms | 137 ms |
+
+Server side, there was no KMS, DynamoDB or Lambda throttling, and no Lambda errors. KMS `Sign` took p50 7 ms and p99 19 ms, `/token` p50 39 ms and p99 72 ms, and the password check p50 80 ms and p99 116 ms. The Auth Lambda's concurrency peaked at 91. The account had started with a concurrency quota of 10 and was raised to 1000 first.

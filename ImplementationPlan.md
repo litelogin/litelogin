@@ -259,6 +259,8 @@ Built so far (observability): `internal/metrics` (embedded metric format records
 
 Built so far (load testing and security): `test/load` and its README, and the WAF exemption it needs (`rate_limit_exempt_cidrs`); ThreatModel.md, a review of each threat against the implementation, with findings; pinned toolchain, tools, Actions and images, Dependabot, and reproducible builds; a build-once pipeline that deploys the same checksummed packages everywhere; and `infra/modules/codesigning`, which signs every Lambda package with AWS Signer and enforces it.
 
+Load test on `dev` (test/load/README.md, "Results"): 50 sign-ins/s and 200 refreshes/s passed every latency target with no errors and no throttling. The p99 latencies were 164 ms for the login POST, 114 ms for the code exchange and 137 ms for a refresh. The account's Lambda concurrency quota had to be raised from 10 first; qa and prod need the same request.
+
 **Done when:** load tests meet the latency targets with no throttling, the canary has been green in qa for a week, and the self-hosting guide has been followed from scratch by someone who didn't write it.
 
 ## Testing strategy

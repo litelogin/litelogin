@@ -335,10 +335,16 @@ locals {
 resource "aws_wafv2_ip_set" "rate_exempt" {
   count              = local.rate_exempt ? 1 : 0
   name               = "${var.name_prefix}-rate-exempt"
-  description        = "Addresses exempt from the rate-based rules (load testing)."
+  description        = "Addresses exempt from the rate-based rules, for load testing"
   scope              = "CLOUDFRONT"
   ip_address_version = "IPV4"
   addresses          = var.rate_limit_exempt_cidrs
+
+  # Delete it only after the web ACL stops referring to it; otherwise WAF
+  # refuses (WAFAssociatedItemException).
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_wafv2_web_acl" "this" {
