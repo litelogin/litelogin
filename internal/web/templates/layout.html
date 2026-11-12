@@ -1,0 +1,97 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="color-scheme" content="light">
+<title>{{.Title}} · {{.Brand}}</title>
+<style nonce="{{.Nonce}}">
+:root{
+  --primary:{{.Theme.Primary}};
+  --text:#fff;--muted:rgba(255,255,255,.72);--link:#fff;
+  --card:rgba(255,255,255,.10);--card-line:rgba(255,255,255,.22);--card-shadow:0 24px 60px rgba(8,10,40,.35);
+  --field:rgb(255 255 255 / 14%);--field-text:#dedfe8;--field-line:transparent;
+  --err-bg:rgba(220,38,38,.22);--err:#fff;--ok-bg:rgba(34,197,94,.22);--ok:#fff;
+  --avatar:rgba(255,255,255,.22);--avatar-fg:rgba(255,255,255,.92);
+}
+*{box-sizing:border-box}
+html{min-height:100%}
+body{
+  margin:0;min-height:100vh;color:var(--text);
+  font:16px/1.5 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  display:flex;align-items:center;justify-content:center;padding:48px 16px;
+  background-color:#1a2366;
+  background-image:
+    radial-gradient(ellipse 70% 60% at 100% 0%,#0a0f4a 0%,transparent 70%),
+    radial-gradient(ellipse 60% 55% at 0% 38%,#1b9aa5 0%,transparent 90%),
+    radial-gradient(ellipse 65% 50% at 0% 100%,#e0728f 0%,transparent 90%),
+    radial-gradient(ellipse 55% 45% at 100% 100%,#8f6f39 0%,transparent 90%),
+    radial-gradient(ellipse 60% 50% at 50% 75%,#5a4b8a 0%,transparent 75%),
+    linear-gradient(160deg,#16206a 0%,#232b6e 55%,#6b4d7d 100%);
+  background-attachment:fixed;
+}
+{{if .Theme.Background}}
+:root{
+  --text:#18181b;--muted:#52525b;--link:var(--primary);
+  --card:#fff;--card-line:transparent;--card-shadow:0 1px 3px rgba(0,0,0,.08),0 12px 32px rgba(0,0,0,.06);
+  --field:#fff;--field-text:#18181b;--field-line:#d4d4d8;
+  --err-bg:#fef2f2;--err:#b91c1c;--ok-bg:#f0fdf4;--ok:#166534;
+  --avatar:#f4f4f5;--avatar-fg:#a1a1aa;
+}
+body{background:{{.Theme.Background}}}
+{{end}}
+main{
+  width:100%;max-width:400px;padding:40px 32px 32px;border-radius:.5em;
+  background:var(--card);border:1px solid var(--card-line);box-shadow:var(--card-shadow);
+  -webkit-backdrop-filter:blur(24px) saturate(140%);backdrop-filter:blur(24px) saturate(140%);
+}
+.brand{display:flex;flex-direction:column;align-items:center;gap:12px;margin:0 0 20px;font-weight:600;letter-spacing:.01em}
+.avatar{width:72px;height:72px;border-radius:50%;background:var(--avatar);display:flex;align-items:center;justify-content:center;overflow:hidden}
+.avatar svg{width:44px;height:44px;fill:var(--avatar-fg);margin-top:10px}
+.brand img{max-height:56px;max-width:200px}
+h1{font-size:22px;font-weight:600;text-align:center;margin:0 0 24px}
+label{display:block;font-size:13px;font-weight:500;color:var(--muted);margin:16px 0 6px}
+input[type=email],input[type=password]{
+  width:100%;padding:12px 14px;font:inherit;color:var(--field-text);
+  background:var(--field);border:1px solid var(--field-line);border-radius:.25em;
+  transition:box-shadow .15s ease;
+}
+input:focus{outline:none;box-shadow:0 0 0 3px rgba(255,255,255,.45),0 0 0 5px var(--primary)}
+button{
+  width:100%;margin-top:28px;padding:12px;font:inherit;font-weight:600;letter-spacing:.02em;color:#fff;
+  background:var(--primary);border:0;border-radius:.25em;cursor:pointer;
+  box-shadow:0 8px 20px rgba(10,12,40,.25);transition:filter .15s ease,transform .15s ease;
+}
+button:hover{filter:brightness(1.15)}
+button:active{transform:translateY(1px)}
+button:focus-visible{outline:3px solid rgba(255,255,255,.7);outline-offset:2px}
+.msg{padding:10px 14px;border-radius:10px;font-size:14px;margin:0 0 16px}
+.error{background:var(--err-bg);color:var(--err)}
+.notice{background:var(--ok-bg);color:var(--ok)}
+.links{margin-top:22px;font-size:14px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+a{color:var(--link);text-decoration:none;opacity:.9}
+a:hover{text-decoration:underline;opacity:1}
+p{margin:0 0 12px}
+.hint{font-size:13px;color:var(--muted);margin:6px 0 0}
+dl{margin:0}dt{font-size:13px;color:var(--muted)}dd{margin:0 0 12px}
+section{margin-top:32px;padding-top:24px;border-top:1px solid rgba(127,127,127,.3)}
+h2{font-size:17px;font-weight:600;margin:0 0 12px}
+button.secondary{margin-top:12px;background:transparent;color:var(--link);border:1px solid currentColor;box-shadow:none}
+.sessions{list-style:none;margin:0 0 8px;padding:0}
+.sessions li{padding:12px 0;border-bottom:1px solid rgba(127,127,127,.3)}
+.sessions li:last-child{border-bottom:0}
+.tag{font-size:12px;padding:1px 8px;border-radius:999px;background:var(--ok-bg);color:var(--ok);margin-left:6px}
+@media (prefers-reduced-transparency:reduce){main{-webkit-backdrop-filter:none;backdrop-filter:none;background:rgba(30,34,90,.92)}}
+</style>
+</head>
+<body>
+<main>
+<div class="brand">{{if .Theme.LogoURL}}<img src="{{.Theme.LogoURL}}" alt="">{{else}}<span class="avatar" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="5"/><path d="M2 24c0-6 4.5-9.5 10-9.5S22 18 22 24z"/></svg></span>{{end}}<span>{{.Brand}}</span></div>
+<h1>{{.Title}}</h1>
+{{if .Error}}<p class="msg error" role="alert">{{.Error}}</p>{{end}}
+{{if .Notice}}<p class="msg notice" role="status">{{.Notice}}</p>{{end}}
+{{template "content" .}}
+</main>
+</body>
+</html>{{end}}

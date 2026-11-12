@@ -1,0 +1,10 @@
+Confirm your new email
+
+Someone asked to change the email address of a {{.Brand}} account to this one.
+
+Confirm this email:
+{{.Link}}
+
+This link works for {{.Expires}}. If you didn't ask for this, you can ignore this email: nothing will change.
+
+-- {{.Brand}} ({{.Host}})

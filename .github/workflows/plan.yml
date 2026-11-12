@@ -1,0 +1,114 @@
+# Shows the Terraform plan for each environment on pull requests, using the
+# account's read-only litelogin-plan role.
+#
+# Pull requests from forks get no OIDC token from GitHub, so they can't
+# assume the role; the jobs are skipped for them. Never change this workflow
+# to pull_request_target, which would hand that token to fork code.
+#
+# The environments planned are those scripts/bootstrap-account.sh --github
+# has set up (repository variable TF_STATE_BUCKET_<ENV>) that also have a
+# root module in infra/envs/<env>. A fork that hasn't bootstrapped an
+# account plans nothing.
+
+name: Plan
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - "Makefile"
+      - ".github/workflows/plan.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TERRAFORM_VERSION: "1.17.1"
+  TF_IN_AUTOMATION: "1"
+
+jobs:
+  environments:
+    name: Find environments
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: infra/envs
+
+      # Repository variables aren't secret; only their names are used here.
+      - id: find
+        env:
+          VARS: ${{ toJSON(vars) }}
+        run: |
+          matrix="$(jq -c '[keys[] | capture("^TF_STATE_BUCKET_(?<suffix>[A-Z0-9]+)$") | .environment = (.suffix | ascii_downcase) | {environment, vars_suffix: .suffix}]' <<<"$VARS")"
+          matrix="$(jq -c '[.[] | select(.environment | IN($dirs[]))]' --argjson dirs "$(ls infra/envs | jq -R . | jq -sc .)" <<<"$matrix")"
+          echo "Environments to plan: ${matrix}"
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
+  plan:
+    name: Plan ${{ matrix.environment }}
+    needs: environments
+    if: needs.environments.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.environments.outputs.matrix) }}
+    concurrency:
+      group: plan-${{ github.event.pull_request.number }}-${{ matrix.environment }}
+      cancel-in-progress: true
+    env:
+      ENVIRONMENT: ${{ matrix.environment }}
+      STATE_BUCKET: ${{ vars[format('TF_STATE_BUCKET_{0}', matrix.vars_suffix)] }}
+      REGION: ${{ vars[format('AWS_REGION_{0}', matrix.vars_suffix)] }}
+    steps:
+      - name: Check variables
+        run: |
+          [[ -n "$STATE_BUCKET" && -n "$REGION" ]] || { echo "repository variables are missing; run scripts/bootstrap-account.sh --github"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars[format('AWS_PLAN_ROLE_ARN_{0}', matrix.vars_suffix)] }}
+          aws-region: ${{ env.REGION }}
+
+      - name: Build Lambda packages
+        run: make package
+
+      - name: Terraform init
+        working-directory: infra/envs/${{ matrix.environment }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${STATE_BUCKET}" \
+            -backend-config="key=litelogin/${ENVIRONMENT}/terraform.tfstate" \
+            -backend-config="region=${REGION}"
+
+      - name: Terraform plan
+        working-directory: infra/envs/${{ matrix.environment }}
+        run: |
+          terraform plan -input=false -no-color -lock-timeout=5m -var "region=${REGION}" -out=plan.tfplan
+          {
+            echo "## Terraform plan: ${ENVIRONMENT}"
+            echo '```'
+            terraform show -no-color plan.tfplan | head -c 60000
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

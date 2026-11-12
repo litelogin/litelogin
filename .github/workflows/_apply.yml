@@ -1,0 +1,166 @@
+# Reusable: verify the build, apply and smoke-test one environment.
+#
+# Runs in the GitHub environment named by `environment`. Only jobs in that
+# environment can assume the account's litelogin-deploy role, and the
+# environment's protection rules (main branch only; approval for prod)
+# decide whether the job may run.
+
+name: Apply
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: dev, qa or prod
+        required: true
+        type: string
+      ref:
+        description: Commit to deploy
+        required: true
+        type: string
+      artifact:
+        description: Name of the build's Lambda packages artifact (deploy.yml's build job)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TERRAFORM_VERSION: "1.17.1"
+  TF_IN_AUTOMATION: "1"
+
+jobs:
+  apply:
+    name: Apply ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT: ${{ inputs.environment }}
+      STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - name: Check inputs
+        run: |
+          [[ "$ENVIRONMENT" =~ ^(dev|qa|prod)$ ]] || { echo "unknown environment: $ENVIRONMENT"; exit 1; }
+          [[ -n "$STATE_BUCKET" && -n "$REGION" ]] || { echo "environment variables are missing; run scripts/bootstrap-account.sh --github"; exit 1; }
+
+      # Deploys run in the order their CI finishes, not the order of the
+      # commits, so an older commit's deploy can start after a newer one's.
+      # Checked here, inside the concurrency group, so that only the head
+      # of main is applied; the deploy for the newer commit follows (or
+      # already ran). Every later step is skipped for a stale commit.
+      - name: Skip unless this is the head of main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: |
+          head="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [[ "$REF" != "$head" ]]; then
+            echo "::notice::Not deploying ${REF}: main is now at ${head}, which deploys instead."
+            echo "STALE=true" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.STALE != 'true'
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: env.STALE != 'true'
+        with:
+          go-version-file: go.mod
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        if: env.STALE != 'true'
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: env.STALE != 'true'
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # The packages the build job made, not a new build: check they're
+      # intact. Terraform signs them with this account's Signer profile.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: env.STALE != 'true'
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist
+
+      - name: Verify Lambda packages
+        if: env.STALE != 'true'
+        run: (cd dist && sha256sum --check --strict SHA256SUMS)
+
+      - name: Terraform init
+        if: env.STALE != 'true'
+        working-directory: infra/envs/${{ inputs.environment }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${STATE_BUCKET}" \
+            -backend-config="key=litelogin/${ENVIRONMENT}/terraform.tfstate" \
+            -backend-config="region=${REGION}"
+
+      - name: Terraform apply
+        if: env.STALE != 'true'
+        working-directory: infra/envs/${{ inputs.environment }}
+        run: terraform apply -input=false -auto-approve -lock-timeout=5m -var "region=${REGION}"
+
+      # Runs the rotation once: in a new environment this creates and
+      # activates the first signing key; otherwise it's a no-op unless a
+      # step is due. It also fails the deploy if rotation is broken.
+      - name: Run key rotation
+        if: env.STALE != 'true'
+        working-directory: infra/envs/${{ inputs.environment }}
+        run: |
+          fn="$(terraform output -raw rotate_function_name)"
+          aws lambda invoke --function-name "$fn" --cli-binary-format raw-in-base64-out \
+            --payload '{}' rotate.json > invoke.json
+          cat rotate.json; echo
+          if jq -e '.FunctionError' invoke.json > /dev/null; then
+            echo "key rotation failed"; exit 1
+          fi
+          jq -e '.active != ""' rotate.json > /dev/null || { echo "no active signing key"; exit 1; }
+
+      - name: Smoke test
+        if: env.STALE != 'true'
+        working-directory: infra/envs/${{ inputs.environment }}
+        run: |
+          # Through CloudFront, /healthz answers. Directly on the function
+          # URL, without the origin secret, everything is refused.
+          edge="https://$(terraform output -raw edge_domain_name)"
+          direct="$(terraform output -raw auth_function_url)"
+          ok=""
+          for attempt in 1 2 3 4 5; do
+            if curl -fsS "${edge}/healthz"; then
+              echo; ok=1; break
+            fi
+            echo "attempt ${attempt} failed; retrying"
+            sleep 5
+          done
+          [ -n "$ok" ] || { echo "/healthz through CloudFront did not return 200"; exit 1; }
+          code="$(curl -s -o /dev/null -w '%{http_code}' "${direct%/}/healthz")"
+          [ "$code" = 403 ] || { echo "direct function URL request returned ${code}, want 403"; exit 1; }
+          echo "direct function URL request refused (403)"
+
+      # A signed read through the Admin API's IAM-authenticated function
+      # URL, which also checks the API can read the active signing key. An
+      # unsigned request must be refused.
+      - name: Admin API smoke test
+        if: env.STALE != 'true'
+        working-directory: infra/envs/${{ inputs.environment }}
+        run: |
+          url="$(terraform output -raw admin_url)"
+          code="$(curl -s -o /dev/null -w '%{http_code}' "${url%/}/v1/keys")"
+          [ "$code" = 403 ] || { echo "unsigned request returned $code, want 403"; exit 1; }
+          go run ../../../cmd/litelogin keys list --endpoint "$url" -o json > keys.json
+          jq -e '[.items[] | select(.status == "active")] | length == 1' keys.json > /dev/null \
+            || { echo "want exactly one active signing key:"; cat keys.json; exit 1; }
+          jq -r '.items[] | "\(.kid) \(.status)"' keys.json

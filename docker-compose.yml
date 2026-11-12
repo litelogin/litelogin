@@ -1,0 +1,7 @@
+# Local development dependencies. Start with `make local-up`.
+services:
+  dynamodb:
+    image: amazon/dynamodb-local:3.3.2@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+    ports:
+      - "127.0.0.1:18000:8000"

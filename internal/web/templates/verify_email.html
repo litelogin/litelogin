@@ -1,0 +1,8 @@
+{{define "content"}}
+<p>Confirm your email address to finish setting up your account.</p>
+<form method="post" action="/verify-email">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="token" value="{{.Token}}">
+<button type="submit">Verify email</button>
+</form>
+{{end}}

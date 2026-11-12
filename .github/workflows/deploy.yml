@@ -1,0 +1,96 @@
+# Deploys main after CI passes: dev first, then (once bootstrapped) qa and prod.
+#
+# Each environment runs in its own GitHub environment, so prod waits for
+# approval. Can also be started by hand from the Actions tab (main only:
+# the environments only allow the main branch).
+#
+# An environment deploys only once scripts/bootstrap-account.sh --github
+# has set its repository variable TF_STATE_BUCKET_<ENV>. Until then its job
+# is skipped, so a fork that hasn't bootstrapped an account runs CI only.
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  # Builds the Lambda packages once. Every environment deploys these exact
+  # files after checking their checksums, so what reaches prod is what qa
+  # ran; each environment's Terraform then signs them with its AWS Signer
+  # profile, and its Lambdas only accept code that profile signed
+  # (infra/modules/codesigning). The build is reproducible: `make package`
+  # from a clean clone of the commit gives the same bytes.
+  build:
+    if: >-
+      vars.TF_STATE_BUCKET_DEV != '' && (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+      )
+    name: Build
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: ${{ steps.name.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build Lambda packages
+        run: |
+          make package
+          (cd dist && sha256sum *.zip | tee SHA256SUMS)
+
+      - id: name
+        run: echo "artifact=lambda-packages-$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.name.outputs.artifact }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 90
+
+  dev:
+    needs: build
+    if: vars.TF_STATE_BUCKET_DEV != ''
+    uses: ./.github/workflows/_apply.yml
+    with:
+      environment: dev
+      ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      artifact: ${{ needs.build.outputs.artifact }}
+
+  # Enable qa and prod after bootstrapping their accounts
+  # (scripts/bootstrap-account.sh qa|prod --github) and adding
+  # infra/envs/qa and infra/envs/prod:
+  #
+  # qa:
+  #   needs: [build, dev]
+  #   if: vars.TF_STATE_BUCKET_QA != ''
+  #   uses: ./.github/workflows/_apply.yml
+  #   with:
+  #     environment: qa
+  #     ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+  #     artifact: ${{ needs.build.outputs.artifact }}
+  #
+  # prod:
+  #   needs: [build, qa]
+  #   if: vars.TF_STATE_BUCKET_PROD != ''
+  #   uses: ./.github/workflows/_apply.yml
+  #   with:
+  #     environment: prod
+  #     ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+  #     artifact: ${{ needs.build.outputs.artifact }}
