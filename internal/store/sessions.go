@@ -60,9 +60,12 @@ type AuthCode struct {
 	SessionHash         string `dynamodbav:"session_hash"`
 	AuthVersion         int64  `dynamodbav:"auth_version"`
 	AuthTime            int64  `dynamodbav:"auth_time"`
-	UsedAt              int64  `dynamodbav:"used_at,omitempty"`
-	FamilyID            string `dynamodbav:"family_id,omitempty"`
-	ExpiresAt           int64  `dynamodbav:"expires_at"`
+	// AMR is how the user signed in, copied from the session (RFC 8176
+	// values, e.g. "pwd").
+	AMR       []string `dynamodbav:"amr,omitempty"`
+	UsedAt    int64    `dynamodbav:"used_at,omitempty"`
+	FamilyID  string   `dynamodbav:"family_id,omitempty"`
+	ExpiresAt int64    `dynamodbav:"expires_at"`
 }
 
 type codeItem struct {
@@ -82,8 +85,10 @@ type RefreshFamily struct {
 	Scope       string `dynamodbav:"scope"`
 	AuthVersion int64  `dynamodbav:"auth_version"`
 	AuthTime    int64  `dynamodbav:"auth_time"`
-	CreatedAt   int64  `dynamodbav:"created_at"`
-	ExpiresAt   int64  `dynamodbav:"expires_at"`
+	// AMR is copied from the code that started the family.
+	AMR       []string `dynamodbav:"amr,omitempty"`
+	CreatedAt int64    `dynamodbav:"created_at"`
+	ExpiresAt int64    `dynamodbav:"expires_at"`
 }
 
 type familyItem struct {
@@ -263,7 +268,7 @@ func (s *Store) RedeemCode(ctx context.Context, code *AuthCode, grant *NewRefres
 	if grant != nil {
 		family = &RefreshFamily{
 			ID: grant.FamilyID, Iss: code.Iss, ClientID: code.ClientID, PoolID: code.PoolID, UserID: code.UserID,
-			Scope: code.Scope, AuthVersion: code.AuthVersion, AuthTime: code.AuthTime,
+			Scope: code.Scope, AuthVersion: code.AuthVersion, AuthTime: code.AuthTime, AMR: code.AMR,
 			CreatedAt: now.Unix(), ExpiresAt: now.Add(grant.FamilyLifetime).Unix(),
 		}
 		fam, err := marshal(familyItem{

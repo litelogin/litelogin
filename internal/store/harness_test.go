@@ -149,6 +149,7 @@ func (e *testEnv) newCode(t *testing.T, f *fixture) *AuthCode {
 		Hash: newHash(), Iss: "https://" + f.host, ClientID: f.client.ID, RedirectURI: "https://app.example.com/cb",
 		Scope: "openid offline_access", CodeChallenge: "challenge", CodeChallengeMethod: CodeChallengeS256,
 		PoolID: f.pool.ID, UserID: f.user.ID, SessionHash: newHash(), AuthVersion: cur.AuthVersion, AuthTime: e.unix(),
+		AMR: []string{"pwd"},
 	}
 	must(t, e.CreateCode(e.ctx, c, time.Minute))
 	return c

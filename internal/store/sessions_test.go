@@ -1,6 +1,7 @@
 package store
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -86,7 +87,7 @@ func TestCodeExchange(t *testing.T) {
 	code := e.newCode(t, f)
 	got, err := e.GetCode(e.ctx, code.Hash)
 	must(t, err)
-	if got.UsedAt != 0 || got.Iss != code.Iss || got.ExpiresAt != e.unix()+60 {
+	if got.UsedAt != 0 || got.Iss != code.Iss || got.ExpiresAt != e.unix()+60 || !slices.Equal(got.AMR, []string{"pwd"}) {
 		t.Fatalf("GetCode = %+v", got)
 	}
 
@@ -95,6 +96,10 @@ func TestCodeExchange(t *testing.T) {
 	must(t, err)
 	if fam.Iss != code.Iss || fam.UserID != f.user.ID || fam.AuthVersion != 1 || fam.ExpiresAt != e.unix()+3600 {
 		t.Fatalf("family = %+v", fam)
+	}
+	// The family keeps how the user signed in, for refreshed ID tokens.
+	if stored, err := e.GetRefreshFamily(e.ctx, fam.ID); err != nil || !slices.Equal(stored.AMR, []string{"pwd"}) {
+		t.Fatalf("stored family = %+v, %v", stored, err)
 	}
 	tok, err := e.GetRefreshToken(e.ctx, grant.TokenHash)
 	must(t, err)

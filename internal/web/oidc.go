@@ -258,7 +258,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) {
 	err = s.Store.CreateCode(r.Context(), &store.AuthCode{
 		Hash: crypto.HashToken(code), Iss: s.issuer(t), ClientID: t.Client.ID, RedirectURI: redirectURI,
 		Scope: req.Scope, Nonce: req.Nonce, CodeChallenge: req.CodeChallenge, CodeChallengeMethod: challengeMethod(req.CodeChallenge),
-		PoolID: t.Pool.ID, UserID: u.ID, SessionHash: sess.Hash, AuthVersion: sess.AuthVersion, AuthTime: sess.AuthTime,
+		PoolID: t.Pool.ID, UserID: u.ID, SessionHash: sess.Hash, AuthVersion: sess.AuthVersion, AuthTime: sess.AuthTime, AMR: sess.AMR,
 	}, CodeLifetime)
 	if err != nil {
 		s.fail(w, r, t, err)
@@ -607,7 +607,7 @@ func (s *Server) exchangeCode(r *http.Request, t *tenant) (*tokenResponse, error
 		}
 		return nil, err
 	}
-	return s.issue(r, t, u, code.Iss, code.Scope, code.AuthTime, code.Nonce, refresh)
+	return s.issue(r, t, u, code.Iss, code.Scope, code.AuthTime, code.AMR, code.Nonce, refresh)
 }
 
 // mayOmitPKCE enforces the PKCE opt-out when a code issued without PKCE is
@@ -713,11 +713,12 @@ func (s *Server) refresh(r *http.Request, t *tenant) (*tokenResponse, error) {
 		metrics.Count(s.Metrics, metrics.RefreshRotationFailed, 1, metrics.Reason("error"))
 		return nil, err
 	}
-	return s.issue(r, t, u, family.Iss, scope, family.AuthTime, "", next)
+	return s.issue(r, t, u, family.Iss, scope, family.AuthTime, family.AMR, "", next)
 }
 
 // issue signs the access token and, with the openid scope, the ID token.
-func (s *Server) issue(r *http.Request, t *tenant, u *store.User, iss, scope string, authTime int64, nonce, refresh string) (*tokenResponse, error) {
+// authTime and amr describe the sign-in the grant came from.
+func (s *Server) issue(r *http.Request, t *tenant, u *store.User, iss, scope string, authTime int64, amr []string, nonce, refresh string) (*tokenResponse, error) {
 	ctx := r.Context()
 	now := s.now()
 	scopes := strings.Fields(scope)
@@ -732,7 +733,7 @@ func (s *Server) issue(r *http.Request, t *tenant, u *store.User, iss, scope str
 	}
 	if slices.Contains(scopes, "openid") {
 		resp.IDToken, err = s.Signer.SignIDToken(ctx, jwt.NewIDTokenClaims(jwt.IDTokenParams{
-			Issuer: iss, UserID: u.ID, ClientID: t.Client.ID, AuthTime: authTime, Nonce: nonce, AMR: []string{"pwd"},
+			Issuer: iss, UserID: u.ID, ClientID: t.Client.ID, AuthTime: authTime, Nonce: nonce, AMR: signInMethods(amr),
 			IncludeEmail: slices.Contains(scopes, "email"), Email: u.Email, EmailVerified: u.EmailVerified,
 			TTL: seconds(t.Client.IDTokenTTL), Now: now,
 		}))
@@ -859,4 +860,14 @@ func (s *Server) jsonFailure(w http.ResponseWriter, r *http.Request, err error) 
 	}
 	s.log().ErrorContext(r.Context(), "request failed", "path", r.URL.Path, "error", err)
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
+}
+
+// signInMethods is the ID token's amr. Codes and refresh families created
+// before they recorded it have none; every one of those came from a
+// password sign-in, the only method there was.
+func signInMethods(amr []string) []string {
+	if len(amr) == 0 {
+		return []string{"pwd"}
+	}
+	return amr
 }

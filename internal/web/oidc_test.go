@@ -8,12 +8,15 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/store"
+	"github.com/litelogin/litelogin/internal/web"
 )
 
 const (
@@ -123,6 +126,17 @@ func claims(t *testing.T, token string) map[string]any {
 	return c
 }
 
+// amr returns an ID token's amr claim.
+func amr(c map[string]any) []string {
+	var out []string
+	list, _ := c["amr"].([]any)
+	for _, v := range list {
+		s, _ := v.(string)
+		out = append(out, s)
+	}
+	return out
+}
+
 // newUser registers alice@example.com with password.
 func (e *env) newUser() {
 	e.t.Helper()
@@ -177,6 +191,9 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 	if id["iss"] != issuer || id["aud"] != e.client.ID || id["nonce"] != "n-1" || id["email"] != "alice@example.com" || id["auth_time"] == nil {
 		t.Errorf("ID token claims: %v", id)
 	}
+	if got := amr(id); !slices.Equal(got, []string{"pwd"}) {
+		t.Errorf("amr = %v, want [pwd]", got)
+	}
 	at := claims(t, r.body["access_token"].(string))
 	if at["client_id"] != e.client.ID || at["email"] != nil {
 		t.Errorf("access token claims: %v", at)
@@ -211,7 +228,7 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 	if r2.status != 200 || r2.body["refresh_token"] == r.body["refresh_token"] {
 		t.Fatalf("refresh: %d %v", r2.status, r2.body)
 	}
-	if c := claims(t, r2.body["id_token"].(string)); c["auth_time"] != id["auth_time"] || c["nonce"] != nil {
+	if c := claims(t, r2.body["id_token"].(string)); c["auth_time"] != id["auth_time"] || c["nonce"] != nil || !slices.Equal(amr(c), []string{"pwd"}) {
 		t.Errorf("refreshed ID token: %v", c)
 	}
 	expectTokenError(t, e.refresh(r.body["refresh_token"].(string)), 400, "invalid_grant")
@@ -240,6 +257,53 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 		m.Sum(metrics.TokensIssued, metrics.Dim{Name: "GrantType", Value: "refresh_token"}) != 1 ||
 		m.Sum(metrics.TokenFailed, metrics.Reason("invalid_grant")) < 4 || !m.Has(metrics.TokenLatency) {
 		t.Errorf("metrics = %+v", m.Records)
+	}
+}
+
+// The ID token's amr is how the session signed in, through the code and
+// every refresh, not a fixed value.
+func TestAMRComesFromTheSession(t *testing.T) {
+	e := newEnv(t, false)
+	e.newUser()
+	ctx := context.Background()
+	u, err := e.st.GetUserByEmail(ctx, e.pool.ID, "alice@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := crypto.NewToken()
+	sess := &store.Session{
+		Hash: crypto.HashToken(token), OrgID: e.pool.OrgID, PoolID: e.pool.ID, UserID: u.ID, ClientID: e.client.ID,
+		LoginHost: loginHost, AuthVersion: u.AuthVersion, AMR: []string{"swk", "user"},
+	}
+	if err := e.st.CreateSession(ctx, sess, time.Hour, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	b := e.browser()
+	srvURL, _ := url.Parse(e.srv.URL)
+	b.c.Jar.SetCookies(srvURL, []*http.Cookie{{
+		Name: web.SessionCookie, Value: token, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	}})
+
+	verifier, challenge := pkce()
+	p := b.get("/authorize?" + e.authzQuery(challenge).Encode())
+	if p.status != http.StatusFound {
+		t.Fatalf("authorize with the session: %d %q", p.status, p.location)
+	}
+	loc, _ := url.Parse(p.location)
+	r := e.exchange(loc.Query().Get("code"), verifier)
+	if r.status != 200 {
+		t.Fatalf("exchange: %d %v", r.status, r.body)
+	}
+	want := []string{"swk", "user"}
+	if got := amr(claims(t, r.body["id_token"].(string))); !slices.Equal(got, want) {
+		t.Errorf("ID token amr = %v, want %v", got, want)
+	}
+	r2 := e.refresh(r.body["refresh_token"].(string))
+	if r2.status != 200 {
+		t.Fatalf("refresh: %d %v", r2.status, r2.body)
+	}
+	if got := amr(claims(t, r2.body["id_token"].(string))); !slices.Equal(got, want) {
+		t.Errorf("refreshed ID token amr = %v, want %v", got, want)
 	}
 }
 
