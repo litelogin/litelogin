@@ -419,16 +419,15 @@ If a deployment needs instant client or org disablement, shorten the cache time 
   - passkeys added, and passkey sign-ins succeeded and failed (including suspected clones)
   - lockouts
   - tokens issued, and token issuance failures
-  - token exchange latency
-  - password verification latency (for tuning argon2id)
   - refresh token reuse detected
   - authorization code reuse detected
   - refresh rotation failures
-  - KMS `Sign` latency, failures and throttling
+  - KMS `Sign` failures and throttling
   - DynamoDB conditional check failures, by access pattern
   - email send failures
   - age of the oldest outstanding item in Config GSI2
   - custom domain onboarding duration
+- **Latency** of token exchange, password verification (for tuning argon2id) and KMS `Sign` is written to the log as plain fields, not metrics: the dashboard reads percentiles over the log with CloudWatch Logs Insights, which costs nothing until queried, where a metric costs $0.30 a month (Cost.md).
 - **Security events aren't errors.** A wrong password, an invalid code or a reused token is an expected security event: count it in a metric, but don't fail the Lambda invocation or log it as an error. A KMS signing failure or a DynamoDB error is an error.
 - **Alarms:**
   - Lambda errors and throttles
@@ -437,8 +436,8 @@ If a deployment needs instant client or org disablement, shorten the cache time 
   - dead-letter queue depth
   - outstanding work older than 1 hour
   - spikes in refresh token reuse
-- **Synthetic monitoring:** a CloudWatch Synthetics canary runs the full flow every 5 minutes against a dedicated test client: discovery, JWKS, `/authorize`, login, code exchange, `/userinfo`, refresh and logout. It catches failures that per-component metrics miss.
-- **Tracing:** AWS X-Ray on the Auth Lambda.
+- **Synthetic monitoring:** a Lambda function, run every 5 minutes by EventBridge Scheduler, signs in to a dedicated test client end to end: discovery, JWKS, `/authorize`, login, code exchange, `/userinfo`, refresh and logout. It catches failures that per-component metrics miss, and an alarm fires when two runs in a row fail. It isn't a CloudWatch Synthetics canary: it makes HTTP requests only, and Synthetics' price per run would be most of its cost. Its configuration, including the test user's password, is an SSM SecureString parameter that Terraform doesn't manage, so the password stays out of Terraform state.
+- **Tracing:** AWS X-Ray on the Auth Lambda, when `tracing` is set. It's off by default: traces cost $5 per million requests (Cost.md).
 - **Where:** each environment has a dashboard named after it, and every alarm notifies one SNS topic (`litelogin-<env>-alarms`); set `alarm_email` to subscribe an address. The work age alarm also fires if the reconciler stops reporting.
 
 ## Quotas

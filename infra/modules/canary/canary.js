@@ -8,10 +8,12 @@
 // jar; redirects are followed by hand, and the one to the client's
 // redirect URI isn't followed at all: the code is read from it.
 //
-// Configuration is a Secrets Manager secret (CANARY_SECRET_ARN) holding
-// JSON: {"issuer", "client_id", "redirect_uri", "post_logout_redirect_uri",
-// "email", "password"}. To run it locally, put the same JSON in
-// CANARY_CONFIG and run: node -e "require('./canary.js').handler()"
+// It runs as a Lambda function on a schedule (infra/modules/canary); a run
+// that throws is a failed run. Configuration is an SSM SecureString
+// parameter (CANARY_PARAMETER) holding JSON: {"issuer", "client_id",
+// "redirect_uri", "post_logout_redirect_uri", "email", "password"}. To run
+// it locally, put the same JSON in CANARY_CONFIG and run:
+// node -e "require('./canary.js').handler()"
 
 const crypto = require('node:crypto');
 
@@ -134,14 +136,14 @@ function claims(jwt) {
 async function loadConfig() {
   let raw = process.env.CANARY_CONFIG;
   if (!raw) {
-    // The runtime includes the AWS SDK.
-    const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
-    const out = await new SecretsManagerClient({}).send(new GetSecretValueCommand({ SecretId: process.env.CANARY_SECRET_ARN }));
-    raw = out.SecretString;
+    // The Lambda runtime includes the AWS SDK.
+    const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
+    const out = await new SSMClient({}).send(new GetParameterCommand({ Name: process.env.CANARY_PARAMETER, WithDecryption: true }));
+    raw = out.Parameter.Value;
   }
   const c = JSON.parse(raw);
   for (const k of ['issuer', 'client_id', 'redirect_uri', 'email', 'password']) {
-    expect(c[k], `the canary secret has no ${k}`);
+    expect(c[k], `the canary configuration has no ${k}`);
   }
   return c;
 }

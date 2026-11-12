@@ -41,6 +41,12 @@ const (
 	PasskeyLoginFailed    = "PasskeyLoginFailed"    // Reason: unknown_passkey, invalid, expired, cloned, inactive, unverified_email
 )
 
+// logOnly are the records written as plain log fields, not metrics: each
+// latency is read as percentiles over its log lines (the dashboard's
+// latency widget queries them with CloudWatch Logs Insights), which costs
+// nothing until queried, where a metric costs $0.30 a month (Cost.md).
+var logOnly = map[string]bool{TokenLatency: true, PasswordVerifyLatency: true, KMSSignLatency: true}
+
 // Units.
 const (
 	UnitCount        = "Count"
@@ -110,13 +116,17 @@ func (e *EMF) Record(name string, value float64, unit string, dims ...Dim) {
 		keys = append(keys, d.Name)
 		line[d.Name] = d.Value
 	}
-	line["_aws"] = map[string]any{
-		"Timestamp": now().UnixMilli(),
-		"CloudWatchMetrics": []map[string]any{{
-			"Namespace":  Namespace,
-			"Dimensions": [][]string{keys},
-			"Metrics":    []map[string]string{{"Name": name, "Unit": unit}},
-		}},
+	if logOnly[name] {
+		line["Unit"] = unit
+	} else {
+		line["_aws"] = map[string]any{
+			"Timestamp": now().UnixMilli(),
+			"CloudWatchMetrics": []map[string]any{{
+				"Namespace":  Namespace,
+				"Dimensions": [][]string{keys},
+				"Metrics":    []map[string]string{{"Name": name, "Unit": unit}},
+			}},
+		}
 	}
 	b, err := json.Marshal(line)
 	if err != nil {

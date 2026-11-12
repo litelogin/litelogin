@@ -1,5 +1,6 @@
-# A LiteLogin Lambda function: a Go `bootstrap` binary on provided.al2023
-# (arm64), with its own IAM role, log group and optional function URL.
+# A LiteLogin Lambda function on arm64, with its own IAM role, log group and
+# optional function URL. By default it is a Go `bootstrap` binary on
+# provided.al2023; the synthetic monitor is Node.js.
 
 terraform {
   required_providers {
@@ -16,8 +17,20 @@ variable "name" {
 }
 
 variable "zip_path" {
-  description = "Path to the deployment zip containing the bootstrap binary (built by `make package`)."
+  description = "Path to the deployment zip, e.g. the bootstrap binary built by `make package`."
   type        = string
+}
+
+variable "runtime" {
+  description = "Lambda runtime."
+  type        = string
+  default     = "provided.al2023"
+}
+
+variable "handler" {
+  description = "Handler: `bootstrap` for a Go binary, or `file.export` for Node.js."
+  type        = string
+  default     = "bootstrap"
 }
 
 variable "policy_json" {
@@ -161,8 +174,8 @@ resource "aws_signer_signing_job" "package" {
 resource "aws_lambda_function" "this" {
   function_name = var.name
   role          = aws_iam_role.this.arn
-  runtime       = "provided.al2023"
-  handler       = "bootstrap"
+  runtime       = var.runtime
+  handler       = var.handler
   architectures = ["arm64"]
   memory_size   = var.memory_size
   timeout       = var.timeout
@@ -182,14 +195,13 @@ resource "aws_lambda_function" "this" {
     variables = var.environment
   }
 
-  dynamic "tracing_config" {
-    for_each = var.tracing ? [1] : []
-    content {
-      mode = "Active"
-    }
+  # Always set: the block is computed, so leaving it out wouldn't turn
+  # active tracing off.
+  tracing_config {
+    mode = var.tracing ? "Active" : "PassThrough"
   }
 
-  # The functions write JSON logs with log/slog.
+  # The Go functions write JSON logs with log/slog.
   logging_config {
     log_format = "JSON"
     log_group  = aws_cloudwatch_log_group.this.name

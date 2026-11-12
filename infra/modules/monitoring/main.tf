@@ -214,14 +214,18 @@ locals {
       [local.ns, "TokenIssuanceFailed", "Service", "auth", "Reason", "invalid_client", { stat = "Sum", label = "invalid_client" }],
       [local.ns, "TokenIssuanceFailed", "Service", "auth", "Reason", "server_error", { stat = "Sum", label = "server_error" }],
     ] },
-    { title = "Latency (p50, p99)", metrics = [
-      [local.ns, "TokenLatency", "Service", "auth", { stat = "p50", label = "/token p50" }],
-      [local.ns, "TokenLatency", "Service", "auth", { stat = "p99", label = "/token p99" }],
-      [local.ns, "KMSSignLatency", "Service", "auth", { stat = "p50", label = "KMS Sign p50" }],
-      [local.ns, "KMSSignLatency", "Service", "auth", { stat = "p99", label = "KMS Sign p99" }],
-      [local.ns, "PasswordVerifyLatency", "Service", "auth", { stat = "p50", label = "Password check p50" }],
-      [local.ns, "PasswordVerifyLatency", "Service", "auth", { stat = "p99", label = "Password check p99" }],
-    ] },
+    # Latencies are log fields, not metrics (internal/metrics), so this
+    # widget is a Logs Insights query, charged by the data it scans each
+    # time the dashboard loads.
+    { title = "Latency in ms (p50, p99)", query = join(" | ", [
+      "SOURCE '/aws/lambda/${var.function_names["auth"]}'",
+      "filter ispresent(TokenLatency) or ispresent(KMSSignLatency) or ispresent(PasswordVerifyLatency)",
+      join(", ", [
+        "stats pct(TokenLatency, 50) as token_p50", "pct(TokenLatency, 99) as token_p99",
+        "pct(KMSSignLatency, 50) as kms_sign_p50", "pct(KMSSignLatency, 99) as kms_sign_p99",
+        "pct(PasswordVerifyLatency, 50) as password_check_p50", "pct(PasswordVerifyLatency, 99) as password_check_p99 by bin(5m)",
+      ]),
+    ]) },
     { title = "Security events", metrics = [
       [local.ns, "RefreshTokenReuse", "Service", "auth", { stat = "Sum", label = "Refresh token reuse" }],
       [local.ns, "AuthorizationCodeReuse", "Service", "auth", { stat = "Sum", label = "Code reuse" }],
@@ -254,19 +258,18 @@ resource "aws_cloudwatch_dashboard" "this" {
   dashboard_name = var.name_prefix
   dashboard_body = jsonencode({
     widgets = concat(
+      # A widget is a metric graph, or a Logs Insights query if it has
+      # a query.
       [for i, w in local.widgets : {
-        type   = "metric"
+        type   = can(w.query) ? "log" : "metric"
         x      = (i % 2) * 12
         y      = floor(i / 2) * 6
         width  = 12
         height = 6
-        properties = {
-          title   = w.title
-          region  = local.region
-          view    = "timeSeries"
-          period  = local.period
-          metrics = w.metrics
-        }
+        properties = merge(
+          { title = w.title, region = local.region, view = "timeSeries" },
+          try({ query = w.query }, { period = local.period, metrics = w.metrics }),
+        )
       }],
       [{
         type   = "alarm"

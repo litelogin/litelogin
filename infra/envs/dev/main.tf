@@ -37,7 +37,13 @@ variable "alarm_email" {
 }
 
 variable "canary_start" {
-  description = "Run the synthetic monitor. Set once its secret holds the configuration (infra/modules/canary)."
+  description = "Run the synthetic monitor. Set once its parameter holds the configuration (infra/modules/canary)."
+  type        = bool
+  default     = false
+}
+
+variable "tracing" {
+  description = "Trace the Auth Lambda with AWS X-Ray. Off by default: traces cost $5 per million requests (Cost.md)."
   type        = bool
   default     = false
 }
@@ -76,6 +82,7 @@ module "litelogin" {
 
   alarm_email             = var.alarm_email
   canary_start            = var.canary_start
+  tracing                 = var.tracing
   rate_limit_exempt_cidrs = var.rate_limit_exempt_cidrs
 }
 
@@ -190,7 +197,7 @@ output "dashboard" {
   value       = module.litelogin.dashboard
 }
 
-output "canary_secret_arn" {
-  description = "Secret holding the synthetic monitor's configuration (infra/modules/canary)."
-  value       = module.litelogin.canary_secret_arn
+output "canary_parameter_name" {
+  description = "SSM parameter holding the synthetic monitor's configuration (infra/modules/canary)."
+  value       = module.litelogin.canary_parameter_name
 }

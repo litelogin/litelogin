@@ -44,6 +44,20 @@ func TestEMF(t *testing.T) {
 	if !strings.Contains(lines[1], `"CustomDomainOnboardingDuration":90`) || !strings.Contains(lines[1], `"Unit":"Seconds"`) {
 		t.Errorf("duration = %s", lines[1])
 	}
+
+	// A latency is a log field only, not a metric.
+	buf.Reset()
+	Since(e, TokenLatency, time.Now())
+	var lat map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &lat); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := lat["_aws"]; ok || lat["Service"] != "auth" || lat["Unit"] != "Milliseconds" {
+		t.Errorf("latency = %s", buf.String())
+	}
+	if _, ok := lat["TokenLatency"].(float64); !ok {
+		t.Errorf("latency = %s", buf.String())
+	}
 }
 
 func TestNilRecorder(_ *testing.T) {

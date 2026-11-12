@@ -58,7 +58,13 @@ variable "alarm_email" {
 }
 
 variable "canary_start" {
-  description = "Run the synthetic monitor. Set once its secret holds the configuration (infra/modules/canary)."
+  description = "Run the synthetic monitor. Set once its parameter holds the configuration (infra/modules/canary)."
+  type        = bool
+  default     = false
+}
+
+variable "tracing" {
+  description = "Trace the Auth Lambda with AWS X-Ray. Off by default: traces cost $5 per million requests (Cost.md)."
   type        = bool
   default     = false
 }
@@ -172,7 +178,7 @@ module "auth" {
   policy_json            = data.aws_iam_policy_document.auth.json
   memory_size            = 1024
   function_url_auth_type = "NONE"
-  tracing                = true
+  tracing                = var.tracing
 
   environment = {
     LITELOGIN_CONFIG_TABLE         = module.tables.config_table_name
@@ -258,6 +264,7 @@ module "canary" {
   source        = "../canary"
   name_prefix   = local.name_prefix
   start         = var.canary_start
+  code_signing  = module.codesigning.code_signing
   alarm_actions = [module.monitoring.alarm_topic_arn]
 }
 
@@ -311,7 +318,7 @@ output "dashboard" {
   value       = "https://${data.aws_region.current.region}.console.aws.amazon.com/cloudwatch/home?region=${data.aws_region.current.region}#dashboards/dashboard/${module.monitoring.dashboard_name}"
 }
 
-output "canary_secret_arn" {
-  description = "Secret holding the synthetic monitor's configuration (infra/modules/canary)."
-  value       = module.canary.secret_arn
+output "canary_parameter_name" {
+  description = "SSM parameter holding the synthetic monitor's configuration (infra/modules/canary)."
+  value       = module.canary.parameter_name
 }
