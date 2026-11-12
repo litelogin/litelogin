@@ -296,7 +296,7 @@ func do(c *http.Client, req *http.Request, want int) (reply, error) {
 		r.location = loc
 	}
 	redirect := func(code int) bool { return code >= 300 && code < 400 }
-	if resp.StatusCode != want && !(redirect(want) && redirect(resp.StatusCode)) {
+	if resp.StatusCode != want && (!redirect(want) || !redirect(resp.StatusCode)) {
 		detail := ""
 		var e struct {
 			Error string `json:"error"`
