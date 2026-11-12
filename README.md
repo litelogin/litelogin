@@ -1,10 +1,3 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-on-dark.png">
-    <img src="assets/logo-on-light.png" alt="LiteLogin logo" width="120">
-  </picture>
-</p>
-
 # LiteLogin
 
 A multi-tenant OAuth 2.1 and OpenID Connect identity provider that runs entirely on AWS serverless services: Lambda, DynamoDB, KMS, CloudFront and SES. There are no servers to manage: costs follow requests, on top of a small fixed monthly cost for the WAF, KMS keys and monitoring.
