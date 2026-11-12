@@ -33,7 +33,7 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 | Password guessing and credential stuffing | WAF rate limit per IP on `/login`, `/register`, `/password/*`, `/token` (infra/modules/edge); account lockout after 5 failures for 15 minutes (internal/web/web.go) | verified |
 | Account enumeration through sign-in | One message for unknown, locked and inactive accounts; a dummy argon2id verification so timing matches (internal/web/flows.go, internal/crypto/password.go) | verified |
 | Enumeration through registration and password reset | Same response either way; the existing owner is emailed instead (internal/web/flows.go, `register`, `forgot`) | verified |
-| Enumeration through email change (signed in) | The page says another account uses the address | gap (F1) |
+| Enumeration through email change (signed in) | The request gets the same response either way; only the confirmation link, sent to the new address, says if another account already uses it, so only that address's owner can learn it (internal/web/account.go) | verified |
 | Locking a victim out by failing their password on purpose | Lockout is per account and lasts 15 minutes; WAF limits each IP | accepted (F2) |
 | Offline cracking of stolen hashes | argon2id, m = 19 MiB, t = 2, p = 1; constant-time comparison (internal/crypto) | verified |
 | Session fixation | A new session ID on every sign-in | verified |
@@ -85,7 +85,7 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 
 ## Findings
 
-**F1 — Email change reveals whether an address has an account (low).** A signed-in user who tries to change their email to an address in use is told another account uses it (internal/web/account.go). It needs an account and a session, but it's an enumeration oracle. *Recommendation:* always say a confirmation was sent; if the address is taken, email its owner instead.
+**F1 — Email change and existing accounts (no issue).** First recorded as an enumeration oracle, then checked again: asking to change your email to an address that's in use gets the same "check your email" response as any other, and the "already in use" message appears only after the link sent to that address is opened. Only the address's owner can see it. *Possible improvement, not a fix:* when the address is taken, email its owner a notice instead of a confirmation link that can't work.
 
 **F2 — Lockout can be used against a victim (accepted).** Five wrong passwords lock an account for 15 minutes, so someone who knows an email can keep it locked, from many IPs. It's the usual trade-off against guessing. *Later:* lock per account and source, or add a challenge before locking.
 
