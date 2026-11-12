@@ -12,6 +12,7 @@ You need:
 - Docker, for DynamoDB Local
 - OpenTofu or Terraform 1.10 or later, with `make TF=terraform ...` for Terraform
 - `golangci-lint` v2, for `make lint`
+- Optionally, Google Chrome or Chromium, for the browser tests. They're skipped when Chrome isn't found; set `LITELOGIN_CHROME` to its executable if it's somewhere unusual.
 
 Run everything locally:
 
@@ -101,6 +102,7 @@ Architecture.md describes the runtime design, and Datamodel.md the tables and ev
 | Fuzz | Host and email normalization, password hash verification | Go native fuzzing |
 | Store integration | Every access pattern, including failures and races | `make test-integration`, against DynamoDB Local |
 | End to end | Sign-in with `coreos/go-oidc` and `golang.org/x/oauth2` as the relying party | `test/e2e`, in `make test-integration` |
+| Browser | Adding a passkey and signing in with it, through the pages' script, in headless Chrome with a virtual WebAuthn authenticator | `internal/web/browser_test.go`, in `make test-integration` (CI requires Chrome) |
 | Load | Sign-ins and refreshes at a fixed rate | `test/load` (its README) |
 
 Two checks run against a deployed environment, with its AWS credentials:

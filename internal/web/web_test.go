@@ -45,6 +45,9 @@ type env struct {
 	metrics *metrics.Memory
 	// skew moves the server's clock (not the store's) forward.
 	skew atomic.Int64
+	// ws is the server's configuration, for tests that serve it again
+	// differently.
+	ws *web.Server
 }
 
 func newEnv(t *testing.T, requireVerified bool) *env {
@@ -114,7 +117,7 @@ func newEnv(t *testing.T, requireVerified bool) *env {
 		h.ServeHTTP(w, r)
 	}))
 	t.Cleanup(srv.Close)
-	e.mail, e.srv = mail, srv
+	e.mail, e.srv, e.ws = mail, srv, ws
 	return e
 }
 

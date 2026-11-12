@@ -26,6 +26,10 @@ jobs:
         run: go vet ./...
       - name: Test (including DynamoDB Local integration tests)
         run: make test-integration
+        env:
+          # The runner image's Chrome, for the browser tests; set, so a
+          # missing Chrome fails instead of skipping them.
+          LITELOGIN_CHROME: google-chrome
       - name: Build Lambda binaries
         run: make package
       - name: Vulnerability check
