@@ -2,8 +2,9 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
-	"math/rand/v2"
 	"net"
 	"slices"
 	"strings"
@@ -64,7 +65,12 @@ func queryNS(ctx context.Context, server, domain string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	id := uint16(rand.N(1 << 16))
+	// A random ID, so a spoofed answer is harder to make match.
+	var idBytes [2]byte
+	if _, err := rand.Read(idBytes[:]); err != nil {
+		return nil, err
+	}
+	id := binary.BigEndian.Uint16(idBytes[:])
 	query, err := (&dnsmessage.Message{
 		Header:    dnsmessage.Header{ID: id},
 		Questions: []dnsmessage.Question{{Name: name, Type: dnsmessage.TypeNS, Class: dnsmessage.ClassINET}},

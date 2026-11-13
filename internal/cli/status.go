@@ -520,7 +520,7 @@ func (p *awsProbe) zoneNameServers(ctx context.Context, domain string) ([]string
 		return nil, true, fmt.Errorf("read Route 53 zone %s: %w", ids[0], err)
 	}
 	if zone.DelegationSet == nil {
-		return nil, true, fmt.Errorf("Route 53 zone %s has no name servers", ids[0])
+		return nil, true, fmt.Errorf("hosted zone %s has no name servers", ids[0])
 	}
 	return normalizeNS(zone.DelegationSet.NameServers), true, nil
 }

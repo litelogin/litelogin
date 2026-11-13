@@ -14,7 +14,7 @@ import (
 // delegates, NXDOMAIN for others.
 func fakeParent(t *testing.T, delegations map[string][]string) {
 	t.Helper()
-	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	conn, err := (&net.ListenConfig{}).ListenPacket(context.Background(), "udp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
