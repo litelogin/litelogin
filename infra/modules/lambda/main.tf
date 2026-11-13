@@ -1,6 +1,6 @@
 # A LiteLogin Lambda function on arm64, with its own IAM role, log group and
 # optional function URL. By default it is a Go `bootstrap` binary on
-# provided.al2023; the synthetic monitor is Node.js.
+# provided.al2023.
 
 terraform {
   required_providers {

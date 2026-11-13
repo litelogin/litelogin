@@ -1,5 +1,5 @@
 # The qa environment: a Lean deployment (Cost.md, "Setups"): CloudFront's
-# Free flat-rate plan, no custom hosts, no canary, reduced monitoring.
+# Free flat-rate plan, no custom hosts, reduced monitoring.
 #
 # Initialize with a backend config file (see backend.hcl.example):
 #   tofu init -backend-config=backend.hcl
@@ -35,14 +35,6 @@ variable "alarm_email" {
   description = "Address that gets alarm notifications (it must confirm the SNS subscription). Empty: none; subscribe to the alarm topic another way."
   type        = string
   default     = ""
-}
-
-variable "canary_start" {
-  description = "Run the synthetic monitor. Set once its parameter holds the configuration (infra/modules/canary)."
-  type        = bool
-  # The pipeline passes no variables, so qa's settings are these defaults,
-  # not terraform.tfvars.
-  default = false
 }
 
 variable "tracing" {
@@ -102,7 +94,6 @@ module "litelogin" {
   deletion_protection = false
 
   alarm_email             = var.alarm_email
-  canary_start            = var.canary_start
   tracing                 = var.tracing
   custom_hosts            = var.custom_hosts
   cloudfront_free_plan    = var.cloudfront_free_plan
@@ -160,7 +151,3 @@ output "dashboard" {
   value       = module.litelogin.dashboard
 }
 
-output "canary_parameter_name" {
-  description = "SSM parameter holding the synthetic monitor's configuration (infra/modules/canary)."
-  value       = module.litelogin.canary_parameter_name
-}

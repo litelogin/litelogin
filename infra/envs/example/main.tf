@@ -38,12 +38,6 @@ variable "alarm_email" {
   default     = ""
 }
 
-variable "canary_start" {
-  description = "Run the synthetic monitor once its parameter holds the configuration (SelfHosting.md, \"Monitoring\")."
-  type        = bool
-  default     = false
-}
-
 variable "tracing" {
   description = "Trace the Auth Lambda with AWS X-Ray. Off by default: traces cost $5 per million requests (Cost.md)."
   type        = bool
@@ -92,7 +86,6 @@ module "litelogin" {
   package_dir         = "${path.root}/../../../dist"
 
   alarm_email             = var.alarm_email
-  canary_start            = var.canary_start
   tracing                 = var.tracing
   custom_hosts            = var.custom_hosts
   cloudfront_free_plan    = var.cloudfront_free_plan
@@ -138,7 +131,3 @@ output "dashboard" {
   value       = module.litelogin.dashboard
 }
 
-output "canary_parameter_name" {
-  description = "SSM parameter holding the synthetic monitor's configuration."
-  value       = module.litelogin.canary_parameter_name
-}

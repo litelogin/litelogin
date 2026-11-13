@@ -27,7 +27,7 @@ One deployment serves many **orgs**. Each org has its own users, its own login h
 - **Operations:**
   - a CLI and an IAM-authenticated Admin API
   - Terraform/OpenTofu modules for the whole deployment
-  - CloudWatch dashboards and alarms, and a synthetic sign-in monitor
+  - CloudWatch dashboards and alarms
 
 ## Quickstart
 
@@ -62,7 +62,7 @@ flowchart LR
   rotate --> kms
 ```
 
-Every request is handled by a Lambda function and all state is in two on-demand DynamoDB tables, so there's no capacity to provision or servers to patch. Besides requests, only scheduled jobs run: key rotation daily, and a reconciler and the synthetic sign-in monitor every 5 minutes. Signing keys are created in KMS and never leave it. [Architecture.md](Architecture.md) explains each part.
+Every request is handled by a Lambda function and all state is in two on-demand DynamoDB tables, so there's no capacity to provision or servers to patch. Besides requests, only scheduled jobs run: key rotation daily, and a reconciler every 5 minutes. Signing keys are created in KMS and never leave it. [Architecture.md](Architecture.md) explains each part.
 
 ## Documentation
 

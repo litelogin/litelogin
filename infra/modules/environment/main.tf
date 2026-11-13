@@ -1,6 +1,6 @@
 # A whole LiteLogin environment in one AWS account: tables, signing keys,
-# the Auth, Admin, Worker and Rotate Lambdas, CloudFront and WAF, email,
-# monitoring and the canary. Each environment's root module (infra/envs/*)
+# the Auth, Admin, Worker and Rotate Lambdas, CloudFront and WAF, email
+# and monitoring. Each environment's root module (infra/envs/*)
 # configures the AWS provider and state backend and calls this module;
 # a self-hosted deployment does the same (SelfHosting.md).
 #
@@ -18,10 +18,6 @@ terraform {
     random = {
       source  = "hashicorp/random"
       version = "~> 3.6"
-    }
-    archive = {
-      source  = "hashicorp/archive"
-      version = ">= 2.4"
     }
   }
 }
@@ -55,12 +51,6 @@ variable "alarm_email" {
   description = "Address that gets alarm notifications (it must confirm the SNS subscription). Empty: none; subscribe to the alarm topic another way."
   type        = string
   default     = ""
-}
-
-variable "canary_start" {
-  description = "Run the synthetic monitor. Set once its parameter holds the configuration (infra/modules/canary)."
-  type        = bool
-  default     = false
 }
 
 variable "tracing" {
@@ -290,14 +280,6 @@ module "monitoring" {
   table_names = [module.tables.config_table_name, module.tables.session_table_name]
 }
 
-module "canary" {
-  source        = "../canary"
-  name_prefix   = local.name_prefix
-  start         = var.canary_start
-  code_signing  = module.codesigning.code_signing
-  alarm_actions = [module.monitoring.alarm_topic_arn]
-}
-
 output "dns_name_servers" {
   description = "NS records to add for the default host domain at the parent domain's DNS provider."
   value       = module.dns.name_servers
@@ -348,7 +330,3 @@ output "dashboard" {
   value       = local.reduced_monitoring ? null : "https://${data.aws_region.current.region}.console.aws.amazon.com/cloudwatch/home?region=${data.aws_region.current.region}#dashboards/dashboard/${module.monitoring.dashboard_name}"
 }
 
-output "canary_parameter_name" {
-  description = "SSM parameter holding the synthetic monitor's configuration (infra/modules/canary)."
-  value       = module.canary.parameter_name
-}

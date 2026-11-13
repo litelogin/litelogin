@@ -215,21 +215,6 @@ Users can then add a passkey on their account page and sign in with it. A passke
 
 - **Dashboard:** `tofu output dashboard` links to the environment's CloudWatch dashboard. It shows sign-ins, token issuance, latency (from the log, with Logs Insights), security events (such as reused refresh tokens), failures and background work.
 - **Alarms:** every alarm notifies the SNS topic `litelogin-<environment>-alarms`. Set `alarm_email`, or subscribe the topic to your paging tool.
-- **Synthetic monitor:** a scheduled Lambda function can sign in end to end every 5 minutes and raise an alarm when it can't. To turn it on:
-  1. Create a public client on a login host, with redirect URI `http://127.0.0.1/callback` and post-logout redirect URI `http://127.0.0.1/logged-out`, plus a test user in its pool with a verified email.
-  2. Create the SSM parameter named by `tofu output canary_parameter_name`, as a SecureString. Terraform doesn't manage it, so the password stays out of state:
-
-     ```sh
-     aws ssm put-parameter --type SecureString --name "$(tofu output -raw canary_parameter_name)" --value '{
-       "issuer": "https://<host>", "client_id": "<client>",
-       "redirect_uri": "http://127.0.0.1/callback", "post_logout_redirect_uri": "http://127.0.0.1/logged-out",
-       "email": "<test user>", "password": "<password>"}'
-     ```
-
-     To change it later, add `--overwrite`.
-  3. Set `canary_start = true` in `terraform.tfvars`, then plan and apply.
-
-  If you set it up before it was a plain Lambda function, its configuration was a Secrets Manager secret, which the upgrade schedules for deletion: create the parameter from the same JSON before you apply. Until you do, the alarm fires.
 - **Tracing:** set `tracing = true` to trace the Auth Lambda with AWS X-Ray, at $5 per million requests.
 - **Reduced monitoring:** `monitoring = "reduced"` costs $4.80 a month less, for small deployments ([Cost.md](Cost.md#reduced-monitoring)). The alarms still cover the same failures, but there's no dashboard: only the metrics alarms use are published, and the rest (sign-ins, tokens issued, failures by reason) are log fields, which CloudWatch Logs Insights can count. Successful invocations log no `platform.start` or `platform.report` line.
 
@@ -245,6 +230,8 @@ tofu apply tfplan
 ```
 
 Lambda code updates take effect without downtime. Each package is signed with the environment's AWS Signer profile, and the functions accept only code that profile signed, so deploy through Terraform, not `aws lambda update-function-code`. To roll back, check out the previous version and do the same.
+
+Upgrading from a version with the synthetic monitor removes its Lambda function, schedule and alarm. Its configuration parameter (`/litelogin-<environment>/canary`) was never managed by Terraform: delete it with `aws ssm delete-parameter`.
 
 ## Deploying from GitHub Actions
 

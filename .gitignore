@@ -15,5 +15,3 @@ terraform.tfvars
 .vscode/
 .DS_Store
 
-# Synthetics canary bundle, built by Terraform
-infra/modules/canary/.build/
