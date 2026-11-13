@@ -1,5 +1,0 @@
-# Copy to backend.hcl (git-ignored) and fill in your state bucket.
-# The bucket must already exist, with versioning enabled.
-bucket = "my-litelogin-tofu-state"
-key    = "litelogin/qa/terraform.tfstate"
-region = "us-east-1"

@@ -25,13 +25,13 @@ p99 latency, measured at the client (so including the network path to CloudFront
 | `login_post` | 1 s |
 | `authorize`, `login_page`, `token_code`, `token_refresh` | 500 ms |
 
-and an error rate under 0.1% for every step, no skipped arrivals, and at least 95% of the target rate achieved. Change them with `-targets` and `-max-error-rate`. The environment's dashboard has the server-side view: `/token` latency, KMS `Sign` latency and throttling, password check time, Lambda concurrency and DynamoDB throttles. A Lean deployment (`setup = "lean"`, as dev and qa are) has no dashboard and few metrics: plan and apply with `-var metrics=all -var dashboard=true` (and the WAF variables below) for the run, and without them afterwards.
+and an error rate under 0.1% for every step, no skipped arrivals, and at least 95% of the target rate achieved. Change them with `-targets` and `-max-error-rate`. The environment's dashboard has the server-side view: `/token` latency, KMS `Sign` latency and throttling, password check time, Lambda concurrency and DynamoDB throttles. A Lean deployment (`setup = "lean"`, as dev is) has no dashboard and few metrics: plan and apply with `-var metrics=all -var dashboard=true` (and the WAF variables below) for the run, and without them afterwards.
 
 ## Before a run
 
 1. **Lambda concurrency.** The account's concurrent executions quota must cover the load with room for cold starts; new accounts can start at 10. Request at least 1000 (Service Quotas, AWS Lambda, "Concurrent executions").
 2. **KMS.** Every sign-in signs two tokens (access and ID) and every refresh at least one, so the target load needs about 500 `Sign` requests/s. The default RSA quota is 1000/s per account and Region.
-3. **WAF.** The login host's rate-based rules allow about 1 request/s per IP to the login and token endpoints. Exempt the load generator's address for the run only. On CloudFront's Free plan (Lean's `cloudfront_plan = "free"`, as dev and qa are), whose WAF allows no exemption, add `-var cloudfront_plan=pay-as-you-go` to the plan below (the plan's 1 million requests a month wouldn't cover a run anyway); turning the plan back on afterwards is the same plan and apply without the variables.
+3. **WAF.** The login host's rate-based rules allow about 1 request/s per IP to the login and token endpoints. Exempt the load generator's address for the run only. On CloudFront's Free plan (Lean's `cloudfront_plan = "free"`, as dev is), whose WAF allows no exemption, add `-var cloudfront_plan=pay-as-you-go` to the plan below (the plan's 1 million requests a month wouldn't cover a run anyway); turning the plan back on afterwards is the same plan and apply without the variables.
 
    ```
    terraform plan -target=module.litelogin.module.edge -var 'rate_limit_exempt_cidrs=["<ip>/32"]' -out=exempt.tfplan

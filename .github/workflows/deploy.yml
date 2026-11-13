@@ -73,18 +73,18 @@ jobs:
       ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       artifact: ${{ needs.build.outputs.artifact }}
 
-  qa:
-    needs: [build, dev]
-    if: vars.TF_STATE_BUCKET_QA != ''
-    uses: ./.github/workflows/_apply.yml
-    with:
-      environment: qa
-      ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-      artifact: ${{ needs.build.outputs.artifact }}
-
-  # Enable prod after bootstrapping its account
-  # (scripts/bootstrap-account.sh prod --github) and adding
-  # infra/envs/prod:
+  # Enable qa and prod after bootstrapping their accounts
+  # (scripts/bootstrap-account.sh qa|prod --github) and adding
+  # infra/envs/qa and infra/envs/prod:
+  #
+  # qa:
+  #   needs: [build, dev]
+  #   if: vars.TF_STATE_BUCKET_QA != ''
+  #   uses: ./.github/workflows/_apply.yml
+  #   with:
+  #     environment: qa
+  #     ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+  #     artifact: ${{ needs.build.outputs.artifact }}
   #
   # prod:
   #   needs: [build, qa]
