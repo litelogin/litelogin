@@ -53,6 +53,37 @@ func chromePath(t *testing.T) string {
 	return ""
 }
 
+// tailBuffer keeps the last max bytes written to it, for a process's
+// output that is read while the process writes it.
+type tailBuffer struct {
+	mu        sync.Mutex
+	max       int
+	buf       []byte
+	truncated bool
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, p...)
+	if over := len(b.buf) - b.max; over > 0 {
+		b.buf, b.truncated = b.buf[over:], true
+	}
+	return len(p), nil
+}
+
+func (b *tailBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.buf) == 0 {
+		return "(no output)"
+	}
+	if b.truncated {
+		return "...\n" + string(b.buf)
+	}
+	return string(b.buf)
+}
+
 // chrome is a headless Chrome and a DevTools connection to its page.
 type chrome struct {
 	t    *testing.T
@@ -99,25 +130,47 @@ func startChrome(t *testing.T) *chrome {
 		// needs.
 		args = append(args, "--no-sandbox")
 	}
-	cmd := exec.CommandContext(t.Context(), chromePath(t), append(args, "about:blank")...) //nolint:gosec // the test's own browser
+	path := chromePath(t)
+	cmd := exec.CommandContext(t.Context(), path, append(args, "about:blank")...) //nolint:gosec // the test's own browser
+	// Chrome's output, to say why it didn't start.
+	out := &tailBuffer{max: 8 << 10}
+	cmd.Stdout, cmd.Stderr = out, out
+	// Chrome's helper processes can keep its output open after it exits;
+	// don't wait for them.
+	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	exited := make(chan struct{})
+	var exitErr error
+	go func() {
+		exitErr = cmd.Wait()
+		close(exited)
+	}()
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		<-exited
 	})
 
 	// Chrome writes the port it chose to DevToolsActivePort.
 	var port string
-	for deadline := time.Now().Add(30 * time.Second); port == ""; {
+	started := time.Now()
+	for deadline := started.Add(30 * time.Second); port == ""; {
 		if data, err := os.ReadFile(filepath.Join(dir, "DevToolsActivePort")); err == nil { //nolint:gosec // in the test's temporary directory
 			if lines := strings.Split(string(data), "\n"); len(lines) > 1 {
 				port = strings.TrimSpace(lines[0])
 			}
 		}
-		if port == "" && time.Now().After(deadline) {
-			t.Fatal("Chrome didn't start")
+		if port != "" {
+			break
+		}
+		select {
+		case <-exited:
+			t.Fatalf("Chrome (%s) exited after %v: %v\n%s", path, time.Since(started).Round(time.Millisecond), exitErr, out)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Chrome (%s) didn't write DevToolsActivePort in %v; it's still running. Its output:\n%s", path, time.Since(started).Round(time.Second), out)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
