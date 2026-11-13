@@ -1,5 +1,5 @@
-# The dev environment: a Lean deployment (Cost.md, "Setups"): no custom
-# hosts, no canary, reduced monitoring.
+# The dev environment: a Lean deployment (Cost.md, "Setups"): CloudFront's
+# Free flat-rate plan, no custom hosts, no canary, reduced monitoring.
 #
 # Initialize with a backend config file (see backend.hcl.example):
 #   tofu init -backend-config=backend.hcl
@@ -61,7 +61,8 @@ variable "custom_hosts" {
 variable "cloudfront_free_plan" {
   description = "Put the default login hosts' distribution, its WAF and the Route 53 zone on CloudFront's Free flat-rate plan, saving about $10.50 a month. It drops the sign-in endpoints' stricter rate limit and the loopback-redirects rule, which the plan doesn't allow (Cost.md). Needs custom_hosts = false."
   type        = bool
-  default     = false
+  # Load tests turn it off for the run (test/load/README.md).
+  default = true
 }
 
 variable "monitoring" {
