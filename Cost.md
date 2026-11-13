@@ -13,7 +13,7 @@ What one LiteLogin deployment costs per month on AWS, in two setups, at 1,000 to
 | Caching | None: the Free plan allows only AWS managed cache policies | Discovery and JWKS cached at the edge |
 | Synthetic monitor | Off (`canary_start = false`) | On |
 | X-Ray tracing | Off | Optional (`tracing = true`) |
-| Alarms, metrics, dashboard, logs | Reduced (`monitoring = "reduced"`): 13 alarms, 3 custom metrics, no dashboard, no per-invocation platform log lines; see [Reduced monitoring](#reduced-monitoring) | Full: 16 alarms, 8 custom metrics, a dashboard, and every log line |
+| Alarms, metrics, dashboard, logs | Reduced (`monitoring = "reduced"`): 12 alarms, 3 custom metrics, no dashboard, no per-invocation platform log lines; see [Reduced monitoring](#reduced-monitoring) | Full: 16 alarms, 8 custom metrics, a dashboard, and every log line |
 
 Lean's limit is the Free plan's 1 million requests a month: a sign-in and its 10 refreshes are 15 requests. Past it, CloudFront doesn't charge more but may slow delivery, so a deployment that grows should move to Full. The WAF trade-off is in [CloudFront flat-rate plans](#cloudfront-flat-rate-plans).
 

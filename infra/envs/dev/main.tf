@@ -1,4 +1,5 @@
-# The dev environment.
+# The dev environment: a Lean deployment (Cost.md, "Setups"): no custom
+# hosts, no canary, reduced monitoring.
 #
 # Initialize with a backend config file (see backend.hcl.example):
 #   tofu init -backend-config=backend.hcl
@@ -39,9 +40,10 @@ variable "alarm_email" {
 variable "canary_start" {
   description = "Run the synthetic monitor. Set once its parameter holds the configuration (infra/modules/canary)."
   type        = bool
-  # dev's parameter is set. The pipeline passes no variables, so a setting
-  # dev needs belongs here, not in terraform.tfvars.
-  default = true
+  # dev's parameter is set, but Lean runs no canary. The pipeline passes
+  # no variables, so a setting dev needs belongs here, not in
+  # terraform.tfvars.
+  default = false
 }
 
 variable "tracing" {
@@ -53,7 +55,7 @@ variable "tracing" {
 variable "custom_hosts" {
   description = "Support custom login hosts (e.g. login.example.com), served through a CloudFront multi-tenant distribution. Remove every custom host before turning it off."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "cloudfront_free_plan" {
@@ -65,7 +67,7 @@ variable "cloudfront_free_plan" {
 variable "monitoring" {
   description = "\"full\" or \"reduced\": reduced publishes only the metrics alarms use, has one Lambda throttles alarm, no dashboard and no per-invocation platform log lines (Cost.md, \"Reduced monitoring\")."
   type        = string
-  default     = "full"
+  default     = "reduced"
 }
 
 variable "rate_limit_exempt_cidrs" {
