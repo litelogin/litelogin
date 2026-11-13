@@ -336,22 +336,23 @@ func TestPasskeyInChrome(t *testing.T) {
 		t.Fatalf("account page after adding:\n%s", body)
 	}
 	var creds struct {
-		Credentials []struct {
-			RPID     string `json:"rpId"`
-			Resident bool   `json:"isResidentCredential"`
-		} `json:"credentials"`
+		Credentials []map[string]any `json:"credentials"`
 	}
 	c.call("WebAuthn.getCredentials", map[string]any{"authenticatorId": auth.ID}, &creds)
-	if len(creds.Credentials) != 1 || creds.Credentials[0].RPID != browserHost || !creds.Credentials[0].Resident {
+	if len(creds.Credentials) != 1 || creds.Credentials[0]["rpId"] != browserHost || creds.Credentials[0]["isResidentCredential"] != true {
 		t.Fatalf("authenticator credentials = %+v", creds)
 	}
+	passkey := creds.Credentials[0] // with its private key and sign count
 
 	// Sign out, then sign in with the passkey button, in a browser
 	// without passkey autofill (as some report): the page then makes no
 	// conditional request. Some Chrome versions run the page's autofill
 	// request even so, and the virtual authenticator approves it at once,
 	// signing in before the login page can be seen: so a conditional
-	// request also never completes.
+	// request also never completes. Chrome 157 sometimes makes one
+	// anyway, so the authenticator also holds no passkey while the login
+	// page loads, and gets it back just before the click, which aborts any
+	// pending autofill request first.
 	var noAutofill struct {
 		ID string `json:"identifier"`
 	}
@@ -365,8 +366,10 @@ func TestPasskeyInChrome(t *testing.T) {
 				return options && options.mediation === 'conditional' ? new Promise(() => {}) : get.call(this, options);
 			};`,
 	}, &noAutofill)
+	c.call("WebAuthn.removeCredential", map[string]any{"authenticatorId": auth.ID, "credentialId": passkey["credentialId"]}, nil)
 	c.eval(`document.querySelector('form[action="/logout"]').submit()`)
 	c.waitFor(`location.pathname === '/login' && !document.querySelector('#passkey-login').hidden`)
+	c.call("WebAuthn.addCredential", map[string]any{"authenticatorId": auth.ID, "credential": passkey}, nil)
 	c.eval(`document.querySelector('#passkey-login-button').click()`)
 	c.waitFor(`location.pathname === '/account'`)
 
