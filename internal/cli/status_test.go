@@ -21,8 +21,11 @@ type fakeProbe struct {
 	functions   map[string]lambdaFunction
 	dist        distribution
 	alarms      []string
-	ns          []string
-	nsErr       error
+	zoneNS      []string
+	zoneFound   bool
+	zoneErr     error
+	parent      []parentAnswer
+	parentErr   error
 	healthCode  map[string]int
 	keys        []admin.SigningKey
 	keysErr     error
@@ -33,7 +36,13 @@ func healthyProbe() *fakeProbe {
 		functions: map[string]lambdaFunction{},
 		dist: distribution{Found: true, Domain: "d1.cloudfront.net", HostDomain: "login.example.com",
 			Status: "Deployed", Enabled: true},
-		ns:         []string{"ns-2.awsdns-02.net", "ns-1.awsdns-01.org"},
+		zoneNS:    []string{"ns-1.awsdns-01.org", "ns-2.awsdns-02.net", "ns-3.awsdns-03.com", "ns-4.awsdns-04.co.uk"},
+		zoneFound: true,
+		// Delegating to some of the zone's name servers is fine.
+		parent: []parentAnswer{
+			{Server: "ns1.example.net", NS: []string{"ns-2.awsdns-02.net", "ns-1.awsdns-01.org"}},
+			{Server: "ns2.example.net", NS: []string{"ns-1.awsdns-01.org", "ns-2.awsdns-02.net"}},
+		},
 		healthCode: map[string]int{},
 		keys: []admin.SigningKey{
 			{KID: "old", Status: "retired", ActivatedAt: "2026-06-01T00:00:00Z"},
@@ -58,7 +67,13 @@ func (p *fakeProbe) distribution(context.Context, string) (distribution, error) 
 
 func (p *fakeProbe) firingAlarms(context.Context, string) ([]string, error) { return p.alarms, nil }
 
-func (p *fakeProbe) lookupNS(context.Context, string) ([]string, error) { return p.ns, p.nsErr }
+func (p *fakeProbe) zoneNameServers(context.Context, string) ([]string, bool, error) {
+	return p.zoneNS, p.zoneFound, p.zoneErr
+}
+
+func (p *fakeProbe) delegation(context.Context, string) (string, []parentAnswer, error) {
+	return "example.com", p.parent, p.parentErr
+}
 
 func (p *fakeProbe) health(_ context.Context, url string) (int, error) {
 	if code, ok := p.healthCode[url]; ok {
@@ -133,10 +148,35 @@ func TestStatusProblems(t *testing.T) {
 			"CloudFront", CheckFail, false, "apply the environment again"},
 		{"distribution deploying", func(p *fakeProbe) { p.dist.Status = "InProgress" },
 			"CloudFront", CheckWarn, true, "a few minutes"},
-		{"not delegated", func(p *fakeProbe) { p.ns, p.nsErr = nil, errors.New("no such host") },
+		{"not delegated", func(p *fakeProbe) {
+			for i := range p.parent {
+				p.parent[i].NS = nil
+			}
+		}, "DNS delegation", CheckFail, false, "dns_name_servers"},
+		{"delegated elsewhere", func(p *fakeProbe) {
+			for i := range p.parent {
+				p.parent[i].NS = []string{"ns1.digitalocean.com"}
+			}
+		}, "DNS delegation", CheckFail, false, "dns_name_servers"},
+		// The case a resolver lookup missed: a deleted zone of the same name.
+		{"delegated to another Route 53 zone", func(p *fakeProbe) {
+			for i := range p.parent {
+				p.parent[i].NS = []string{"ns-9.awsdns-09.net", "ns-1.awsdns-01.org"}
+			}
+		}, "DNS delegation", CheckFail, false, "exactly the zone's name servers"},
+		{"parent servers disagree", func(p *fakeProbe) { p.parent[1].NS = []string{"ns-9.awsdns-09.net"} },
+			"DNS delegation", CheckWarn, true, "still reaching all its servers"},
+		{"parent servers unreachable", func(p *fakeProbe) {
+			for i := range p.parent {
+				p.parent[i].NS, p.parent[i].Err = nil, errors.New("i/o timeout")
+			}
+		}, "DNS delegation", CheckWarn, true, ""},
+		{"no parent zone", func(p *fakeProbe) { p.parentErr = errors.New("no parent zone of login.example.com has name servers") },
 			"DNS delegation", CheckFail, false, "dns_name_servers"},
-		{"delegated elsewhere", func(p *fakeProbe) { p.ns = []string{"ns1.digitalocean.com"} },
-			"DNS delegation", CheckFail, false, "dns_name_servers"},
+		{"no zone", func(p *fakeProbe) { p.zoneNS, p.zoneFound = nil, false },
+			"DNS delegation", CheckFail, false, "remove those NS records"},
+		{"zone unreadable", func(p *fakeProbe) { p.zoneNS, p.zoneErr = nil, errors.New("AccessDenied") },
+			"DNS delegation", CheckWarn, true, "route53:GetHostedZone"},
 		{"login host unreachable", func(p *fakeProbe) {
 			p.healthCode["https://litelogin-status.login.example.com/healthz"] = http.StatusBadGateway
 		}, "Login hosts", CheckFail, false, "wildcard record"},

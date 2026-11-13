@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	cwtypes "github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	lambdatypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spf13/cobra"
 
@@ -79,9 +79,22 @@ type statusProbe interface {
 	function(ctx context.Context, name string) (lambdaFunction, error)
 	distribution(ctx context.Context, namePrefix string) (distribution, error)
 	firingAlarms(ctx context.Context, namePrefix string) ([]string, error)
-	lookupNS(ctx context.Context, domain string) ([]string, error)
+	// zoneNameServers is the Route 53 zone's own name servers for domain;
+	// found is false if this account has no public zone of that name.
+	zoneNameServers(ctx context.Context, domain string) (ns []string, found bool, err error)
+	// delegation asks every name server of domain's parent zone, without
+	// recursion, which name servers it delegates domain to.
+	delegation(ctx context.Context, domain string) (parent string, answers []parentAnswer, err error)
 	health(ctx context.Context, url string) (int, error)
 	signingKeys(ctx context.Context) ([]admin.SigningKey, error)
+}
+
+// parentAnswer is one parent name server's delegation for a domain: its NS
+// records (none if it doesn't delegate), or why it couldn't be asked.
+type parentAnswer struct {
+	Server string
+	NS     []string
+	Err    error
 }
 
 // The functions every environment has (infra/modules/environment).
@@ -222,25 +235,98 @@ func keysCheck(ctx context.Context, p statusProbe, env string, now time.Time) Ch
 	return c
 }
 
-// delegationCheck looks up the host domain's NS records in public DNS.
-// Route 53 name servers are awsdns-*; anything else means the parent
-// domain doesn't delegate to the zone yet.
+// delegationCheck asks the parent zone's own name servers, not a resolver
+// (which can return a cached, older delegation for hours), and compares
+// what each one delegates the host domain to with the Route 53 zone's name
+// servers. Delegating to only some of them is fine; to any other name
+// server isn't, even another Route 53 zone's: an earlier zone of the same
+// name, say, that has been deleted.
 func delegationCheck(ctx context.Context, p statusProbe, domain string) Check {
 	c := Check{Name: "DNS delegation"}
-	ns, err := p.lookupNS(ctx, domain)
-	hint := "add the zone's four name servers (tofu output dns_name_servers) as NS records for " + domain + " at its parent domain's DNS provider"
-	if err != nil || len(ns) == 0 {
-		c.Status, c.Detail, c.Hint = CheckFail, domain+" has no NS records in public DNS", hint
+	hint := "make the NS records for " + domain + " at its parent domain's DNS provider exactly the zone's name servers (tofu output dns_name_servers)"
+
+	want, found, zoneErr := p.zoneNameServers(ctx, domain)
+	if zoneErr == nil && !found {
+		c.Status, c.Detail = CheckFail, "this account has no Route 53 zone named "+domain
+		c.Hint = "apply the environment again; if the parent domain still delegates " + domain + ", remove those NS records until the zone exists"
 		return c
 	}
-	slices.Sort(ns)
-	for _, n := range ns {
-		if !strings.Contains(n, ".awsdns-") {
-			c.Status, c.Detail, c.Hint = CheckFail, domain+" is delegated to "+strings.Join(ns, ", ")+", not Route 53", hint
-			return c
+	parent, answers, err := p.delegation(ctx, domain)
+	if err != nil {
+		c.Status, c.Detail, c.Hint = CheckFail, err.Error(), hint
+		return c
+	}
+
+	var good, missing, wrong, unreachable []string
+	var foreign []string // name servers the parent delegates to that aren't the zone's
+	for _, a := range answers {
+		switch {
+		case a.Err != nil:
+			unreachable = append(unreachable, a.Server)
+		case len(a.NS) == 0:
+			missing = append(missing, a.Server)
+		default:
+			var other []string
+			for _, n := range a.NS {
+				if zoneErr == nil && !slices.Contains(want, n) || zoneErr != nil && !strings.Contains(n, ".awsdns-") {
+					other = append(other, n)
+				}
+			}
+			if len(other) > 0 {
+				wrong = append(wrong, a.Server)
+				for _, n := range other {
+					if !slices.Contains(foreign, n) {
+						foreign = append(foreign, n)
+					}
+				}
+			} else {
+				good = append(good, a.Server)
+			}
 		}
 	}
-	c.Status, c.Detail = CheckOK, domain+" is delegated to "+strings.Join(ns, ", ")
+	slices.Sort(foreign)
+	zoneNS := slices.Clone(want)
+	slices.Sort(zoneNS)
+
+	bad := len(missing) + len(wrong)
+	switch {
+	case len(good) == 0 && bad == 0:
+		c.Status = CheckWarn
+		c.Detail = "couldn't ask " + parent + "'s name servers (" + strings.Join(unreachable, ", ") + ")"
+	case len(good) == 0 && len(wrong) > 0:
+		c.Status, c.Hint = CheckFail, hint
+		c.Detail = parent + " delegates " + domain + " to " + strings.Join(foreign, ", ")
+		if zoneErr == nil {
+			c.Detail += ", not to this account's zone (" + strings.Join(zoneNS, ", ") + ")"
+		} else {
+			c.Detail += ", not Route 53"
+		}
+	case len(good) == 0:
+		c.Status, c.Hint = CheckFail, hint
+		c.Detail = parent + " doesn't delegate " + domain
+	case bad > 0:
+		c.Status = CheckWarn
+		c.Detail = parent + "'s name servers disagree: " + strings.Join(good, ", ") + " delegate to the zone, " + strings.Join(append(missing, wrong...), ", ") + " don't"
+		c.Hint = "a change at the DNS provider is still reaching all its servers: check again in a few minutes; if it persists, " + hint
+	default:
+		var ns []string
+		for _, a := range answers {
+			if a.Err == nil {
+				ns = slices.Clone(a.NS)
+				break
+			}
+		}
+		slices.Sort(ns)
+		c.Status, c.Detail = CheckOK, domain+" is delegated to "+strings.Join(ns, ", ")
+		if len(unreachable) > 0 {
+			c.Detail += " (" + strings.Join(unreachable, ", ") + " didn't answer)"
+		}
+	}
+	if zoneErr != nil && c.Status == CheckOK {
+		c.Status = CheckWarn
+		c.Detail += "; couldn't read the Route 53 zone to compare: " + zoneErr.Error()
+		c.Hint = "the caller needs route53:ListHostedZonesByName and route53:GetHostedZone"
+	}
 	return c
 }
 
@@ -403,16 +489,44 @@ func (p *awsProbe) firingAlarms(ctx context.Context, namePrefix string) ([]strin
 	return names, nil
 }
 
-func (p *awsProbe) lookupNS(ctx context.Context, domain string) ([]string, error) {
-	records, err := net.DefaultResolver.LookupNS(ctx, domain)
+func (p *awsProbe) zoneNameServers(ctx context.Context, domain string) ([]string, bool, error) {
+	client := route53.NewFromConfig(p.cfg)
+	out, err := client.ListHostedZonesByName(ctx, &route53.ListHostedZonesByNameInput{DNSName: aws.String(domain)})
 	if err != nil {
-		return nil, err
+		return nil, false, fmt.Errorf("list Route 53 zones: %w", err)
 	}
-	out := make([]string, len(records))
-	for i, r := range records {
-		out[i] = strings.TrimSuffix(strings.ToLower(r.Host), ".")
+	// Zones come sorted by name, so those named domain are on the first page.
+	// Public ones only; if there are several, LiteLogin's (infra/modules/dns).
+	var ids, ours []string
+	for _, z := range out.HostedZones {
+		if !strings.EqualFold(aws.ToString(z.Name), domain+".") || z.Config != nil && z.Config.PrivateZone {
+			continue
+		}
+		ids = append(ids, aws.ToString(z.Id))
+		if z.Config != nil && strings.HasPrefix(aws.ToString(z.Config.Comment), "LiteLogin") {
+			ours = append(ours, aws.ToString(z.Id))
+		}
 	}
-	return out, nil
+	switch {
+	case len(ids) == 0:
+		return nil, false, nil
+	case len(ids) > 1 && len(ours) != 1:
+		return nil, true, fmt.Errorf("%d public zones are named %s", len(ids), domain)
+	case len(ids) > 1:
+		ids = ours
+	}
+	zone, err := client.GetHostedZone(ctx, &route53.GetHostedZoneInput{Id: aws.String(ids[0])})
+	if err != nil {
+		return nil, true, fmt.Errorf("read Route 53 zone %s: %w", ids[0], err)
+	}
+	if zone.DelegationSet == nil {
+		return nil, true, fmt.Errorf("Route 53 zone %s has no name servers", ids[0])
+	}
+	return normalizeNS(zone.DelegationSet.NameServers), true, nil
+}
+
+func (p *awsProbe) delegation(ctx context.Context, domain string) (string, []parentAnswer, error) {
+	return parentDelegation(ctx, domain)
 }
 
 func (p *awsProbe) health(ctx context.Context, url string) (int, error) {

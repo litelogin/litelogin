@@ -41,7 +41,7 @@ It creates `infra/envs/prod` from the example with `setup = "lean"` ([Cost.md](C
 
 If it stops, for an error, a declined plan or DNS that isn't delegated yet, fix what it says and run `scripts/deploy.sh prod` again: it works out from the deployment's state what's left to do. The same command upgrades an existing deployment after `git checkout <new version>`.
 
-Without a terminal (in CI, or run by another tool), it never waits or asks. It stops with exit status 3 at each of those points, saying how to continue: `--account <id>` confirms the account, `--apply-plan <file>` applies the plan it saved once you've reviewed it, and running it again checks DNS again. `scripts/deploy.sh --help` lists its options.
+Without a terminal (in CI, or run by another tool), it never waits or asks. It stops with exit status 3 at each of those points, saying how to continue: `--account <id>` confirms the account, `--apply-plan <file>` applies the plan it saved once you've reviewed it, and running it again checks DNS again. `scripts/deploy.sh --help` lists its options. With [Claude Code](https://claude.com/claude-code), the repository's `litelogin` skill (`.claude/skills/litelogin`) runs it for you: ask it to deploy LiteLogin, and it brings each of these points to you, then helps with the CLI, problems and removal.
 
 The sections below are the same steps by hand.
 
@@ -196,7 +196,7 @@ dist/litelogin client update CLIENT --redirect-uri https://app.acme.com/callback
 dist/litelogin client test CLIENT
 ```
 
-`dist/litelogin status --environment <environment>` checks a deployment: the functions, the signing key and its rotation, CloudFront, the DNS delegation, a login host over HTTPS, and any alarm that's firing. Each problem comes with what to do about it. It exits with status 1 if a check fails, and `-o json` gives the results to scripts.
+`dist/litelogin status --environment <environment>` checks a deployment: the functions, the signing key and its rotation, CloudFront, the DNS delegation (asking the parent domain's own name servers whether they delegate to the zone's), a login host over HTTPS, and any alarm that's firing. Each problem comes with what to do about it. It exits with status 1 if a check fails, and `-o json` gives the results to scripts.
 
 `dist/litelogin help` lists every command.
 
@@ -295,6 +295,7 @@ The workflows act only on environments that are set up. Plan covers every enviro
 2. Set `deletion_protection = false` on the `litelogin` module in `main.tf`, then plan and apply.
 3. Run `tofu destroy`.
 4. Schedule deletion of the signing keys, which Terraform didn't create. They're tagged `litelogin-purpose=token-signing` and `litelogin-environment=<environment>`.
+5. Delete the NS records for `default_host_domain` at its parent domain's DNS provider. Records left pointing at the deleted Route 53 zone let anyone who creates a zone of that name serve your login hosts' domain. Check each of the parent's name servers: `dig +norec +noall +authority NS <domain> @<parent name server>` should print nothing.
 
 KMS keys are deleted after AWS's waiting period. The state bucket is left for you to delete.
 
