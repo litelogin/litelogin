@@ -41,6 +41,8 @@ dist/litelogin init --org "Acme" --client "Acme Portal" --redirect-uri https://a
 
 `deploy.sh` creates the environment, shows each plan before applying it, tells you which NS records to add for the domain and waits for them, then checks the deployment with `litelogin status`. If it stops, run it again: it continues where it left off.
 
+With [Claude Code](https://claude.com/claude-code), you can ask for it instead: open Claude Code in the repository and say "deploy LiteLogin to my AWS account". The `litelogin` skill in `.claude/skills` runs `deploy.sh`, brings you each decision (the account, the NS records, every plan before it's applied), and then helps with creating orgs and clients, finding what's wrong, upgrades and removal. See [SelfHosting.md](SelfHosting.md#with-claude-code).
+
 `init` prints an issuer URL, a client ID and a client secret. Point any OpenID Connect library at the issuer: it finds the rest through `/.well-known/openid-configuration`. `litelogin client test` signs in end to end, as an app would. [SelfHosting.md](SelfHosting.md) has every step in full.
 
 ## How it works

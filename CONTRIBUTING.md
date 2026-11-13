@@ -42,7 +42,7 @@ make tf-fmt             # if you changed Terraform
 CI runs the same checks on every pull request. The Terraform plan and deploy workflows use the project's AWS accounts, so they don't run for pull requests from forks, or in a fork that hasn't bootstrapped its own. Please:
 
 - keep each pull request to one change, with tests
-- update the documentation the change affects
+- update the documentation the change affects, including `.claude/skills/litelogin/SKILL.md` if the change affects `scripts/deploy.sh`, the CLI's commands or messages, or the steps in SelfHosting.md that it follows
 - write commit messages that say what changed and why
 
 By contributing, you agree that your contributions are licensed under the MIT License (LICENSE).
@@ -82,7 +82,8 @@ infra/
 test/
   e2e/           Sign-in with real relying-party libraries
   load/          Load tests against a deployed environment
-scripts/         Account bootstrap and the argon2 benchmark
+scripts/         deploy.sh, account bootstrap and the argon2 benchmark
+.claude/skills/  The litelogin Claude Code skill: deploying and operating with the scripts and the CLI
 ```
 
 Architecture.md describes the runtime design, and Datamodel.md the tables and every access pattern.

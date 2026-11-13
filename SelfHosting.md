@@ -41,7 +41,20 @@ It creates `infra/envs/prod` from the example with `setup = "lean"` ([Cost.md](C
 
 If it stops, for an error, a declined plan or DNS that isn't delegated yet, fix what it says and run `scripts/deploy.sh prod` again: it works out from the deployment's state what's left to do. The same command upgrades an existing deployment after `git checkout <new version>`.
 
-Without a terminal (in CI, or run by another tool), it never waits or asks. It stops with exit status 3 at each of those points, saying how to continue: `--account <id>` confirms the account, `--apply-plan <file>` applies the plan it saved once you've reviewed it, and running it again checks DNS again. `scripts/deploy.sh --help` lists its options. With [Claude Code](https://claude.com/claude-code), the repository's `litelogin` skill (`.claude/skills/litelogin`) runs it for you: ask it to deploy LiteLogin, and it brings each of these points to you, then helps with the CLI, problems and removal.
+Without a terminal (in CI, or run by another tool), it never waits or asks. It stops with exit status 3 at each of those points, saying how to continue: `--account <id>` confirms the account, `--apply-plan <file>` applies the plan it saved once you've reviewed it, and running it again checks DNS again. `scripts/deploy.sh --help` lists its options.
+
+### With Claude Code
+
+The repository includes a [Claude Code](https://claude.com/claude-code) skill, `.claude/skills/litelogin`, that deploys and operates LiteLogin with these same tools. Open Claude Code in the repository and ask in your own words, for example:
+
+- "Deploy LiteLogin to prod with the litelogin-prod profile, using login.example.com"
+- "Upgrade prod to the latest version"
+- "Check whether dev is healthy" or "Why is sign-in failing on prod?"
+- "Create an org called Acme with a client for https://app.acme.com/callback"
+- "Add login.acme.com as a custom host for Acme"
+- "Remove the staging deployment"
+
+It runs `scripts/deploy.sh` and handles each of its stops by asking you: it shows the AWS account and waits for you to confirm it, gives you the NS records and checks every name server of the parent domain once you've added them, and summarizes each plan, naming anything it replaces or destroys, before applying exactly that plan. It also follows a few rules whatever you ask: it names the AWS profile on every AWS command and never falls back to the default one, never applies a plan you haven't seen, and asks before each destructive command (deleting or disabling, revoking sessions, rotating a secret, removing a deployment). For problems it starts from `litelogin status` and the function logs, and for removal it follows [Removing a deployment](#removing-a-deployment) step by step. The skill is a Markdown file: read it to see exactly what it does.
 
 The sections below are the same steps by hand.
 
@@ -198,7 +211,7 @@ dist/litelogin client test CLIENT
 
 `dist/litelogin status --environment <environment>` checks a deployment: the functions, the signing key and its rotation, CloudFront, the DNS delegation (asking the parent domain's own name servers whether they delegate to the zone's), a login host over HTTPS, and any alarm that's firing. Each problem comes with what to do about it. It exits with status 1 if a check fails, and `-o json` gives the results to scripts.
 
-`dist/litelogin help` lists every command.
+`dist/litelogin help` lists every command. With Claude Code, you can ask for these tasks in your own words ([With Claude Code](#with-claude-code)).
 
 ## Custom domains
 
@@ -290,6 +303,8 @@ The workflows act only on environments that are set up. Plan covers every enviro
 - **Signing keys** are KMS keys that the rotation function creates and retires. A retired key is scheduled for deletion, not deleted at once.
 
 ## Removing a deployment
+
+The [Claude Code skill](#with-claude-code) can take you through these steps, asking before each one.
 
 1. Remove every custom host (`litelogin host remove`) and wait until `litelogin host list` no longer shows them. Their CloudFront tenants are created by LiteLogin, not by Terraform, and the distribution they belong to can't be deleted while they exist.
 2. Set `deletion_protection = false` on the `litelogin` module in `main.tf`, then plan and apply.
