@@ -1,17 +1,33 @@
 # Cost
 
-What one LiteLogin deployment costs per month on AWS, at 1,000, 10,000, 100,000 and 1 million sign-ins a month. The cost has two parts: a fixed monthly part that doesn't depend on traffic, and a part per request. Every number below shows how it was calculated, so it can be redone when prices or the code change.
+What one LiteLogin deployment costs per month on AWS, in two setups, at 1,000 to 1 million sign-ins a month. The cost has two parts: a fixed monthly part that doesn't depend on traffic, and a part per request. Every number below shows how it was calculated, so it can be redone when prices or the code change.
+
+## Setups
+
+| | **Lean** | **Full** (the default) |
+| -- | -- | -- |
+| For | Small deployments: up to about 65,000 sign-ins a month | Any size, and custom login hosts |
+| CloudFront and WAF | CloudFront's Free flat-rate plan, which includes the distribution, the WAF and the Route 53 zone (`cloudfront_free_plan = true`) | Pay-as-you-go |
+| Custom login hosts (`login.acme.com`) | No (`custom_hosts = false`): default hosts only | Yes |
+| WAF rules | A per-IP rate limit for every path, and the AWS managed groups. The Free plan allows no rule that matches paths or labels, so there's no stricter limit on the sign-in endpoints. | Those, plus the sign-in endpoints' rate limit and `loopback-redirects` |
+| Caching | None: the Free plan allows only AWS managed cache policies | Discovery and JWKS cached at the edge |
+| Synthetic monitor | Off (`canary_start = false`) | On |
+| X-Ray tracing | Off | Optional (`tracing = true`) |
+| Alarms, metrics, dashboard, logs | As in Full, for now; see [Reduced monitoring](#reduced-monitoring) | 16 alarms, 8 custom metrics, a dashboard, and every Lambda's logs |
+
+Lean's limit is the Free plan's 1 million requests a month: a sign-in and its 10 refreshes are 15 requests. Past it, CloudFront doesn't charge more but may slow delivery, so a deployment that grows should move to Full. The WAF trade-off is in [CloudFront flat-rate plans](#cloudfront-flat-rate-plans).
 
 **Summary** (us-east-1 list prices, checked 2026-11-12, with 10 refreshes per sign-in):
 
-| Sign-ins a month | Fixed | Requests | Total |
-| --: | --: | --: | --: |
-| 1,000 | $21.80 | $0.20 | **$22.00** |
-| 10,000 | $21.80 | $1.94 | **$23.74** |
-| 100,000 | $21.80 | $19.42 | **$41.22** |
-| 1,000,000 | $21.80 | $194.21 | **$216.01** |
+| Sign-ins a month | Lean | Full |
+| --: | --: | --: |
+| 1,000 | **$10.40** | **$22.00** |
+| 10,000 | **$11.89** | **$23.74** |
+| 50,000 | **$18.48** | **$31.51** |
+| 100,000 | over the plan | **$41.22** |
+| 1,000,000 | over the plan | **$216.01** |
 
-At low traffic the fixed part dominates, and almost half of it is the WAF ($10). Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins.
+Full's fixed part is $21.80 a month, almost half of it the WAF ($10); Lean's is $10.24, because the Free plan includes the WAF and the zone and there's no canary. At low traffic the fixed part dominates. Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins.
 
 The totals are list prices. They don't count AWS's free tier, which is shared by everything in the account (see [Free tier](#free-tier)), or taxes.
 
@@ -117,11 +133,13 @@ A sign-in sends no email. Emails are for sign-up verification, password resets a
 
 A refresh signs two tokens (a new access token and ID token), so its KMS cost is the same as a sign-in's.
 
+**In Lean**, the Free plan includes CloudFront's and the WAF's part, so a sign-in costs $0.00003784 − $0.00000712 − $0.00000300 = **$0.00002771** and a refresh $0.00001514 − $0.00000134 − $0.00000060 = **$0.00001320**. Discovery and JWKS requests aren't cached at the edge there, but apps fetch them rarely, so they aren't counted.
+
 **Email**, $0.0001 per email, is counted per month below.
 
 ## Fixed monthly cost
 
-What a deployment costs with no sign-ins at all:
+What a Full deployment costs with no sign-ins at all:
 
 | Service | What | Calculation | Cost |
 | -- | -- | -- | --: |
@@ -143,13 +161,27 @@ The canary costs $0.12 + $0.10 + $0.03 + $0.04 + $0.77 = **$1.06** a month, thre
 
 Not counted, because they are a few cents or less: SQS (the work queues and dead-letter queues are empty unless work is outstanding), EventBridge Scheduler (about 8,700 invocations a month), DynamoDB Streams reads (only when configuration changes), the code-signing bucket, and log storage (Lambda logs are kept 30 days, so about one month's logs are stored at a time: at 1 million sign-ins, 15 million requests × 1,131 bytes is 15.8 GB, at most $0.47 a month stored, before compression).
 
+**Lean** has no WAF or zone charge (the Free plan includes them) and no canary: $3.03 (KMS) + $1.80 (alarms) + $2.40 (metrics) + $3.00 (dashboard) + $0.01 (background jobs) = **$10.24**.
+
 **Storage** depends on users, not sign-ins. DynamoDB storage is free up to 25 GB, and point-in-time recovery on the Config table costs $0.20 per GB-month of that table. At about 1 KB a user, 100,000 users are 0.1 GB: $0.02 a month.
 
 **Custom login hosts** are tenants of a CloudFront multi-tenant distribution. The first 10 tenants have no charge; see the CloudFront pricing page for more. They are optional (`custom_hosts = false` leaves the distribution out), which costs nothing either way.
 
 ## Totals
 
-With **R = 10 refreshes per sign-in** (an app whose users stay signed in for about ten access token lifetimes) and **one email per 20 sign-ins**. N is sign-ins a month:
+With **R = 10 refreshes per sign-in** (an app whose users stay signed in for about ten access token lifetimes) and **one email per 20 sign-ins**. N is sign-ins a month.
+
+**Lean:**
+
+| N | Sign-ins | Refreshes | Email | Requests total | Fixed | **Total** |
+| --: | --: | --: | --: | --: | --: | --: |
+| 1,000 | $0.03 | $0.13 | $0.01 | $0.16 | $10.24 | **$10.40** |
+| 10,000 | $0.28 | $1.32 | $0.05 | $1.65 | $10.24 | **$11.89** |
+| 50,000 | $1.39 | $6.60 | $0.25 | $8.24 | $10.24 | **$18.48** |
+
+50,000 sign-ins are 750,000 requests, within the plan's 1 million.
+
+**Full:**
 
 - sign-ins: N × $0.00003784
 - refreshes: N × 10 × $0.00001514
@@ -166,13 +198,24 @@ X-Ray traces are requests = N × (5 + 10), plus the canary's 86,400 ($0.43). At 
 
 For a different refresh rate, add or remove N × $0.00001514 for each refresh per sign-in. With no refreshes at all, 1 million sign-ins cost $37.84 + $5.00 = $42.84 in requests.
 
+## Reduced monitoring
+
+Not available yet: every deployment has the same alarms, metrics, dashboard and logs. A reduced setting for Lean could save, a month:
+
+- **Custom metrics only for alarms.** The 3 that alarms use (`RefreshTokenReuse`, `KMSSignFailed`, `OldestOutstandingWorkAge`) would stay metrics, and the rest would become log fields, as the latencies are: up to 5 × $0.30 = $1.50.
+- **One Lambda throttles alarm** for the account instead of one per function: 4 × $0.10 = $0.40.
+- **No dashboard**: $3.00, or nothing in an account with 3 dashboards or fewer.
+- **No Lambda platform log lines** (`platform.start` and `platform.report`, about 510 of the 1,131 bytes a request): $0.00000024 a request, $0.04 at 10,000 sign-ins.
+
+Together, about $4.90 a month, which would bring Lean's fixed part to about $5.34.
+
 ## What changes the numbers
 
 - **Refreshes.** At 10 per sign-in they are over 70% of the request cost. Longer access tokens mean fewer refreshes.
 - **DynamoDB writes** are the largest per-request cost: 19 write units per sign-in, 16 of them the code exchange's transaction, which saves the refresh token, the session's tokens and the code's use in one step.
 - **KMS `Sign`**: $0.000003 per token. Every sign-in and refresh signs two.
 - **X-Ray**: turning on the Auth Lambda's tracing (`tracing = true`) adds up to $0.000005 a request.
-- **The WAF** is almost half the fixed cost. It is shared by every login host in the deployment, so it doesn't grow with organizations or hosts. A CloudFront flat-rate plan could include it, but not on the Free plan: see below.
+- **The WAF** is almost half the fixed cost. It is shared by every login host in the deployment, so it doesn't grow with organizations or hosts. Lean has none to pay: CloudFront's Free plan includes it, with fewer rules (see below).
 - **Data transfer** is small: 20 KB a sign-in is 20 GB at 1 million sign-ins, $1.62.
 
 ## CloudFront flat-rate plans
@@ -210,4 +253,4 @@ AWS's free tier is per account, shared with anything else in it, so the totals a
 - CloudFront: 10 million requests, 1 TB of data and 2 million function runs a month. Up to about 660,000 sign-ins a month with 10 refreshes each, CloudFront's request part is free.
 - DynamoDB: 25 GB of storage and 2.5 million stream read units a month.
 
-Lambda, X-Ray, KMS and CloudWatch have free tiers too; see each service's pricing page.
+Lambda, X-Ray, KMS and CloudWatch have free tiers too; see each service's pricing page. CloudWatch's always-free 10 custom metrics, 10 alarm metrics and 3 dashboards matter most to Lean: in an account of its own, they leave about $3.84 of its fixed part ($3.03 of KMS and $0.80 of alarms).
