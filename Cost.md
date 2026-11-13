@@ -13,7 +13,7 @@ What one LiteLogin deployment costs per month on AWS, in two setups, at 1,000 to
 | Caching | None: the Free plan allows only AWS managed cache policies | Discovery and JWKS cached at the edge |
 | Synthetic monitor | Off (`canary_start = false`) | On |
 | X-Ray tracing | Off | Optional (`tracing = true`) |
-| Alarms, metrics, dashboard, logs | As in Full, for now; see [Reduced monitoring](#reduced-monitoring) | 16 alarms, 8 custom metrics, a dashboard, and every Lambda's logs |
+| Alarms, metrics, dashboard, logs | Reduced (`monitoring = "reduced"`): 13 alarms, 3 custom metrics, no dashboard, no per-invocation platform log lines; see [Reduced monitoring](#reduced-monitoring) | Full: 16 alarms, 8 custom metrics, a dashboard, and every log line |
 
 Lean's limit is the Free plan's 1 million requests a month: a sign-in and its 10 refreshes are 15 requests. Past it, CloudFront doesn't charge more but may slow delivery, so a deployment that grows should move to Full. The WAF trade-off is in [CloudFront flat-rate plans](#cloudfront-flat-rate-plans).
 
@@ -21,13 +21,13 @@ Lean's limit is the Free plan's 1 million requests a month: a sign-in and its 10
 
 | Sign-ins a month | Lean | Full |
 | --: | --: | --: |
-| 1,000 | **$10.40** | **$22.00** |
-| 10,000 | **$11.89** | **$23.74** |
-| 50,000 | **$18.48** | **$31.51** |
+| 1,000 | **$5.60** | **$22.00** |
+| 10,000 | **$7.05** | **$23.74** |
+| 50,000 | **$13.50** | **$31.51** |
 | 100,000 | over the plan | **$41.22** |
 | 1,000,000 | over the plan | **$216.01** |
 
-Full's fixed part is $21.80 a month, almost half of it the WAF ($10); Lean's is $10.24, because the Free plan includes the WAF and the zone and there's no canary. At low traffic the fixed part dominates. Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins.
+Full's fixed part is $21.80 a month, almost half of it the WAF ($10); Lean's is $5.44, because the Free plan includes the WAF and the zone, there's no canary, and it has less monitoring. At low traffic the fixed part dominates. Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins.
 
 The totals are list prices. They don't count AWS's free tier, which is shared by everything in the account (see [Free tier](#free-tier)), or taxes.
 
@@ -133,7 +133,7 @@ A sign-in sends no email. Emails are for sign-up verification, password resets a
 
 A refresh signs two tokens (a new access token and ID token), so its KMS cost is the same as a sign-in's.
 
-**In Lean**, the Free plan includes CloudFront's and the WAF's part, so a sign-in costs $0.00003784 − $0.00000712 − $0.00000300 = **$0.00002771** and a refresh $0.00001514 − $0.00000134 − $0.00000060 = **$0.00001320**. Discovery and JWKS requests aren't cached at the edge there, but apps fetch them rarely, so they aren't counted.
+**In Lean**, the Free plan includes CloudFront's and the WAF's part, and a request logs 621 bytes instead of 1,131 (no platform lines), $0.00000029 of logs instead of $0.00000053. So a sign-in costs $0.00000333 + $0.00001575 + $0.00000600 + 5 × $0.00000029 = **$0.00002653** and a refresh $0.00000067 + $0.00000600 + $0.00000600 + $0.00000029 = **$0.00001296**. Discovery and JWKS requests aren't cached at the edge there, but apps fetch them rarely, so they aren't counted.
 
 **Email**, $0.0001 per email, is counted per month below.
 
@@ -161,7 +161,7 @@ The canary costs $0.12 + $0.10 + $0.03 + $0.04 + $0.77 = **$1.06** a month, thre
 
 Not counted, because they are a few cents or less: SQS (the work queues and dead-letter queues are empty unless work is outstanding), EventBridge Scheduler (about 8,700 invocations a month), DynamoDB Streams reads (only when configuration changes), the code-signing bucket, and log storage (Lambda logs are kept 30 days, so about one month's logs are stored at a time: at 1 million sign-ins, 15 million requests × 1,131 bytes is 15.8 GB, at most $0.47 a month stored, before compression).
 
-**Lean** has no WAF or zone charge (the Free plan includes them) and no canary: $3.03 (KMS) + $1.80 (alarms) + $2.40 (metrics) + $3.00 (dashboard) + $0.01 (background jobs) = **$10.24**.
+**Lean** has no WAF or zone charge (the Free plan includes them), no canary, and reduced monitoring: $3.03 (KMS) + 15 × $0.10 (alarms: 9 on one metric, 3 on two) + 3 × $0.30 (metrics) + $0.01 (background jobs) = **$5.44**.
 
 **Storage** depends on users, not sign-ins. DynamoDB storage is free up to 25 GB, and point-in-time recovery on the Config table costs $0.20 per GB-month of that table. At about 1 KB a user, 100,000 users are 0.1 GB: $0.02 a month.
 
@@ -175,9 +175,9 @@ With **R = 10 refreshes per sign-in** (an app whose users stay signed in for abo
 
 | N | Sign-ins | Refreshes | Email | Requests total | Fixed | **Total** |
 | --: | --: | --: | --: | --: | --: | --: |
-| 1,000 | $0.03 | $0.13 | $0.01 | $0.16 | $10.24 | **$10.40** |
-| 10,000 | $0.28 | $1.32 | $0.05 | $1.65 | $10.24 | **$11.89** |
-| 50,000 | $1.39 | $6.60 | $0.25 | $8.24 | $10.24 | **$18.48** |
+| 1,000 | $0.03 | $0.13 | $0.01 | $0.16 | $5.44 | **$5.60** |
+| 10,000 | $0.27 | $1.30 | $0.05 | $1.61 | $5.44 | **$7.05** |
+| 50,000 | $1.33 | $6.48 | $0.25 | $8.06 | $5.44 | **$13.50** |
 
 50,000 sign-ins are 750,000 requests, within the plan's 1 million.
 
@@ -200,14 +200,14 @@ For a different refresh rate, add or remove N × $0.00001514 for each refresh pe
 
 ## Reduced monitoring
 
-Not available yet: every deployment has the same alarms, metrics, dashboard and logs. A reduced setting for Lean could save, a month:
+`monitoring = "reduced"` (Lean) keeps every alarm's coverage but costs less:
 
-- **Custom metrics only for alarms.** The 3 that alarms use (`RefreshTokenReuse`, `KMSSignFailed`, `OldestOutstandingWorkAge`) would stay metrics, and the rest would become log fields, as the latencies are: up to 5 × $0.30 = $1.50.
-- **One Lambda throttles alarm** for the account instead of one per function: 4 × $0.10 = $0.40.
-- **No dashboard**: $3.00, or nothing in an account with 3 dashboards or fewer.
-- **No Lambda platform log lines** (`platform.start` and `platform.report`, about 510 of the 1,131 bytes a request): $0.00000024 a request, $0.04 at 10,000 sign-ins.
+- **Custom metrics only for alarms.** The 3 metrics alarms watch (`RefreshTokenReuse`, `KMSSignFailed`, `OldestOutstandingWorkAge`) are still metrics; the others are written as log fields, as the latencies always are, and Logs Insights can still count them. 8 metrics become 3: $1.50 less.
+- **One Lambda throttles alarm** for the account (Lambda's `Throttles` without a function dimension) instead of one per function: 4 alarms become 1, $0.30 less. Each function's own `Throttles` metric still says which one.
+- **No dashboard**: $3.00 less, or nothing in an account with 3 dashboards or fewer.
+- **No Lambda platform log lines** for successful invocations (system log level `WARN`): `platform.start` and `platform.report` are about 510 of a request's 1,131 log bytes. An invocation that crashes or times out still logs them, with its status, and handler errors are logged as before.
 
-Together, about $4.90 a month, which would bring Lean's fixed part to about $5.34.
+Together, $4.80 a month of fixed cost, plus $0.00000024 a request of logs.
 
 ## What changes the numbers
 
@@ -253,4 +253,4 @@ AWS's free tier is per account, shared with anything else in it, so the totals a
 - CloudFront: 10 million requests, 1 TB of data and 2 million function runs a month. Up to about 660,000 sign-ins a month with 10 refreshes each, CloudFront's request part is free.
 - DynamoDB: 25 GB of storage and 2.5 million stream read units a month.
 
-Lambda, X-Ray, KMS and CloudWatch have free tiers too; see each service's pricing page. CloudWatch's always-free 10 custom metrics, 10 alarm metrics and 3 dashboards matter most to Lean: in an account of its own, they leave about $3.84 of its fixed part ($3.03 of KMS and $0.80 of alarms).
+Lambda, X-Ray, KMS and CloudWatch have free tiers too; see each service's pricing page. CloudWatch's always-free 10 custom metrics and 10 alarm metrics matter most to Lean: in an account of its own, they leave about $3.54 of its fixed part ($3.03 of KMS and $0.50 of alarms).

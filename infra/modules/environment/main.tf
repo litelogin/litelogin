@@ -81,6 +81,16 @@ variable "cloudfront_free_plan" {
   default     = false
 }
 
+variable "monitoring" {
+  description = "\"full\": every alarm, metric, the dashboard and all of Lambda's log lines. \"reduced\": only the metrics alarms use, one Lambda throttles alarm, no dashboard, and no per-invocation platform log lines, $4.80 a month less (Cost.md, \"Reduced monitoring\")."
+  type        = string
+  default     = "full"
+  validation {
+    condition     = contains(["full", "reduced"], var.monitoring)
+    error_message = "monitoring must be \"full\" or \"reduced\"."
+  }
+}
+
 variable "rate_limit_exempt_cidrs" {
   description = "Addresses exempt from WAF rate limits, only while a load test runs (test/load/README.md)."
   type        = list(string)
@@ -88,7 +98,8 @@ variable "rate_limit_exempt_cidrs" {
 }
 
 locals {
-  name_prefix = "litelogin-${var.environment}"
+  name_prefix        = "litelogin-${var.environment}"
+  reduced_monitoring = var.monitoring == "reduced"
 }
 
 # CloudFront's certificate and WAF, and the Worker's certificate
@@ -130,6 +141,7 @@ module "signing" {
   config_table_arn   = module.tables.config_table_arn
   session_table_name = module.tables.session_table_name
   table_kms_key_arn  = module.kms.tables_key_arn
+  reduced_monitoring = local.reduced_monitoring
 }
 
 data "aws_region" "current" {}
@@ -191,14 +203,15 @@ module "auth" {
   memory_size            = 1024
   function_url_auth_type = "NONE"
   tracing                = var.tracing
+  system_log_level       = local.reduced_monitoring ? "WARN" : "INFO"
 
-  environment = {
+  environment = merge({
     LITELOGIN_CONFIG_TABLE         = module.tables.config_table_name
     LITELOGIN_SESSION_TABLE        = module.tables.session_table_name
     LITELOGIN_ORIGIN_SECRET_HASHES = join(",", module.edge.origin_secret_hashes)
     LITELOGIN_EMAIL_FROM           = module.email.from_address
     LITELOGIN_SES_CONFIGURATION    = module.email.configuration_set_name
-  }
+  }, local.reduced_monitoring ? { LITELOGIN_METRICS = "reduced" } : {})
 }
 
 module "edge" {
@@ -236,6 +249,7 @@ module "admin" {
   ses_configuration_set_name = module.email.configuration_set_name
   ses_configuration_set_arn  = module.email.configuration_set_arn
   custom_host_target         = var.custom_hosts ? module.edge.routing_endpoint : ""
+  reduced_monitoring         = local.reduced_monitoring
 }
 
 module "jobs" {
@@ -258,13 +272,15 @@ module "jobs" {
     routing_endpoint     = module.edge.routing_endpoint
   } : null
 
-  alarm_actions = [module.monitoring.alarm_topic_arn]
+  reduced_monitoring = local.reduced_monitoring
+  alarm_actions      = [module.monitoring.alarm_topic_arn]
 }
 
 module "monitoring" {
   source      = "../monitoring"
   name_prefix = local.name_prefix
   alarm_email = var.alarm_email
+  reduced     = local.reduced_monitoring
   function_names = {
     auth   = module.auth.function_name
     admin  = module.admin.function_name
@@ -328,8 +344,8 @@ output "custom_host_cname_target" {
 }
 
 output "dashboard" {
-  description = "The environment's CloudWatch dashboard."
-  value       = "https://${data.aws_region.current.region}.console.aws.amazon.com/cloudwatch/home?region=${data.aws_region.current.region}#dashboards/dashboard/${module.monitoring.dashboard_name}"
+  description = "The environment's CloudWatch dashboard, or null with reduced monitoring."
+  value       = local.reduced_monitoring ? null : "https://${data.aws_region.current.region}.console.aws.amazon.com/cloudwatch/home?region=${data.aws_region.current.region}#dashboards/dashboard/${module.monitoring.dashboard_name}"
 }
 
 output "canary_parameter_name" {

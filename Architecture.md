@@ -439,6 +439,7 @@ If a deployment needs instant client or org disablement, shorten the cache time 
 - **Synthetic monitoring:** a Lambda function, run every 5 minutes by EventBridge Scheduler, signs in to a dedicated test client end to end: discovery, JWKS, `/authorize`, login, code exchange, `/userinfo`, refresh and logout. It catches failures that per-component metrics miss, and an alarm fires when two runs in a row fail. It isn't a CloudWatch Synthetics canary: it makes HTTP requests only, and Synthetics' price per run would be most of its cost. Its configuration, including the test user's password, is an SSM SecureString parameter that Terraform doesn't manage, so the password stays out of Terraform state.
 - **Tracing:** AWS X-Ray on the Auth Lambda, when `tracing` is set. It's off by default: traces cost $5 per million requests (Cost.md).
 - **Where:** each environment has a dashboard named after it, and every alarm notifies one SNS topic (`litelogin-<env>-alarms`); set `alarm_email` to subscribe an address. The work age alarm also fires if the reconciler stops reporting.
+- **Reduced monitoring** (`monitoring = "reduced"`, for small deployments): only the metrics alarms watch (refresh token reuse, KMS `Sign` failures and work age) are metrics, and the others are log fields; one alarm covers every function's throttles; there's no dashboard; and Lambda logs no `platform.start` or `platform.report` line for a successful invocation (system log level `WARN`). The same alarms fire (Cost.md).
 
 ## Quotas
 

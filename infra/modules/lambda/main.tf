@@ -77,6 +77,16 @@ variable "code_signing" {
   default = null
 }
 
+variable "system_log_level" {
+  description = "Lambda's own log lines kept: INFO keeps each invocation's platform.start and platform.report lines; WARN drops them (reduced monitoring, Cost.md)."
+  type        = string
+  default     = "INFO"
+  validation {
+    condition     = contains(["DEBUG", "INFO", "WARN"], var.system_log_level)
+    error_message = "system_log_level must be DEBUG, INFO or WARN."
+  }
+}
+
 variable "tracing" {
   description = "Trace invocations with AWS X-Ray (active tracing)."
   type        = bool
@@ -201,10 +211,12 @@ resource "aws_lambda_function" "this" {
     mode = var.tracing ? "Active" : "PassThrough"
   }
 
-  # The Go functions write JSON logs with log/slog.
+  # The Go functions write JSON logs with log/slog. The system log level
+  # is always set: it's computed, so leaving it out wouldn't put it back.
   logging_config {
-    log_format = "JSON"
-    log_group  = aws_cloudwatch_log_group.this.name
+    log_format       = "JSON"
+    log_group        = aws_cloudwatch_log_group.this.name
+    system_log_level = var.system_log_level
   }
 
   depends_on = [aws_iam_role_policy.logs]

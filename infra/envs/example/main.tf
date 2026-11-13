@@ -62,6 +62,12 @@ variable "cloudfront_free_plan" {
   default     = false
 }
 
+variable "monitoring" {
+  description = "\"full\" or \"reduced\": reduced publishes only the metrics alarms use, has one Lambda throttles alarm, no dashboard and no per-invocation platform log lines (Cost.md, \"Reduced monitoring\")."
+  type        = string
+  default     = "full"
+}
+
 variable "rate_limit_exempt_cidrs" {
   description = "Addresses exempt from WAF rate limits, only while a load test runs (test/load/README.md)."
   type        = list(string)
@@ -90,6 +96,7 @@ module "litelogin" {
   tracing                 = var.tracing
   custom_hosts            = var.custom_hosts
   cloudfront_free_plan    = var.cloudfront_free_plan
+  monitoring              = var.monitoring
   rate_limit_exempt_cidrs = var.rate_limit_exempt_cidrs
 }
 
@@ -127,7 +134,7 @@ output "custom_host_cname_target" {
 }
 
 output "dashboard" {
-  description = "The environment's CloudWatch dashboard."
+  description = "The environment's CloudWatch dashboard, or null with reduced monitoring."
   value       = module.litelogin.dashboard
 }
 

@@ -11,6 +11,7 @@ package metrics
 import (
 	"encoding/json"
 	"io"
+	"os"
 	"sync"
 	"time"
 )
@@ -46,6 +47,16 @@ const (
 // latency widget queries them with CloudWatch Logs Insights), which costs
 // nothing until queried, where a metric costs $0.30 a month (Cost.md).
 var logOnly = map[string]bool{TokenLatency: true, PasswordVerifyLatency: true, KMSSignLatency: true}
+
+// Alarmed are the metrics the alarms watch (infra/modules/monitoring).
+// With reduced monitoring, they're the only records written as metrics;
+// the others are log fields, which Logs Insights can still count.
+var Alarmed = map[string]bool{RefreshReuse: true, KMSSignFailed: true, OldestWorkAge: true}
+
+// EnvMetrics selects the metrics a Lambda publishes: "reduced" publishes
+// only the Alarmed ones (Cost.md, "Reduced monitoring"); anything else,
+// all of them.
+const EnvMetrics = "LITELOGIN_METRICS"
 
 // Units.
 const (
@@ -93,13 +104,17 @@ type EMF struct {
 	Service string
 	// Now returns the time; nil means time.Now.
 	Now func() time.Time
+	// Reduced writes only the Alarmed records as metrics.
+	Reduced bool
 
 	mu sync.Mutex
 }
 
 // NewEMF returns an EMF recorder for a service writing to w (the Lambda's
-// stdout, which CloudWatch Logs collects).
-func NewEMF(w io.Writer, service string) *EMF { return &EMF{W: w, Service: service} }
+// stdout, which CloudWatch Logs collects), reduced if EnvMetrics says so.
+func NewEMF(w io.Writer, service string) *EMF {
+	return &EMF{W: w, Service: service, Reduced: os.Getenv(EnvMetrics) == "reduced"}
+}
 
 // Record writes one metric record.
 func (e *EMF) Record(name string, value float64, unit string, dims ...Dim) {
@@ -116,7 +131,7 @@ func (e *EMF) Record(name string, value float64, unit string, dims ...Dim) {
 		keys = append(keys, d.Name)
 		line[d.Name] = d.Value
 	}
-	if logOnly[name] {
+	if logOnly[name] || (e.Reduced && !Alarmed[name]) {
 		line["Unit"] = unit
 	} else {
 		line["_aws"] = map[string]any{

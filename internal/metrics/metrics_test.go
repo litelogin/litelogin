@@ -74,3 +74,41 @@ func TestMemory(t *testing.T) {
 		t.Errorf("records = %+v", m.Records)
 	}
 }
+
+// With reduced monitoring, only the alarmed metrics are metrics; the rest
+// are log fields.
+func TestEMFReduced(t *testing.T) {
+	t.Setenv(EnvMetrics, "reduced")
+	var buf bytes.Buffer
+	e := NewEMF(&buf, "auth")
+	if !e.Reduced {
+		t.Fatal("not reduced")
+	}
+	Count(e, LoginSucceeded, 1)
+	Count(e, RefreshReuse, 1)
+	Count(e, KMSSignFailed, 1, Reason("throttled"))
+	Seconds(e, OldestWorkAge, time.Minute)
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("lines = %q", lines)
+	}
+	for i, line := range lines {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatal(err)
+		}
+		_, metric := rec["_aws"]
+		if want := i > 0; metric != want {
+			t.Errorf("record %d is a metric: %v, want %v: %s", i, metric, want, line)
+		}
+		if i == 0 && (rec["LoginSucceeded"] != 1.0 || rec["Unit"] != "Count") {
+			t.Errorf("log field = %s", line)
+		}
+	}
+
+	t.Setenv(EnvMetrics, "")
+	if NewEMF(&buf, "auth").Reduced {
+		t.Error("reduced without the setting")
+	}
+}

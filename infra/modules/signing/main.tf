@@ -15,6 +15,12 @@ terraform {
   }
 }
 
+variable "reduced_monitoring" {
+  description = "Drop Lambda's platform log lines (Cost.md, \"Reduced monitoring\"). The rotate function publishes no metrics."
+  type        = bool
+  default     = false
+}
+
 variable "name_prefix" {
   description = "Prefix for resource names, e.g. litelogin-dev."
   type        = string
@@ -165,6 +171,8 @@ module "rotate" {
   policy_json  = data.aws_iam_policy_document.rotate.json
   memory_size  = 256
   timeout      = 60
+
+  system_log_level = var.reduced_monitoring ? "WARN" : "INFO"
 
   environment = {
     LITELOGIN_CONFIG_TABLE  = var.config_table_name

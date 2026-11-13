@@ -69,6 +69,12 @@ variable "custom_hosts" {
   default = null
 }
 
+variable "reduced_monitoring" {
+  description = "Drop Lambda's platform log lines and publish only the metrics alarms use (Cost.md, \"Reduced monitoring\")."
+  type        = bool
+  default     = false
+}
+
 variable "reconcile_schedule" {
   description = "How often the reconciler retries stalled custom host and pool deletion work."
   type        = string
@@ -234,14 +240,16 @@ module "worker" {
   memory_size  = 256
   timeout      = local.worker_timeout
 
-  environment = {
+  system_log_level = var.reduced_monitoring ? "WARN" : "INFO"
+
+  environment = merge({
     LITELOGIN_CONFIG_TABLE           = var.config_table_name
     LITELOGIN_SESSION_TABLE          = var.session_table_name
     LITELOGIN_CONTINUATION_QUEUE_URL = aws_sqs_queue.continuation.url
     LITELOGIN_TENANT_DISTRIBUTION_ID = try(var.custom_hosts.distribution_id, "")
     LITELOGIN_CONNECTION_GROUP_ID    = try(var.custom_hosts.connection_group_id, "")
     LITELOGIN_ROUTING_ENDPOINT       = try(var.custom_hosts.routing_endpoint, "")
-  }
+  }, var.reduced_monitoring ? { LITELOGIN_METRICS = "reduced" } : {})
 }
 
 # ---- Triggers ----

@@ -231,6 +231,7 @@ Users can then add a passkey on their account page and sign in with it. A passke
 
   If you set it up before it was a plain Lambda function, its configuration was a Secrets Manager secret, which the upgrade schedules for deletion: create the parameter from the same JSON before you apply. Until you do, the alarm fires.
 - **Tracing:** set `tracing = true` to trace the Auth Lambda with AWS X-Ray, at $5 per million requests.
+- **Reduced monitoring:** `monitoring = "reduced"` costs $4.80 a month less, for small deployments ([Cost.md](Cost.md#reduced-monitoring)). The alarms still cover the same failures, but there's no dashboard: only the metrics alarms use are published, and the rest (sign-ins, tokens issued, failures by reason) are log fields, which CloudWatch Logs Insights can count. Successful invocations log no `platform.start` or `platform.report` line.
 
 ## Upgrading
 

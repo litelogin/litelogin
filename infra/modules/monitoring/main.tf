@@ -35,6 +35,12 @@ variable "alarm_email" {
   default     = ""
 }
 
+variable "reduced" {
+  description = "Reduced monitoring (Cost.md): one Throttles alarm for every Lambda in the account instead of one per function, and no dashboard."
+  type        = bool
+  default     = false
+}
+
 variable "refresh_reuse_threshold" {
   description = "Refresh token reuses in 5 minutes that count as a spike."
   type        = number
@@ -72,7 +78,7 @@ resource "aws_sns_topic_subscription" "email" {
 
 resource "aws_cloudwatch_metric_alarm" "lambda" {
   for_each = {
-    for pair in setproduct(keys(var.function_names), ["Errors", "Throttles"]) : "${pair[0]}-${lower(pair[1])}" => {
+    for pair in setproduct(keys(var.function_names), var.reduced ? ["Errors"] : ["Errors", "Throttles"]) : "${pair[0]}-${lower(pair[1])}" => {
       function = var.function_names[pair[0]]
       metric   = pair[1]
     }
@@ -83,6 +89,26 @@ resource "aws_cloudwatch_metric_alarm" "lambda" {
   namespace           = "AWS/Lambda"
   metric_name         = each.value.metric
   dimensions          = { FunctionName = each.value.function }
+  statistic           = "Sum"
+  period              = local.period
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
+# With reduced monitoring, one alarm on the account's Throttles (Lambda's
+# metric without a function dimension), which costs one alarm instead of
+# one per function. The dashboard shows which function it was.
+resource "aws_cloudwatch_metric_alarm" "lambda_throttles" {
+  count = var.reduced ? 1 : 0
+
+  alarm_name          = "${var.name_prefix}-lambda-throttles"
+  alarm_description   = "A Lambda function in the account was throttled; each function's Throttles metric says which."
+  namespace           = "AWS/Lambda"
+  metric_name         = "Throttles"
   statistic           = "Sum"
   period              = local.period
   evaluation_periods  = 1
@@ -254,7 +280,15 @@ locals {
   ]
 }
 
+moved {
+  from = aws_cloudwatch_dashboard.this
+  to   = aws_cloudwatch_dashboard.this[0]
+}
+
+# None with reduced monitoring: most of its metrics are log fields then.
 resource "aws_cloudwatch_dashboard" "this" {
+  count = var.reduced ? 0 : 1
+
   dashboard_name = var.name_prefix
   dashboard_body = jsonencode({
     widgets = concat(
@@ -296,5 +330,6 @@ output "alarm_topic_arn" {
 }
 
 output "dashboard_name" {
-  value = aws_cloudwatch_dashboard.this.dashboard_name
+  description = "Null with reduced monitoring."
+  value       = one(aws_cloudwatch_dashboard.this[*].dashboard_name)
 }
