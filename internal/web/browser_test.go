@@ -3,6 +3,7 @@ package web_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -231,9 +232,12 @@ func (c *chrome) read() {
 	}
 }
 
-// call sends a DevTools command and decodes its result into out.
-func (c *chrome) call(method string, params, out any) {
-	c.t.Helper()
+// errNoReply is send's error when Chrome doesn't answer in time.
+var errNoReply = errors.New("no reply")
+
+// send sends a DevTools command and waits up to timeout for its reply. A
+// reply that comes later is dropped.
+func (c *chrome) send(method string, params any, timeout time.Duration) (cdpReply, error) {
 	c.mu.Lock()
 	c.next++
 	id := c.next
@@ -244,23 +248,38 @@ func (c *chrome) call(method string, params, out any) {
 		params = map[string]any{}
 	}
 	if err := websocket.JSON.Send(c.conn, map[string]any{"id": id, "method": method, "params": params}); err != nil {
-		c.t.Fatalf("%s: %v", method, err)
+		return cdpReply{}, err
 	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
 	case r, ok := <-ch:
 		if !ok {
-			c.t.Fatalf("%s: connection closed", method)
+			return cdpReply{}, errors.New("connection closed")
 		}
-		if r.Error != nil {
-			c.t.Fatalf("%s: %s", method, r.Error.Message)
+		return r, nil
+	case <-timer.C:
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+		return cdpReply{}, errNoReply
+	}
+}
+
+// call sends a DevTools command and decodes its result into out.
+func (c *chrome) call(method string, params, out any) {
+	c.t.Helper()
+	r, err := c.send(method, params, 30*time.Second)
+	if err != nil {
+		c.t.Fatalf("%s: %v", method, err)
+	}
+	if r.Error != nil {
+		c.t.Fatalf("%s: %s", method, r.Error.Message)
+	}
+	if out != nil {
+		if err := json.Unmarshal(r.Result, out); err != nil {
+			c.t.Fatalf("%s: %v", method, err)
 		}
-		if out != nil {
-			if err := json.Unmarshal(r.Result, out); err != nil {
-				c.t.Fatalf("%s: %v", method, err)
-			}
-		}
-	case <-time.After(30 * time.Second):
-		c.t.Fatalf("%s: no reply", method)
 	}
 }
 
@@ -287,12 +306,28 @@ func (c *chrome) eval(expr string) any {
 }
 
 // waitFor waits until the JavaScript condition is true in the page.
+//
+// Each check gets 2 seconds: while a navigation replaces the page,
+// Runtime.evaluate can fail ("Execution context was destroyed") or get no
+// reply at all, and either only means the condition isn't true yet.
 func (c *chrome) waitFor(cond string) {
 	c.t.Helper()
+	expr := "(() => { try { return !!(" + cond + ") } catch { return false } })()"
 	deadline := time.Now().Add(20 * time.Second)
 	for {
-		if v, _ := c.eval("(() => { try { return !!(" + cond + ") } catch { return false } })()").(bool); v {
-			return
+		r, err := c.send("Runtime.evaluate", map[string]any{"expression": expr, "returnByValue": true}, 2*time.Second)
+		if err != nil && !errors.Is(err, errNoReply) {
+			c.t.Fatalf("waiting for %s: %v", cond, err)
+		}
+		if err == nil && r.Error == nil {
+			var v struct {
+				Result struct {
+					Value bool `json:"value"`
+				} `json:"result"`
+			}
+			if json.Unmarshal(r.Result, &v) == nil && v.Result.Value {
+				return
+			}
 		}
 		if time.Now().After(deadline) {
 			c.t.Fatalf("timed out waiting for %s; page at %v shows:\n%v", cond, c.eval("location.href"), c.eval("document.body ? document.body.innerText : ''"))
