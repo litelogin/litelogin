@@ -56,6 +56,12 @@ variable "custom_hosts" {
   default     = true
 }
 
+variable "cloudfront_free_plan" {
+  description = "Put the default login hosts' distribution, its WAF and the Route 53 zone on CloudFront's Free flat-rate plan, saving about $10.50 a month. It drops the sign-in endpoints' stricter rate limit and the loopback-redirects rule, which the plan doesn't allow (Cost.md). Needs custom_hosts = false."
+  type        = bool
+  default     = false
+}
+
 variable "rate_limit_exempt_cidrs" {
   description = "Addresses exempt from WAF rate limits, only while a load test runs (test/load/README.md)."
   type        = list(string)
@@ -92,6 +98,7 @@ module "litelogin" {
   canary_start            = var.canary_start
   tracing                 = var.tracing
   custom_hosts            = var.custom_hosts
+  cloudfront_free_plan    = var.cloudfront_free_plan
   rate_limit_exempt_cidrs = var.rate_limit_exempt_cidrs
 }
 

@@ -30,7 +30,7 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 
 | Threat | Control | Status |
 | -- | -- | -- |
-| Password guessing and credential stuffing | WAF rate limit per IP on `/login`, `/register`, `/password/*`, `/passkey/*`, `/token` (infra/modules/edge); account lockout after 5 failures for 15 minutes (internal/web/web.go) | verified |
+| Password guessing and credential stuffing | WAF rate limit per IP on `/login`, `/register`, `/password/*`, `/passkey/*`, `/token` (infra/modules/edge), not on CloudFront's Free plan (`cloudfront_free_plan`), which leaves only the limit for every path; account lockout after 5 failures for 15 minutes (internal/web/web.go) | verified |
 | Account enumeration through sign-in | One message for unknown, locked and inactive accounts; a dummy argon2id verification so timing matches (internal/web/flows.go, internal/crypto/password.go) | verified |
 | Enumeration through registration and password reset | Same response either way; the existing owner is emailed instead (internal/web/flows.go, `register`, `forgot`) | verified |
 | Enumeration through email change (signed in) | The request gets the same response either way; only the confirmation link, sent to the new address, says if another account already uses it, so only that address's owner can learn it (internal/web/account.go) | verified |

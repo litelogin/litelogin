@@ -11,11 +11,15 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = ">= 6.0"
+      version = ">= 6.72"
     }
     random = {
       source  = "hashicorp/random"
       version = ">= 3.6"
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = ">= 0.12"
     }
   }
 }
@@ -64,6 +68,20 @@ variable "global_rate_limit" {
   description = "Requests per IP per 5 minutes to any endpoint."
   type        = number
   default     = 3000
+}
+
+variable "free_plan" {
+  description = <<-EOT
+    Put the distribution, its web ACL and the zone on CloudFront's Free
+    flat-rate plan, which includes them at no charge (Cost.md). The plan
+    allows no WAF rule that matches paths or labels, so this drops
+    auth-endpoints-rate and loopback-redirects; it allows only AWS managed
+    cache and origin request policies, so nothing is cached; and it uses
+    every edge location. Needs custom_hosts = false and no
+    rate_limit_exempt_cidrs.
+  EOT
+  type        = bool
+  default     = false
 }
 
 locals {
@@ -208,14 +226,36 @@ data "aws_cloudfront_cache_policy" "disabled" {
   name = "Managed-CachingDisabled"
 }
 
+# The Free flat-rate plan allows only AWS managed cache and origin request
+# policies. This one forwards everything the Lambda needs (the
+# x-litelogin-host the function sets, CloudFront-Viewer-Address,
+# Authorization, cookies, query strings) except Host. No managed cache
+# policy keys on x-litelogin-host without forwarding Host, so on the plan
+# nothing is cached: /.well-known/* goes to the Lambda too.
+data "aws_cloudfront_origin_request_policy" "all_viewer_except_host" {
+  name = "Managed-AllViewerExceptHostHeader"
+}
+
+locals {
+  auth_origin_request_policy = var.free_plan ? data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id : aws_cloudfront_origin_request_policy.auth.id
+  api_origin_request_policy  = var.free_plan ? data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id : aws_cloudfront_origin_request_policy.api.id
+  api_cache_policy           = var.free_plan ? data.aws_cloudfront_cache_policy.disabled.id : aws_cloudfront_cache_policy.api.id
+  well_known_cache_policy    = var.free_plan ? data.aws_cloudfront_cache_policy.disabled.id : aws_cloudfront_cache_policy.well_known.id
+  # Our well-known cache policy forwards what that path needs; the managed
+  # one forwards nothing, so it gets the origin request policy too.
+  well_known_origin_request_policy = var.free_plan ? data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id : null
+}
+
 resource "aws_cloudfront_distribution" "this" {
   enabled         = true
   is_ipv6_enabled = true
   comment         = "${var.name_prefix} login hosts (*.${var.domain})"
   aliases         = ["*.${var.domain}"]
-  price_class     = "PriceClass_100"
-  web_acl_id      = aws_wafv2_web_acl.this.arn
-  http_version    = "http2and3"
+  # A distribution on a flat-rate plan uses every edge location, at no
+  # extra charge.
+  price_class  = var.free_plan ? "PriceClass_All" : "PriceClass_100"
+  web_acl_id   = aws_wafv2_web_acl.this.arn
+  http_version = "http2and3"
 
   origin {
     origin_id   = "auth"
@@ -239,7 +279,7 @@ resource "aws_cloudfront_distribution" "this" {
     allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
     cached_methods           = ["GET", "HEAD"]
     cache_policy_id          = data.aws_cloudfront_cache_policy.disabled.id
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.auth.id
+    origin_request_policy_id = local.auth_origin_request_policy
     compress                 = true
     function_association {
       event_type   = "viewer-request"
@@ -255,8 +295,8 @@ resource "aws_cloudfront_distribution" "this" {
       viewer_protocol_policy   = "https-only"
       allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
       cached_methods           = ["GET", "HEAD"]
-      cache_policy_id          = aws_cloudfront_cache_policy.api.id
-      origin_request_policy_id = aws_cloudfront_origin_request_policy.api.id
+      cache_policy_id          = local.api_cache_policy
+      origin_request_policy_id = local.api_origin_request_policy
       compress                 = true
       function_association {
         event_type   = "viewer-request"
@@ -266,13 +306,14 @@ resource "aws_cloudfront_distribution" "this" {
   }
 
   ordered_cache_behavior {
-    path_pattern           = "/.well-known/*"
-    target_origin_id       = "auth"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
-    cached_methods         = ["GET", "HEAD"]
-    cache_policy_id        = aws_cloudfront_cache_policy.well_known.id
-    compress               = true
+    path_pattern             = "/.well-known/*"
+    target_origin_id         = "auth"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD", "OPTIONS"]
+    cached_methods           = ["GET", "HEAD"]
+    cache_policy_id          = local.well_known_cache_policy
+    origin_request_policy_id = local.well_known_origin_request_policy
+    compress                 = true
     function_association {
       event_type   = "viewer-request"
       function_arn = aws_cloudfront_function.host.arn
@@ -355,67 +396,71 @@ resource "aws_wafv2_web_acl" "this" {
     allow {}
   }
 
-  rule {
-    name     = "auth-endpoints-rate"
-    priority = 0
-    action {
-      block {}
-    }
-    statement {
-      rate_based_statement {
-        limit              = var.auth_rate_limit
-        aggregate_key_type = "IP"
-        scope_down_statement {
-          dynamic "or_statement" {
-            for_each = local.rate_exempt ? [] : [1]
-            content {
-              dynamic "statement" {
-                for_each = local.auth_rate_prefix
-                content {
-                  byte_match_statement {
-                    search_string         = statement.value
-                    positional_constraint = "STARTS_WITH"
-                    field_to_match {
-                      uri_path {}
-                    }
-                    text_transformation {
-                      priority = 0
-                      type     = "LOWERCASE"
-                    }
-                  }
-                }
-              }
-            }
-          }
-          # With exempt addresses: the auth endpoints, from anywhere else.
-          dynamic "and_statement" {
-            for_each = local.rate_exempt ? [1] : []
-            content {
-              statement {
-                or_statement {
-                  dynamic "statement" {
-                    for_each = local.auth_rate_prefix
-                    content {
-                      byte_match_statement {
-                        search_string         = statement.value
-                        positional_constraint = "STARTS_WITH"
-                        field_to_match {
-                          uri_path {}
-                        }
-                        text_transformation {
-                          priority = 0
-                          type     = "LOWERCASE"
-                        }
+  # Not on the Free plan, which allows no scope-down statement.
+  dynamic "rule" {
+    for_each = var.free_plan ? [] : [1]
+    content {
+      name     = "auth-endpoints-rate"
+      priority = 0
+      action {
+        block {}
+      }
+      statement {
+        rate_based_statement {
+          limit              = var.auth_rate_limit
+          aggregate_key_type = "IP"
+          scope_down_statement {
+            dynamic "or_statement" {
+              for_each = local.rate_exempt ? [] : [1]
+              content {
+                dynamic "statement" {
+                  for_each = local.auth_rate_prefix
+                  content {
+                    byte_match_statement {
+                      search_string         = statement.value
+                      positional_constraint = "STARTS_WITH"
+                      field_to_match {
+                        uri_path {}
+                      }
+                      text_transformation {
+                        priority = 0
+                        type     = "LOWERCASE"
                       }
                     }
                   }
                 }
               }
-              statement {
-                not_statement {
-                  statement {
-                    ip_set_reference_statement {
-                      arn = aws_wafv2_ip_set.rate_exempt[0].arn
+            }
+            # With exempt addresses: the auth endpoints, from anywhere else.
+            dynamic "and_statement" {
+              for_each = local.rate_exempt ? [1] : []
+              content {
+                statement {
+                  or_statement {
+                    dynamic "statement" {
+                      for_each = local.auth_rate_prefix
+                      content {
+                        byte_match_statement {
+                          search_string         = statement.value
+                          positional_constraint = "STARTS_WITH"
+                          field_to_match {
+                            uri_path {}
+                          }
+                          text_transformation {
+                            priority = 0
+                            type     = "LOWERCASE"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                statement {
+                  not_statement {
+                    statement {
+                      ip_set_reference_statement {
+                        arn = aws_wafv2_ip_set.rate_exempt[0].arn
+                      }
                     }
                   }
                 }
@@ -424,11 +469,11 @@ resource "aws_wafv2_web_acl" "this" {
           }
         }
       }
-    }
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "${var.name_prefix}-auth-endpoints-rate"
-      sampled_requests_enabled   = true
+      visibility_config {
+        cloudwatch_metrics_enabled = true
+        metric_name                = "${var.name_prefix}-auth-endpoints-rate"
+        sampled_requests_enabled   = true
+      }
     }
   }
 
@@ -509,43 +554,49 @@ resource "aws_wafv2_web_acl" "this" {
   # RFC 8252 section 7.3). LiteLogin never fetches a redirect URI, only
   # redirects the browser to one, so the rules are relaxed on the paths
   # that carry one and block everywhere else.
-  rule {
-    name     = "loopback-redirects"
-    priority = 13
-    action {
-      block {}
-    }
-    statement {
-      and_statement {
-        statement {
-          or_statement {
-            dynamic "statement" {
-              for_each = values(local.loopback_rules)
-              content {
-                label_match_statement {
-                  scope = "LABEL"
-                  key   = statement.value
+  #
+  # Not on the Free plan, which allows no label or path match: there the
+  # rules stay counted on every path, so they block nowhere.
+  dynamic "rule" {
+    for_each = var.free_plan ? [] : [1]
+    content {
+      name     = "loopback-redirects"
+      priority = 13
+      action {
+        block {}
+      }
+      statement {
+        and_statement {
+          statement {
+            or_statement {
+              dynamic "statement" {
+                for_each = values(local.loopback_rules)
+                content {
+                  label_match_statement {
+                    scope = "LABEL"
+                    key   = statement.value
+                  }
                 }
               }
             }
           }
-        }
-        statement {
-          not_statement {
-            statement {
-              or_statement {
-                dynamic "statement" {
-                  for_each = local.loopback_paths
-                  content {
-                    byte_match_statement {
-                      search_string         = statement.value
-                      positional_constraint = "EXACTLY"
-                      field_to_match {
-                        uri_path {}
-                      }
-                      text_transformation {
-                        priority = 0
-                        type     = "NONE"
+          statement {
+            not_statement {
+              statement {
+                or_statement {
+                  dynamic "statement" {
+                    for_each = local.loopback_paths
+                    content {
+                      byte_match_statement {
+                        search_string         = statement.value
+                        positional_constraint = "EXACTLY"
+                        field_to_match {
+                          uri_path {}
+                        }
+                        text_transformation {
+                          priority = 0
+                          type     = "NONE"
+                        }
                       }
                     }
                   }
@@ -555,11 +606,11 @@ resource "aws_wafv2_web_acl" "this" {
           }
         }
       }
-    }
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "${var.name_prefix}-loopback-redirects"
-      sampled_requests_enabled   = true
+      visibility_config {
+        cloudwatch_metrics_enabled = true
+        metric_name                = "${var.name_prefix}-loopback-redirects"
+        sampled_requests_enabled   = true
+      }
     }
   }
 

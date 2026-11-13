@@ -199,6 +199,8 @@ To remove a host, move its clients off it, then run `dist/litelogin host remove 
 
 Custom hosts are optional. Set `custom_hosts = false` to deploy without them: Terraform doesn't create the multi-tenant distribution and connection group they're served through, `host add` answers that custom hosts aren't configured, and default hosts work as before. Before turning it off in a deployment that has custom hosts, remove every one and wait until `host list` no longer shows them, as in [Removing a deployment](#removing-a-deployment). Turning it off saves nothing by itself, but it leaves the default hosts' distribution as the only user of its web ACL and host function, which a CloudFront flat-rate plan requires ([Cost.md](Cost.md#cloudfront-flat-rate-plans)).
 
+Without custom hosts, `cloudfront_free_plan = true` puts the default hosts' distribution, its WAF and the Route 53 zone on CloudFront's Free flat-rate plan, about $10.50 a month less. The plan's WAF allows no rule that matches paths or labels, so it drops the stricter rate limit on the sign-in endpoints (only the 3,000 requests per 5 minutes per IP limit for every path remains) and the `loopback-redirects` rule (its four Common rule set rules then only count). The plan also allows only AWS managed cache policies, so discovery and JWKS aren't cached at the edge. Account lockout still limits password guessing per account. Use it for small deployments; it's meant for up to 1 million requests a month, about 65,000 sign-ins. Turning it off takes a few minutes longer than other changes: Terraform waits 3 minutes after cancelling the plan before putting the rules back.
+
 ## Passkeys
 
 Passkeys are off by default. Turn them on per login host:
