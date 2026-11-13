@@ -4,15 +4,18 @@ What one LiteLogin deployment costs per month on AWS, in two setups, at 1,000 to
 
 ## Setups
 
-| | **Lean** | **Full** (the default) |
+`setup = "lean"` or `"full"` (the default) sets every setting below; each has an override, which is null to follow the setup.
+
+| Setting (override) | **Lean** | **Full** |
 | -- | -- | -- |
 | For | Small deployments: up to about 65,000 sign-ins a month | Any size, and custom login hosts |
-| CloudFront and WAF | CloudFront's Free flat-rate plan, which includes the distribution, the WAF and the Route 53 zone (`cloudfront_free_plan = true`) | Pay-as-you-go |
-| Custom login hosts (`login.acme.com`) | No (`custom_hosts = false`): default hosts only | Yes |
-| WAF rules | A per-IP rate limit for every path, and the AWS managed groups. The Free plan allows no rule that matches paths or labels, so there's no stricter limit on the sign-in endpoints. | Those, plus the sign-in endpoints' rate limit and `loopback-redirects` |
-| Caching | None: the Free plan allows only AWS managed cache policies | Discovery and JWKS cached at the edge |
-| X-Ray tracing | Off | Optional (`tracing = true`) |
-| Alarms, metrics, dashboard, logs | Reduced (`monitoring = "reduced"`): 12 alarms, 3 custom metrics, no dashboard, no per-invocation platform log lines; see [Reduced monitoring](#reduced-monitoring) | Full: 15 alarms, 8 custom metrics, a dashboard, and every log line |
+| CloudFront (`cloudfront_plan`) | `"free"`: CloudFront's Free flat-rate plan, which includes the distribution, the WAF and the Route 53 zone. Nothing is cached at the edge: the plan allows only AWS managed cache policies. | `"pay-as-you-go"`, with discovery and JWKS cached at the edge |
+| WAF rules (follow `cloudfront_plan`) | A per-IP rate limit for every path, and the AWS managed groups. The Free plan allows no rule that matches paths or labels, so there's no stricter limit on the sign-in endpoints. | Those, plus the sign-in endpoints' rate limit and `loopback-redirects` |
+| Custom login hosts, `login.acme.com` (`custom_hosts`) | `false`: default hosts only | `true` |
+| X-Ray tracing (`tracing`) | `"off"` | `"xray"`: the Auth Lambda |
+| Metrics (`metrics`) | `"alarmed"`: the 3 metrics alarms use, and one Lambda throttles alarm, 12 alarms in all | `"all"`: 8 custom metrics, 15 alarms |
+| Dashboard (`dashboard`) | `false` | `true` |
+| Lambda's platform logs (`lambda_logs`) | `"failures"`: none for successful invocations | `"all"` |
 
 Lean's limit is the Free plan's 1 million requests a month: a sign-in and its 10 refreshes are 15 requests. Past it, CloudFront doesn't charge more but may slow delivery, so a deployment that grows should move to Full. The WAF trade-off is in [CloudFront flat-rate plans](#cloudfront-flat-rate-plans).
 
@@ -20,13 +23,13 @@ Lean's limit is the Free plan's 1 million requests a month: a sign-in and its 10
 
 | Sign-ins a month | Lean | Full |
 | --: | --: | --: |
-| 1,000 | **$5.60** | **$20.94** |
-| 10,000 | **$7.05** | **$22.68** |
-| 50,000 | **$13.50** | **$30.45** |
-| 100,000 | over the plan | **$40.16** |
-| 1,000,000 | over the plan | **$214.95** |
+| 1,000 | **$5.60** | **$21.02** |
+| 10,000 | **$7.05** | **$23.43** |
+| 50,000 | **$13.50** | **$34.20** |
+| 100,000 | over the plan | **$47.66** |
+| 1,000,000 | over the plan | **$231.01** |
 
-Full's fixed part is $20.74 a month, almost half of it the WAF ($10); Lean's is $5.44, because the Free plan includes the WAF and the zone and it has less monitoring. At low traffic the fixed part dominates. Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins.
+Full's fixed part is $20.74 a month, almost half of it the WAF ($10); Lean's is $5.44, because the Free plan includes the WAF and the zone and it has less monitoring. At low traffic the fixed part dominates. Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins. Full's totals include X-Ray tracing; `tracing = "off"` saves up to $0.000005 a request.
 
 The totals are list prices. They don't count AWS's free tier, which is shared by everything in the account (see [Free tier](#free-tier)), or taxes.
 
@@ -102,7 +105,7 @@ A sign-in sends no email. Emails are for sign-up verification, password resets a
 - ran 152,500 invocations, averaging **35 ms** each (34.1–35.7 ms per minute), so this page bills every request at 35 ms of 1 GB;
 - logged 172,483,805 bytes, which is **1,131 bytes a request** (`IncomingBytes` for its log group, divided by invocations). The latency records have since become plain log fields without their embedded metric format block (internal/metrics), so this is an upper bound.
 
-**X-Ray** is off by default. With `tracing = true`, the Auth Lambda has active tracing with Lambda's default sampling, which records the first request each second and 5% of the others: below 1 request a second on average, every request is traced; above that, 2,592,000 traces (one per second of a 30-day month) plus 5% of the rest, at $0.000005 a trace. See [Totals](#totals) for what it adds.
+**X-Ray** is on in Full and off in Lean. With `tracing = "xray"`, the Auth Lambda has active tracing with Lambda's default sampling, which records the first request each second and 5% of the others: below 1 request a second on average, every request is traced; above that, 2,592,000 traces (one per second of a 30-day month) plus 5% of the rest, at $0.000005 a trace. See [Totals](#totals) for what it adds.
 
 ## Cost per request
 
@@ -179,25 +182,28 @@ With **R = 10 refreshes per sign-in** (an app whose users stay signed in for abo
 - refreshes: N × 10 × $0.00001514
 - email: N ÷ 20 × $0.0001
 
-| N | Sign-ins | Refreshes | Email | Requests total | Fixed | **Total** | X-Ray, if on |
-| --: | --: | --: | --: | --: | --: | --: | --: |
-| 1,000 | $0.04 | $0.15 | $0.01 | $0.20 | $20.74 | **$20.94** | + $0.08 (15,000 traces) |
-| 10,000 | $0.38 | $1.51 | $0.05 | $1.94 | $20.74 | **$22.68** | + $0.75 (150,000 traces) |
-| 100,000 | $3.78 | $15.14 | $0.50 | $19.42 | $20.74 | **$40.16** | + $7.50 (1,500,000 traces) |
-| 1,000,000 | $37.84 | $151.37 | $5.00 | $194.21 | $20.74 | **$214.95** | + $16.06 (3,212,400 traces) |
+- X-Ray: traces × $0.000005
 
-X-Ray traces are requests = N × (5 + 10). At 1 million sign-ins, 15 million requests is 5.8 a second on average, so it traces 2,592,000 + 5% × (15,000,000 − 2,592,000) = 3,212,400.
+| N | Sign-ins | Refreshes | Email | X-Ray | Requests total | Fixed | **Total** |
+| --: | --: | --: | --: | --: | --: | --: | --: |
+| 1,000 | $0.04 | $0.15 | $0.01 | $0.08 (15,000 traces) | $0.28 | $20.74 | **$21.02** |
+| 10,000 | $0.38 | $1.51 | $0.05 | $0.75 (150,000 traces) | $2.69 | $20.74 | **$23.43** |
+| 50,000 | $1.89 | $7.57 | $0.25 | $3.75 (750,000 traces) | $13.46 | $20.74 | **$34.20** |
+| 100,000 | $3.78 | $15.14 | $0.50 | $7.50 (1,500,000 traces) | $26.92 | $20.74 | **$47.66** |
+| 1,000,000 | $37.84 | $151.37 | $5.00 | $16.06 (3,212,400 traces) | $210.27 | $20.74 | **$231.01** |
+
+Without tracing (`tracing = "off"`), subtract the X-Ray column. X-Ray traces are requests = N × (5 + 10). At 1 million sign-ins, 15 million requests is 5.8 a second on average, so it traces 2,592,000 + 5% × (15,000,000 − 2,592,000) = 3,212,400.
 
 For a different refresh rate, add or remove N × $0.00001514 for each refresh per sign-in. With no refreshes at all, 1 million sign-ins cost $37.84 + $5.00 = $42.84 in requests.
 
 ## Reduced monitoring
 
-`monitoring = "reduced"` (Lean) keeps every alarm's coverage but costs less:
+Lean's monitoring settings keep every alarm's coverage but cost less:
 
-- **Custom metrics only for alarms.** The 3 metrics alarms watch (`RefreshTokenReuse`, `KMSSignFailed`, `OldestOutstandingWorkAge`) are still metrics; the others are written as log fields, as the latencies always are, and Logs Insights can still count them. 8 metrics become 3: $1.50 less.
-- **One Lambda throttles alarm** for the account (Lambda's `Throttles` without a function dimension) instead of one per function: 4 alarms become 1, $0.30 less. Each function's own `Throttles` metric still says which one.
-- **No dashboard**: $3.00 less, or nothing in an account with 3 dashboards or fewer.
-- **No Lambda platform log lines** for successful invocations (system log level `WARN`): `platform.start` and `platform.report` are about 510 of a request's 1,131 log bytes. An invocation that crashes or times out still logs them, with its status, and handler errors are logged as before.
+- **Custom metrics only for alarms** (`metrics = "alarmed"`). The 3 metrics alarms watch (`RefreshTokenReuse`, `KMSSignFailed`, `OldestOutstandingWorkAge`) are still metrics; the others are written as log fields, as the latencies always are, and Logs Insights can still count them. 8 metrics become 3: $1.50 less.
+- **One Lambda throttles alarm** (also `metrics = "alarmed"`) for the account (Lambda's `Throttles` without a function dimension) instead of one per function: 4 alarms become 1, $0.30 less. Each function's own `Throttles` metric still says which one.
+- **No dashboard** (`dashboard = false`): $3.00 less, or nothing in an account with 3 dashboards or fewer.
+- **No Lambda platform log lines** for successful invocations (`lambda_logs = "failures"`, Lambda's system log level `WARN`): `platform.start` and `platform.report` are about 510 of a request's 1,131 log bytes. An invocation that crashes or times out still logs them, with its status, and handler errors are logged as before.
 
 Together, $4.80 a month of fixed cost, plus $0.00000024 a request of logs.
 
@@ -206,7 +212,7 @@ Together, $4.80 a month of fixed cost, plus $0.00000024 a request of logs.
 - **Refreshes.** At 10 per sign-in they are over 70% of the request cost. Longer access tokens mean fewer refreshes.
 - **DynamoDB writes** are the largest per-request cost: 19 write units per sign-in, 16 of them the code exchange's transaction, which saves the refresh token, the session's tokens and the code's use in one step.
 - **KMS `Sign`**: $0.000003 per token. Every sign-in and refresh signs two.
-- **X-Ray**: turning on the Auth Lambda's tracing (`tracing = true`) adds up to $0.000005 a request.
+- **X-Ray**: the Auth Lambda's tracing (`tracing = "xray"`, Full's default) adds up to $0.000005 a request.
 - **The WAF** is almost half the fixed cost. It is shared by every login host in the deployment, so it doesn't grow with organizations or hosts. Lean has none to pay: CloudFront's Free plan includes it, with fewer rules (see below).
 - **Data transfer** is small: 20 KB a sign-in is 20 GB at 1 million sign-ins, $1.62.
 
@@ -230,7 +236,7 @@ Spikes on 2026-11-12 subscribed copies of LiteLogin's main distribution and web 
 
 So on the Free plan, LiteLogin would lose its stricter rate limit on the sign-in endpoints (300 requests per 5 minutes per IP, against 3,000 for everything), and the four Common rule set rules that `loopback-redirects` blocks outside sign-in and logout would have to count everywhere. Per-account lockout would still protect passwords, but per-IP credential stuffing would meet a limit ten times higher. That isn't worth $10.50 a month for most deployments, so LiteLogin uses pay-as-you-go pricing by default.
 
-A deployment can opt in with `cloudfront_free_plan = true`, which needs `custom_hosts = false` and no `rate_limit_exempt_cidrs`. It subscribes the default hosts' distribution, its web ACL and the Route 53 zone to the Free plan, drops `auth-endpoints-rate` and `loopback-redirects`, switches the distribution to every edge location, and uses AWS managed policies: `Managed-AllViewerExceptHostHeader` forwards everything the Auth Lambda needs, and `Managed-CachingDisabled` caches nothing, so discovery and JWKS requests reach the Lambda too (a request each, at the refresh's Lambda cost without KMS). The fixed part is then $20.74 − $10.50 = **$10.24** a month. Above the plan's 1 million requests a month, about 65,000 sign-ins, CloudFront may slow delivery; it doesn't charge more. Turning it off cancels the plan, waits 3 minutes for the cancellation to settle (CloudFront and WAF refuse the rules and policies until it has), and puts them back, in one apply.
+Lean uses it (`cloudfront_plan = "free"`), which needs `custom_hosts = false` and no `rate_limit_exempt_cidrs`. It subscribes the default hosts' distribution, its web ACL and the Route 53 zone to the Free plan, drops `auth-endpoints-rate` and `loopback-redirects`, switches the distribution to every edge location, and uses AWS managed policies: `Managed-AllViewerExceptHostHeader` forwards everything the Auth Lambda needs, and `Managed-CachingDisabled` caches nothing, so discovery and JWKS requests reach the Lambda too (a request each, at the refresh's Lambda cost without KMS). A Full deployment with only this changed has a fixed part of $20.74 − $10.50 = **$10.24** a month. Above the plan's 1 million requests a month, about 65,000 sign-ins, CloudFront may slow delivery; it doesn't charge more. Turning it off cancels the plan, waits 3 minutes for the cancellation to settle (CloudFront and WAF refuse the rules and policies until it has), and puts them back, in one apply.
 
 Not tested:
 

@@ -38,28 +38,48 @@ variable "alarm_email" {
   default     = ""
 }
 
-variable "tracing" {
-  description = "Trace the Auth Lambda with AWS X-Ray. Off by default: traces cost $5 per million requests (Cost.md)."
-  type        = bool
-  default     = false
+variable "setup" {
+  description = "\"lean\" or \"full\": the defaults for CloudFront, the WAF, tracing, metrics, the dashboard and Lambda's logs (Cost.md, \"Setups\"; infra/modules/environment)."
+  type        = string
+  default     = "full"
+}
+
+# Overrides of the setup's defaults; null follows the setup. Each is
+# described in infra/modules/environment.
+variable "cloudfront_plan" {
+  description = "\"free\" or \"pay-as-you-go\"."
+  type        = string
+  default     = null
 }
 
 variable "custom_hosts" {
-  description = "Support custom login hosts (e.g. login.example.com), served through a CloudFront multi-tenant distribution. Remove every custom host before turning it off."
+  description = "Support custom login hosts."
   type        = bool
-  default     = true
+  default     = null
 }
 
-variable "cloudfront_free_plan" {
-  description = "Put the default login hosts' distribution, its WAF and the Route 53 zone on CloudFront's Free flat-rate plan, saving about $10.50 a month. It drops the sign-in endpoints' stricter rate limit and the loopback-redirects rule, which the plan doesn't allow (Cost.md). Needs custom_hosts = false."
-  type        = bool
-  default     = false
-}
-
-variable "monitoring" {
-  description = "\"full\" or \"reduced\": reduced publishes only the metrics alarms use, has one Lambda throttles alarm, no dashboard and no per-invocation platform log lines (Cost.md, \"Reduced monitoring\")."
+variable "tracing" {
+  description = "\"xray\" or \"off\"."
   type        = string
-  default     = "full"
+  default     = null
+}
+
+variable "metrics" {
+  description = "\"all\" or \"alarmed\"."
+  type        = string
+  default     = null
+}
+
+variable "dashboard" {
+  description = "Create the CloudWatch dashboard."
+  type        = bool
+  default     = null
+}
+
+variable "lambda_logs" {
+  description = "\"all\" or \"failures\"."
+  type        = string
+  default     = null
 }
 
 variable "rate_limit_exempt_cidrs" {
@@ -86,10 +106,13 @@ module "litelogin" {
   package_dir         = "${path.root}/../../../dist"
 
   alarm_email             = var.alarm_email
-  tracing                 = var.tracing
+  setup                   = var.setup
+  cloudfront_plan         = var.cloudfront_plan
   custom_hosts            = var.custom_hosts
-  cloudfront_free_plan    = var.cloudfront_free_plan
-  monitoring              = var.monitoring
+  tracing                 = var.tracing
+  metrics                 = var.metrics
+  dashboard               = var.dashboard
+  lambda_logs             = var.lambda_logs
   rate_limit_exempt_cidrs = var.rate_limit_exempt_cidrs
 }
 
@@ -127,7 +150,7 @@ output "custom_host_cname_target" {
 }
 
 output "dashboard" {
-  description = "The environment's CloudWatch dashboard, or null with reduced monitoring."
+  description = "The environment's CloudWatch dashboard, or null without it."
   value       = module.litelogin.dashboard
 }
 

@@ -15,10 +15,10 @@ terraform {
   }
 }
 
-variable "reduced_monitoring" {
-  description = "Drop Lambda's platform log lines (Cost.md, \"Reduced monitoring\"). The rotate function publishes no metrics."
-  type        = bool
-  default     = false
+variable "system_log_level" {
+  description = "Lambda's platform log level: INFO logs every invocation's platform lines; WARN only failed invocations' (Cost.md, \"Reduced monitoring\")."
+  type        = string
+  default     = "INFO"
 }
 
 variable "name_prefix" {
@@ -172,7 +172,7 @@ module "rotate" {
   memory_size  = 256
   timeout      = 60
 
-  system_log_level = var.reduced_monitoring ? "WARN" : "INFO"
+  system_log_level = var.system_log_level
 
   environment = {
     LITELOGIN_CONFIG_TABLE  = var.config_table_name

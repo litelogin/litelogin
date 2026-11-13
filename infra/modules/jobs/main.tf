@@ -69,8 +69,14 @@ variable "custom_hosts" {
   default = null
 }
 
-variable "reduced_monitoring" {
-  description = "Drop Lambda's platform log lines and publish only the metrics alarms use (Cost.md, \"Reduced monitoring\")."
+variable "system_log_level" {
+  description = "Lambda's platform log level: INFO logs every invocation's platform lines; WARN only failed invocations' (Cost.md, \"Reduced monitoring\")."
+  type        = string
+  default     = "INFO"
+}
+
+variable "reduced_metrics" {
+  description = "Publish only the metrics alarms use; the rest become log fields (Cost.md, \"Reduced monitoring\")."
   type        = bool
   default     = false
 }
@@ -240,7 +246,7 @@ module "worker" {
   memory_size  = 256
   timeout      = local.worker_timeout
 
-  system_log_level = var.reduced_monitoring ? "WARN" : "INFO"
+  system_log_level = var.system_log_level
 
   environment = merge({
     LITELOGIN_CONFIG_TABLE           = var.config_table_name
@@ -249,7 +255,7 @@ module "worker" {
     LITELOGIN_TENANT_DISTRIBUTION_ID = try(var.custom_hosts.distribution_id, "")
     LITELOGIN_CONNECTION_GROUP_ID    = try(var.custom_hosts.connection_group_id, "")
     LITELOGIN_ROUTING_ENDPOINT       = try(var.custom_hosts.routing_endpoint, "")
-  }, var.reduced_monitoring ? { LITELOGIN_METRICS = "reduced" } : {})
+  }, var.reduced_metrics ? { LITELOGIN_METRICS = "reduced" } : {})
 }
 
 # ---- Triggers ----

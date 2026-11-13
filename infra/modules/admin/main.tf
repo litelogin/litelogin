@@ -62,8 +62,14 @@ variable "default_host_domain" {
   type        = string
 }
 
-variable "reduced_monitoring" {
-  description = "Drop Lambda's platform log lines and publish only the metrics alarms use (Cost.md, \"Reduced monitoring\")."
+variable "system_log_level" {
+  description = "Lambda's platform log level: INFO logs every invocation's platform lines; WARN only failed invocations' (Cost.md, \"Reduced monitoring\")."
+  type        = string
+  default     = "INFO"
+}
+
+variable "reduced_metrics" {
+  description = "Publish only the metrics alarms use; the rest become log fields (Cost.md, \"Reduced monitoring\")."
   type        = bool
   default     = false
 }
@@ -169,7 +175,7 @@ module "admin" {
   memory_size = 1024
   timeout     = 30
 
-  system_log_level = var.reduced_monitoring ? "WARN" : "INFO"
+  system_log_level = var.system_log_level
 
   environment = merge({
     LITELOGIN_CONFIG_TABLE        = var.config_table_name
@@ -179,7 +185,7 @@ module "admin" {
     LITELOGIN_ROUTING_ENDPOINT    = var.custom_host_target
     LITELOGIN_EMAIL_FROM          = var.email_from
     LITELOGIN_SES_CONFIGURATION   = var.ses_configuration_set_name
-  }, var.reduced_monitoring ? { LITELOGIN_METRICS = "reduced" } : {})
+  }, var.reduced_metrics ? { LITELOGIN_METRICS = "reduced" } : {})
 }
 
 output "function_name" {

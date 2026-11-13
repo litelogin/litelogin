@@ -35,10 +35,16 @@ variable "alarm_email" {
   default     = ""
 }
 
-variable "reduced" {
-  description = "Reduced monitoring (Cost.md): one Throttles alarm for every Lambda in the account instead of one per function, and no dashboard."
+variable "reduced_metrics" {
+  description = "Only the metrics alarms use are published (Cost.md, \"Reduced monitoring\"): one Throttles alarm for every Lambda in the account instead of one per function."
   type        = bool
   default     = false
+}
+
+variable "dashboard" {
+  description = "Create the CloudWatch dashboard. It needs every metric published (reduced_metrics = false)."
+  type        = bool
+  default     = true
 }
 
 variable "refresh_reuse_threshold" {
@@ -78,7 +84,7 @@ resource "aws_sns_topic_subscription" "email" {
 
 resource "aws_cloudwatch_metric_alarm" "lambda" {
   for_each = {
-    for pair in setproduct(keys(var.function_names), var.reduced ? ["Errors"] : ["Errors", "Throttles"]) : "${pair[0]}-${lower(pair[1])}" => {
+    for pair in setproduct(keys(var.function_names), var.reduced_metrics ? ["Errors"] : ["Errors", "Throttles"]) : "${pair[0]}-${lower(pair[1])}" => {
       function = var.function_names[pair[0]]
       metric   = pair[1]
     }
@@ -99,11 +105,11 @@ resource "aws_cloudwatch_metric_alarm" "lambda" {
   ok_actions          = [aws_sns_topic.alarms.arn]
 }
 
-# With reduced monitoring, one alarm on the account's Throttles (Lambda's
+# With reduced metrics, one alarm on the account's Throttles (Lambda's
 # metric without a function dimension), which costs one alarm instead of
-# one per function. The dashboard shows which function it was.
+# one per function. Each function's Throttles metric shows which it was.
 resource "aws_cloudwatch_metric_alarm" "lambda_throttles" {
-  count = var.reduced ? 1 : 0
+  count = var.reduced_metrics ? 1 : 0
 
   alarm_name          = "${var.name_prefix}-lambda-throttles"
   alarm_description   = "A Lambda function in the account was throttled; each function's Throttles metric says which."
@@ -285,9 +291,10 @@ moved {
   to   = aws_cloudwatch_dashboard.this[0]
 }
 
-# None with reduced monitoring: most of its metrics are log fields then.
+# Optional. Most of its metrics are log fields with reduced metrics, so it
+# needs them all published.
 resource "aws_cloudwatch_dashboard" "this" {
-  count = var.reduced ? 0 : 1
+  count = var.dashboard ? 1 : 0
 
   dashboard_name = var.name_prefix
   dashboard_body = jsonencode({
@@ -330,6 +337,6 @@ output "alarm_topic_arn" {
 }
 
 output "dashboard_name" {
-  description = "Null with reduced monitoring."
+  description = "Null without the dashboard."
   value       = one(aws_cloudwatch_dashboard.this[*].dashboard_name)
 }

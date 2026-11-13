@@ -2,3 +2,6 @@
 environment         = "prod"
 default_host_domain = "login.example.com"
 alarm_email         = "ops@example.com"
+
+# "full" (the default) or "lean" for small deployments (Cost.md, "Setups").
+# setup = "lean"

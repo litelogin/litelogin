@@ -37,11 +37,11 @@ resource "aws_pricingplanmanager_subscription" "free" {
   lifecycle {
     precondition {
       condition     = !var.custom_hosts
-      error_message = "The Free plan needs custom_hosts = false: the custom hosts' distribution shares the web ACL and host function, which a plan doesn't allow."
+      error_message = "cloudfront_plan = \"free\" needs custom_hosts = false: the custom hosts' distribution shares the web ACL and host function, which a plan doesn't allow."
     }
     precondition {
       condition     = length(var.rate_limit_exempt_cidrs) == 0
-      error_message = "The Free plan allows no rate-limit exemptions: its web ACL can't have a scope-down statement."
+      error_message = "cloudfront_plan = \"free\" allows no rate_limit_exempt_cidrs: its web ACL can't have a scope-down statement. Use cloudfront_plan = \"pay-as-you-go\" for a load test."
     }
   }
 }

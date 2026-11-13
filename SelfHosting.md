@@ -65,6 +65,9 @@ Copy `terraform.tfvars.example` to `terraform.tfvars` and set:
 | `environment` | The name from step 2. |
 | `default_host_domain` | The domain for default login hosts, e.g. `login.example.com`. |
 | `alarm_email` | Where alarms go. Optional; the address must confirm the SNS subscription. |
+| `setup` | `"full"` (the default) or `"lean"`, for small deployments: about $15 a month less, but no custom login hosts and fewer WAF rules and metrics. [Cost.md](Cost.md#setups) compares them. |
+
+`setup` sets the defaults for CloudFront, the WAF, tracing, metrics, the dashboard and Lambda's logs. To change one of them alone, set its override: `cloudfront_plan` (`"free"` or `"pay-as-you-go"`), `custom_hosts`, `tracing` (`"xray"` or `"off"`), `metrics` (`"all"` or `"alarmed"`), `dashboard` or `lambda_logs` (`"all"` or `"failures"`). Each is described in `infra/modules/environment`, and a plan fails with a combination that can't work, such as the Free plan with custom hosts.
 
 Both files are git-ignored.
 
@@ -197,9 +200,9 @@ A client on a new host has a new issuer (`https://login.acme.com`), so its app m
 
 To remove a host, move its clients off it, then run `dist/litelogin host remove login.acme.com`. **Tell the domain's owner to delete the CNAME** once it's removed: a record left pointing at LiteLogin can't be claimed by anyone else without an operator, but it shouldn't linger.
 
-Custom hosts are optional. Set `custom_hosts = false` to deploy without them: Terraform doesn't create the multi-tenant distribution and connection group they're served through, `host add` answers that custom hosts aren't configured, and default hosts work as before. Before turning it off in a deployment that has custom hosts, remove every one and wait until `host list` no longer shows them, as in [Removing a deployment](#removing-a-deployment). Turning it off saves nothing by itself, but it leaves the default hosts' distribution as the only user of its web ACL and host function, which a CloudFront flat-rate plan requires ([Cost.md](Cost.md#cloudfront-flat-rate-plans)).
+Custom hosts are optional, and Lean has none. Set `custom_hosts = false` to deploy without them: Terraform doesn't create the multi-tenant distribution and connection group they're served through, `host add` answers that custom hosts aren't configured, and default hosts work as before. Before turning it off in a deployment that has custom hosts, remove every one and wait until `host list` no longer shows them, as in [Removing a deployment](#removing-a-deployment). Turning it off saves nothing by itself, but it leaves the default hosts' distribution as the only user of its web ACL and host function, which a CloudFront flat-rate plan requires ([Cost.md](Cost.md#cloudfront-flat-rate-plans)).
 
-Without custom hosts, `cloudfront_free_plan = true` puts the default hosts' distribution, its WAF and the Route 53 zone on CloudFront's Free flat-rate plan, about $10.50 a month less. The plan's WAF allows no rule that matches paths or labels, so it drops the stricter rate limit on the sign-in endpoints (only the 3,000 requests per 5 minutes per IP limit for every path remains) and the `loopback-redirects` rule (its four Common rule set rules then only count). The plan also allows only AWS managed cache policies, so discovery and JWKS aren't cached at the edge. Account lockout still limits password guessing per account. Use it for small deployments; it's meant for up to 1 million requests a month, about 65,000 sign-ins. Turning it off takes a few minutes longer than other changes: Terraform waits 3 minutes after cancelling the plan before putting the rules back.
+Without custom hosts, `cloudfront_plan = "free"` (Lean's default) puts the default hosts' distribution, its WAF and the Route 53 zone on CloudFront's Free flat-rate plan, about $10.50 a month less. The plan's WAF allows no rule that matches paths or labels, so it drops the stricter rate limit on the sign-in endpoints (only the 3,000 requests per 5 minutes per IP limit for every path remains) and the `loopback-redirects` rule (its four Common rule set rules then only count). The plan also allows only AWS managed cache policies, so discovery and JWKS aren't cached at the edge. Account lockout still limits password guessing per account. Use it for small deployments; it's meant for up to 1 million requests a month, about 65,000 sign-ins. Turning it off takes a few minutes longer than other changes: Terraform waits 3 minutes after cancelling the plan before putting the rules back.
 
 ## Passkeys
 
@@ -213,10 +216,10 @@ Users can then add a passkey on their account page and sign in with it. A passke
 
 ## Monitoring
 
-- **Dashboard:** `tofu output dashboard` links to the environment's CloudWatch dashboard. It shows sign-ins, token issuance, latency (from the log, with Logs Insights), security events (such as reused refresh tokens), failures and background work.
+- **Dashboard:** `tofu output dashboard` links to the environment's CloudWatch dashboard (Full only, or `dashboard = true`). It shows sign-ins, token issuance, latency (from the log, with Logs Insights), security events (such as reused refresh tokens), failures and background work.
 - **Alarms:** every alarm notifies the SNS topic `litelogin-<environment>-alarms`. Set `alarm_email`, or subscribe the topic to your paging tool.
-- **Tracing:** set `tracing = true` to trace the Auth Lambda with AWS X-Ray, at $5 per million requests.
-- **Reduced monitoring:** `monitoring = "reduced"` costs $4.80 a month less, for small deployments ([Cost.md](Cost.md#reduced-monitoring)). The alarms still cover the same failures, but there's no dashboard: only the metrics alarms use are published, and the rest (sign-ins, tokens issued, failures by reason) are log fields, which CloudWatch Logs Insights can count. Successful invocations log no `platform.start` or `platform.report` line.
+- **Tracing:** Full traces the Auth Lambda with AWS X-Ray, at $5 per million requests. Set `tracing = "off"` to turn it off.
+- **Reduced monitoring:** Lean's `metrics = "alarmed"`, `dashboard = false` and `lambda_logs = "failures"` cost $4.80 a month less, for small deployments ([Cost.md](Cost.md#reduced-monitoring)). The alarms still cover the same failures, but there's no dashboard: only the metrics alarms use are published, and the rest (sign-ins, tokens issued, failures by reason) are log fields, which CloudWatch Logs Insights can count. Successful invocations log no `platform.start` or `platform.report` line.
 
 ## Upgrading
 
@@ -232,6 +235,8 @@ tofu apply tfplan
 Lambda code updates take effect without downtime. Each package is signed with the environment's AWS Signer profile, and the functions accept only code that profile signed, so deploy through Terraform, not `aws lambda update-function-code`. To roll back, check out the previous version and do the same.
 
 Upgrading from a version with the synthetic monitor removes its Lambda function, schedule and alarm. Its configuration parameter (`/litelogin-<environment>/canary`) was never managed by Terraform: delete it with `aws ssm delete-parameter`.
+
+Upgrading from a version before `setup` replaces two variables: `cloudfront_free_plan = true` is now `cloudfront_plan = "free"`, and `monitoring = "reduced"` is `metrics = "alarmed"`, `dashboard = false` and `lambda_logs = "failures"` (or `setup = "lean"` for all of them, with no custom hosts). `tracing` takes `"xray"` or `"off"` instead of a bool, and is on by default in Full: set `tracing = "off"` to keep it off.
 
 ## Deploying from GitHub Actions
 
