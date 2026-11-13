@@ -17,7 +17,7 @@ A deployment is one **environment** in one AWS account: its tables, signing keys
 | OpenTofu or Terraform | 1.10 or later |
 | Go | 1.21 or later. The build downloads the exact toolchain it needs. |
 | AWS CLI | v2 |
-| `make`, `zip`, `jq`, `git`, `curl` | any |
+| `make`, `zip`, `jq`, `git`, `curl`, `dig` | any |
 
 **Quotas to check first.** These take time, so request them before you deploy:
 
@@ -27,6 +27,23 @@ A deployment is one **environment** in one AWS account: its tables, signing keys
 | SES production access | New accounts are in the SES sandbox and can only email verified addresses, so registration, verification and password reset emails won't reach users. | SES console → Account dashboard → Request production access |
 
 The KMS signing quota (1000 RSA operations per second) covers about 50 sign-ins and 200 token refreshes per second with room to spare; see test/load/README.md.
+
+## Quick deploy
+
+`scripts/deploy.sh` does steps 2 to 5 below for you, from an empty account to a healthy deployment:
+
+```sh
+export AWS_PROFILE=<the account's profile>
+scripts/deploy.sh prod --domain login.example.com     # --setup full for custom hosts and the full WAF
+```
+
+It creates `infra/envs/prod` from the example with `setup = "lean"` ([Cost.md](Cost.md#setups)), creates the state bucket, builds, and deploys the DNS zone first. It then shows the NS records to add at your DNS provider and waits until public DNS has them. After that it deploys everything else, creates the first signing key, saves the CLI's endpoint and runs `litelogin status`. It shows you each plan and asks before applying it, and it asks before using the account.
+
+If it stops, for an error, a declined plan or DNS that isn't delegated yet, fix what it says and run `scripts/deploy.sh prod` again: it works out from the deployment's state what's left to do. The same command upgrades an existing deployment after `git checkout <new version>`.
+
+Without a terminal (in CI, or run by another tool), it never waits or asks. It stops with exit status 3 at each of those points, saying how to continue: `--account <id>` confirms the account, `--apply-plan <file>` applies the plan it saved once you've reviewed it, and running it again checks DNS again. `scripts/deploy.sh --help` lists its options.
+
+The sections below are the same steps by hand.
 
 ## 1. Get the code
 
@@ -178,6 +195,8 @@ To try a client end to end as its app would, add a loopback redirect URI and run
 dist/litelogin client update CLIENT --redirect-uri https://app.acme.com/callback --redirect-uri http://127.0.0.1/callback
 dist/litelogin client test CLIENT
 ```
+
+`dist/litelogin status --environment <environment>` checks a deployment: the functions, the signing key and its rotation, CloudFront, the DNS delegation, a login host over HTTPS, and any alarm that's firing. Each problem comes with what to do about it. It exits with status 1 if a check fails, and `-o json` gives the results to scripts.
 
 `dist/litelogin help` lists every command.
 

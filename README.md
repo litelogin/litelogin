@@ -35,12 +35,11 @@ You need an AWS account used only for LiteLogin, a domain for login hosts that y
 
 ```sh
 git clone https://github.com/litelogin/litelogin && cd litelogin
-cp -r infra/envs/example infra/envs/prod           # then set terraform.tfvars
-scripts/bootstrap-account.sh prod --region us-east-1 --state-only
-make package cli
-# Deploy infra/envs/prod: the DNS zone first, then everything else (SelfHosting.md, step 5)
+AWS_PROFILE=<your profile> scripts/deploy.sh prod --domain login.example.com
 dist/litelogin init --org "Acme" --client "Acme Portal" --redirect-uri https://app.acme.com/callback
 ```
+
+`deploy.sh` creates the environment, shows each plan before applying it, tells you which NS records to add for the domain and waits for them, then checks the deployment with `litelogin status`. If it stops, run it again: it continues where it left off.
 
 `init` prints an issuer URL, a client ID and a client secret. Point any OpenID Connect library at the issuer: it finds the rest through `/.well-known/openid-configuration`. `litelogin client test` signs in end to end, as an app would. [SelfHosting.md](SelfHosting.md) has every step in full.
 

@@ -101,6 +101,7 @@ API endpoint comes from --endpoint, $LITELOGIN_ENDPOINT, --environment
 		app.hostCommand(),
 		app.userCommand(),
 		app.keysCommand(),
+		app.statusCommand(),
 	)
 	return root
 }

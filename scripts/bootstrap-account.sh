@@ -373,7 +373,8 @@ main() {
   write_backend_config
   if [[ "$STATE_ONLY" == true ]]; then
     printf '\nDone. %s (account %s): state bucket %s\n' "$ENVIRONMENT" "$ACCOUNT_ID" "$STATE_BUCKET"
-    printf 'Next: create infra/envs/%s from infra/envs/example (SelfHosting.md).\n' "$ENVIRONMENT"
+    [[ -d "$(dirname "$0")/../infra/envs/${ENVIRONMENT}" ]] ||
+      printf 'Next: create infra/envs/%s from infra/envs/example (SelfHosting.md).\n' "$ENVIRONMENT"
     return
   fi
   ensure_oidc_provider

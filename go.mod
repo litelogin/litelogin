@@ -12,11 +12,13 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.20
 	github.com/aws/aws-sdk-go-v2/service/acm v1.51.5
 	github.com/aws/aws-sdk-go-v2/service/cloudfront v1.75.6
+	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.76.0
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.73.2
 	github.com/aws/aws-sdk-go-v2/service/kms v1.62.5
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.114.4
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.79.9
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.53.0
+	github.com/aws/aws-sdk-go-v2/service/sts v1.51.9
 	github.com/aws/smithy-go v1.28.9
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-jose/go-jose/v4 v4.1.9
@@ -41,7 +43,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/signin v1.13.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.39.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.51.9 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/x v0.3.1 // indirect

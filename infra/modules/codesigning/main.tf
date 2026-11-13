@@ -24,14 +24,24 @@ variable "name_prefix" {
 
 data "aws_caller_identity" "current" {}
 
-# Profile names allow only letters, digits and underscores.
+# Profile names allow only letters, digits and underscores. A destroyed
+# profile is only canceled, and its name can never be used again, so each
+# profile gets a unique suffix: an environment can be removed and created
+# again in the same account. Changing to unique names replaces the profile
+# of a deployment made before (litelogin_<environment>_lambda) once.
 resource "aws_signer_signing_profile" "lambda" {
-  name        = "${replace(var.name_prefix, "-", "_")}_lambda"
+  name_prefix = "${replace(var.name_prefix, "-", "_")}_lambda_"
   platform_id = "AWSLambda-SHA384-ECDSA"
 
   signature_validity_period {
     value = 5
     type  = "YEARS"
+  }
+
+  # When the profile is replaced, the code signing configuration and the
+  # functions move to the new one before the old one is canceled.
+  lifecycle {
+    create_before_destroy = true
   }
 }
 
