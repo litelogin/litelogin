@@ -270,7 +270,7 @@ Upgrading from a version with the synthetic monitor removes its Lambda function,
 
 Upgrading from a version before `setup` replaces two variables: `cloudfront_free_plan = true` is now `cloudfront_plan = "free"`, and `monitoring = "reduced"` is `metrics = "alarmed"`, `dashboard = false` and `lambda_logs = "failures"` (or `setup = "lean"` for all of them, with no custom hosts). `tracing` takes `"xray"` or `"off"` instead of a bool, and is on by default in Full: set `tracing = "off"` to keep it off.
 
-Upgrading a Lean deployment from a version before `table_encryption` switches its tables from the customer managed key to DynamoDB's AWS owned key, in place and without downtime. Point-in-time restore points from before the switch still need the old key, and a key pending deletion can't be used, so keep it for the 35 days those restore points last: set `keep_table_key = true` in the same change, and remove it once 35 days have passed, which schedules the key's deletion. The plan shows the key kept, or, without `keep_table_key`, destroyed. To keep the customer managed key instead, set `table_encryption = "customer-managed"`.
+Upgrading a Lean deployment from a version before `table_encryption` switches its tables from the customer managed key to DynamoDB's AWS owned key, in place and without downtime, and schedules the old key's deletion (the plan shows it destroyed). A key pending deletion can't be used, so point-in-time restore points from before the switch can no longer be restored. To keep them, or the customer managed key, set `table_encryption = "customer-managed"`.
 
 ## Deploying from GitHub Actions
 

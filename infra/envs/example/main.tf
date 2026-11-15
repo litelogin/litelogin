@@ -88,11 +88,6 @@ variable "table_encryption" {
   default     = null
 }
 
-variable "keep_table_key" {
-  description = "Keep the customer managed table key after switching to \"aws-owned\", for 35 days (SelfHosting.md, \"Upgrading\")."
-  type        = bool
-  default     = false
-}
 
 variable "rate_limit_exempt_cidrs" {
   description = "Addresses exempt from WAF rate limits, only while a load test runs (test/load/README.md)."
@@ -126,7 +121,6 @@ module "litelogin" {
   dashboard               = var.dashboard
   lambda_logs             = var.lambda_logs
   table_encryption        = var.table_encryption
-  keep_table_key          = var.keep_table_key
   rate_limit_exempt_cidrs = var.rate_limit_exempt_cidrs
 }
 

@@ -125,11 +125,6 @@ variable "table_encryption" {
   }
 }
 
-variable "keep_table_key" {
-  description = "Keep the customer managed table key after switching to table_encryption = \"aws-owned\". Point-in-time restore points from before the switch need it, and a key pending deletion can't be used: set this when switching an existing deployment, and remove it 35 days later (SelfHosting.md, \"Upgrading\")."
-  type        = bool
-  default     = false
-}
 
 variable "rate_limit_exempt_cidrs" {
   description = "Addresses exempt from WAF rate limits, only while a load test runs (test/load/README.md)."
@@ -165,10 +160,6 @@ resource "terraform_data" "region" {
       error_message = "LiteLogin deploys to us-east-1 only: CloudFront certificates and WAF web ACLs must be there."
     }
     precondition {
-      condition     = !(var.keep_table_key && local.table_cmk)
-      error_message = "keep_table_key is only for table_encryption = \"aws-owned\": with \"customer-managed\" the key is kept anyway."
-    }
-    precondition {
       condition     = !(local.dashboard && local.reduced_metrics)
       error_message = "dashboard = true needs metrics = \"all\": most of the dashboard's metrics are log fields with \"alarmed\"."
     }
@@ -180,19 +171,17 @@ module "dns" {
   domain = var.default_host_domain
 }
 
-# The table key, while the tables use it or keep_table_key holds on to it.
-# The Lambdas' permissions to use it stay as long as it exists, so they
-# don't lose them while DynamoDB switches a table's encryption.
+# The table key, only with table_encryption = "customer-managed".
 module "kms" {
   source      = "../kms"
   name_prefix = local.name_prefix
-  create      = local.table_cmk || var.keep_table_key
+  create      = local.table_cmk
 }
 
 module "tables" {
   source      = "../tables"
   name_prefix = local.name_prefix
-  kms_key_arn = local.table_cmk ? module.kms.tables_key_arn : null
+  kms_key_arn = module.kms.tables_key_arn
 
   deletion_protection = var.deletion_protection
 }

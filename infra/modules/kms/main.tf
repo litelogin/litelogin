@@ -1,6 +1,5 @@
 # Customer managed key for encrypting the DynamoDB tables, when
-# table_encryption = "customer-managed" (or while keep_table_key holds on to
-# it after a switch to "aws-owned").
+# table_encryption = "customer-managed".
 #
 # Token signing keys are not created here: the key rotation Lambda creates
 # them at runtime (see "Rotate signing keys" in Datamodel.md).
