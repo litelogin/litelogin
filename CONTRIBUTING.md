@@ -28,6 +28,8 @@ dist/litelogin --endpoint http://localhost:8081 init --org Acme --client "Acme P
 
 Locally, orgs get default hosts under `litelogin.localhost`, and browsers resolve every `*.localhost` name to this machine. So the client above signs users in at <http://acme.litelogin.localhost:8080/login>. Emails are printed to the Auth server's output instead of being sent. The Worker doesn't run locally, so items for revoked sessions stay in the Session table, though they no longer work.
 
+[Local.md](Local.md) walks through this step by step, from a clean clone: creating a user, signing in on the login host in a browser, and adding a passkey.
+
 `make help` lists every target.
 
 ## Before you open a pull request
