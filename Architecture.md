@@ -371,7 +371,9 @@ If a deployment needs instant client or org disablement, shorten the cache time 
 - **Capacity:** on-demand for both tables.
 - **Config table:** point-in-time recovery and deletion protection enabled. DynamoDB Streams enabled with `NEW_AND_OLD_IMAGES`, so the Worker can see what changed.
 - **Session table:** TTL on `expires_at`; deletion protection enabled. Point-in-time recovery is optional, since restoring stale sessions has little value.
-- **Encryption:** both tables use a customer managed KMS key, so access can be audited and revoked.
+- **Encryption:** set by `table_encryption`, which follows `setup`.
+  - `"customer-managed"` (Full): both tables, their streams and their backups are encrypted with a KMS key of the deployment. Reading the data needs permission to use the key as well as DynamoDB permissions, and scheduling the key's deletion makes the tables and every backup unreadable, which guarantees the data is gone when a deployment is removed. The key has KMS's default key policy, so who can use it is decided by IAM, like the tables themselves. CloudTrail records the key's use by DynamoDB, but DynamoDB caches table keys, so that doesn't show who read which item; CloudTrail data events on the tables do, with either setting.
+  - `"aws-owned"` (Lean): DynamoDB's AWS owned key, at no charge ($1 a month less). The data is still encrypted at rest, and access is controlled by IAM alone.
 - **Region:** a single Region, us-east-1, for both configuration and authentication state. Multi-region isn't a simple infrastructure upgrade: single-use codes and refresh token rotation depend on strongly consistent reads and conditional writes in one place. A multi-region design would need its own decisions:
   - a home region per tenant or session
   - regional failover behavior

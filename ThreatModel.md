@@ -78,7 +78,7 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 | Unauthorized configuration changes | Admin API requires SigV4 (IAM auth on the function URL) | verified; scope is all orgs (F3) |
 | Secrets in logs | No log line records passwords, tokens, codes, cookies, client secrets or URLs | verified |
 | Secrets in request samples | WAF sampled requests show URIs, which for reset links include the token | accepted (F6) |
-| Data at rest | Tables encrypted with a customer managed KMS key; point-in-time recovery on the Config table (the Session table holds only short-lived data) | verified |
+| Data at rest | Tables encrypted at rest: with a customer managed KMS key in Full (`table_encryption = "customer-managed"`), whose deletion makes the tables and their backups unreadable; with DynamoDB's AWS owned key in Lean, where access is controlled by IAM alone. Point-in-time recovery on the Config table (the Session table holds only short-lived data) | verified |
 
 ### Supply chain
 

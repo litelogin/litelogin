@@ -26,7 +26,7 @@ These hold for every task, whatever the user's wording.
    - the environment name (2–16 lower case letters and digits, e.g. `prod`);
    - the AWS profile of its account;
    - `--domain`: the parent domain of the login hosts, e.g. `login.example.com`. Orgs sign in at `<org>.login.example.com`. The user must be able to add NS records for it at its parent domain's DNS provider.
-   - `--setup lean` (the default, about $5.50 a month fixed) or `full` (custom login hosts on the org's own domains, the full WAF, X-Ray, the dashboard; about $21). Cost.md, "Setups", has the details; offer Lean unless they need custom hosts.
+   - `--setup lean` (the default, about $4.50 a month fixed) or `full` (custom login hosts on the org's own domains, the full WAF, X-Ray, the dashboard, a customer managed key for the tables; about $21). Cost.md, "Setups", has the details; offer Lean unless they need custom hosts.
    - `--alarm-email` (optional): where CloudWatch alarms go.
 2. Run it with a long timeout (an apply that creates CloudFront takes 10–20 minutes):
    ```sh
@@ -44,7 +44,7 @@ These hold for every task, whatever the user's wording.
 4. Exit 0 means deployed and healthy: `litelogin status` ran and passed. Exit 1 is an error or a failed health check: read the message, and see "Find out what's wrong".
 5. The script prints the next step, creating the first org (see "Operate").
 
-To change a deployed environment's settings, edit `infra/envs/<environment>/terraform.tfvars` (the variables are in that directory's `main.tf`: `setup`, `alarm_email`, and the overrides `cloudfront_plan`, `custom_hosts`, `tracing`, `metrics`, `dashboard`, `lambda_logs`), then run `scripts/deploy.sh <environment>` and handle the plan stop as above. SelfHosting.md, "Configure the environment", and Cost.md say what each costs and allows. Turning `custom_hosts` off needs every custom host removed first.
+To change a deployed environment's settings, edit `infra/envs/<environment>/terraform.tfvars` (the variables are in that directory's `main.tf`: `setup`, `alarm_email`, and the overrides `cloudfront_plan`, `custom_hosts`, `tracing`, `metrics`, `dashboard`, `lambda_logs`, `table_encryption`), then run `scripts/deploy.sh <environment>` and handle the plan stop as above. SelfHosting.md, "Configure the environment", and Cost.md say what each costs and allows. Turning `custom_hosts` off needs every custom host removed first. Changing `table_encryption` on a deployed environment away from `"customer-managed"` (including upgrading a Lean one from before the setting existed) needs `keep_table_key = true` for 35 days, or its earlier point-in-time restore points stop working: if a plan destroys `aws_kms_key.tables`, stop and point this out (SelfHosting.md, "Upgrading").
 
 ## Find out what's wrong
 

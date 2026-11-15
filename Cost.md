@@ -16,6 +16,7 @@ What one LiteLogin deployment costs per month on AWS, in two setups, at 1,000 to
 | Metrics (`metrics`) | `"alarmed"`: the 3 metrics alarms use, and one Lambda throttles alarm, 12 alarms in all | `"all"`: 8 custom metrics, 15 alarms |
 | Dashboard (`dashboard`) | `false` | `true` |
 | Lambda's platform logs (`lambda_logs`) | `"failures"`: none for successful invocations | `"all"` |
+| Table encryption (`table_encryption`) | `"aws-owned"`: DynamoDB's AWS owned key, no charge | `"customer-managed"`: a KMS key of the deployment, $1 a month ([Architecture.md](Architecture.md#data) has the trade-off) |
 
 Lean's limit is the Free plan's 1 million requests a month: a sign-in and its 10 refreshes are 15 requests. Past it, CloudFront doesn't charge more but may slow delivery, so a deployment that grows should move to Full. The WAF trade-off is in [CloudFront flat-rate plans](#cloudfront-flat-rate-plans).
 
@@ -23,13 +24,13 @@ Lean's limit is the Free plan's 1 million requests a month: a sign-in and its 10
 
 | Sign-ins a month | Lean | Full |
 | --: | --: | --: |
-| 1,000 | **$5.60** | **$21.02** |
-| 10,000 | **$7.05** | **$23.43** |
-| 50,000 | **$13.50** | **$34.20** |
+| 1,000 | **$4.60** | **$21.02** |
+| 10,000 | **$6.05** | **$23.43** |
+| 50,000 | **$12.50** | **$34.20** |
 | 100,000 | over the plan | **$47.66** |
 | 1,000,000 | over the plan | **$231.01** |
 
-Full's fixed part is $20.74 a month, almost half of it the WAF ($10); Lean's is $5.44, because the Free plan includes the WAF and the zone and it has less monitoring. At low traffic the fixed part dominates. Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins. Full's totals include X-Ray tracing; `tracing = "off"` saves up to $0.000005 a request.
+Full's fixed part is $20.74 a month, almost half of it the WAF ($10); Lean's is $4.44, because the Free plan includes the WAF and the zone, it has less monitoring, and its tables use DynamoDB's own key. At low traffic the fixed part dominates. Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins. Full's totals include X-Ray tracing; `tracing = "off"` saves up to $0.000005 a request.
 
 The totals are list prices. They don't count AWS's free tier, which is shared by everything in the account (see [Free tier](#free-tier)), or taxes.
 
@@ -146,7 +147,7 @@ What a Full deployment costs with no sign-ins at all:
 | Service | What | Calculation | Cost |
 | -- | -- | -- | --: |
 | WAF | One web ACL with 5 rules (two rate limits, two AWS managed rule groups, one loopback redirect rule). The AWS managed groups used have no charge of their own. | $5 + 5 × $1 | $10.00 |
-| KMS | Three customer managed keys: the token signing key (RSA), table encryption and the Admin API's cursor key (HMAC). Around each 90-day rotation a second signing key exists for about 3 days; keys pending deletion aren't charged. | 3 × $1 + (3 days ÷ 90 days) × $1 | $3.03 |
+| KMS | Three customer managed keys: the token signing key (RSA), table encryption (with `table_encryption = "customer-managed"`) and the Admin API's cursor key (HMAC). Around each 90-day rotation a second signing key exists for about 3 days; keys pending deletion aren't charged. | 3 × $1 + (3 days ÷ 90 days) × $1 | $3.03 |
 | Route 53 | One hosted zone. The login hosts are alias records to CloudFront, whose queries are free. | $0.50 | $0.50 |
 | CloudWatch alarms | 15 alarms: 12 on one metric, 3 on a sum of two | (12 + 3 × 2) × $0.10 | $1.80 |
 | CloudWatch metrics | 8 custom metrics (metric name and dimensions) the Auth and Worker Lambdas publish, counted as if each were published all month. Custom metrics are prorated by the hour and charged only while published, so ones that record rare events (`EmailSendFailed`, `PasskeyLoginFailed`) cost much less. Latencies are log fields, not metrics. | 8 × $0.30 | $2.40 |
@@ -156,7 +157,7 @@ What a Full deployment costs with no sign-ins at all:
 
 Not counted, because they are a few cents or less: SQS (the work queues and dead-letter queues are empty unless work is outstanding), EventBridge Scheduler (about 8,700 invocations a month), DynamoDB Streams reads (only when configuration changes), the code-signing bucket, and log storage (Lambda logs are kept 30 days, so about one month's logs are stored at a time: at 1 million sign-ins, 15 million requests × 1,131 bytes is 15.8 GB, at most $0.47 a month stored, before compression).
 
-**Lean** has no WAF or zone charge (the Free plan includes them) and reduced monitoring: $3.03 (KMS) + 15 × $0.10 (alarms: 9 on one metric, 3 on two) + 3 × $0.30 (metrics) + $0.01 (background jobs) = **$5.44**.
+**Lean** has no WAF or zone charge (the Free plan includes them), reduced monitoring and no table key: $2.03 (KMS: the signing and cursor keys) + 15 × $0.10 (alarms: 9 on one metric, 3 on two) + 3 × $0.30 (metrics) + $0.01 (background jobs) = **$4.44**.
 
 **Storage** depends on users, not sign-ins. DynamoDB storage is free up to 25 GB, and point-in-time recovery on the Config table costs $0.20 per GB-month of that table. At about 1 KB a user, 100,000 users are 0.1 GB: $0.02 a month.
 
@@ -170,9 +171,9 @@ With **R = 10 refreshes per sign-in** (an app whose users stay signed in for abo
 
 | N | Sign-ins | Refreshes | Email | Requests total | Fixed | **Total** |
 | --: | --: | --: | --: | --: | --: | --: |
-| 1,000 | $0.03 | $0.13 | $0.01 | $0.16 | $5.44 | **$5.60** |
-| 10,000 | $0.27 | $1.30 | $0.05 | $1.61 | $5.44 | **$7.05** |
-| 50,000 | $1.33 | $6.48 | $0.25 | $8.06 | $5.44 | **$13.50** |
+| 1,000 | $0.03 | $0.13 | $0.01 | $0.16 | $4.44 | **$4.60** |
+| 10,000 | $0.27 | $1.30 | $0.05 | $1.61 | $4.44 | **$6.05** |
+| 50,000 | $1.33 | $6.48 | $0.25 | $8.06 | $4.44 | **$12.50** |
 
 50,000 sign-ins are 750,000 requests, within the plan's 1 million.
 
@@ -251,4 +252,4 @@ AWS's free tier is per account, shared with anything else in it, so the totals a
 - CloudFront: 10 million requests, 1 TB of data and 2 million function runs a month. Up to about 660,000 sign-ins a month with 10 refreshes each, CloudFront's request part is free.
 - DynamoDB: 25 GB of storage and 2.5 million stream read units a month.
 
-Lambda, X-Ray, KMS and CloudWatch have free tiers too; see each service's pricing page. CloudWatch's always-free 10 custom metrics and 10 alarm metrics matter most to Lean: in an account of its own, they leave about $3.54 of its fixed part ($3.03 of KMS and $0.50 of alarms).
+Lambda, X-Ray, KMS and CloudWatch have free tiers too; see each service's pricing page. CloudWatch's always-free 10 custom metrics and 10 alarm metrics matter most to Lean: in an account of its own, they leave about $2.54 of its fixed part ($2.03 of KMS and $0.50 of alarms).

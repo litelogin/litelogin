@@ -95,9 +95,9 @@ Copy `terraform.tfvars.example` to `terraform.tfvars` and set:
 | `environment` | The name from step 2. |
 | `default_host_domain` | The domain for default login hosts, e.g. `login.example.com`. |
 | `alarm_email` | Where alarms go. Optional; the address must confirm the SNS subscription. |
-| `setup` | `"full"` (the default) or `"lean"`, for small deployments: about $15 a month less, but no custom login hosts and fewer WAF rules and metrics. [Cost.md](Cost.md#setups) compares them. |
+| `setup` | `"full"` (the default) or `"lean"`, for small deployments: about $16 a month less, but no custom login hosts, fewer WAF rules and metrics, and DynamoDB's own key for the tables. [Cost.md](Cost.md#setups) compares them. |
 
-`setup` sets the defaults for CloudFront, the WAF, tracing, metrics, the dashboard and Lambda's logs. To change one of them alone, set its override: `cloudfront_plan` (`"free"` or `"pay-as-you-go"`), `custom_hosts`, `tracing` (`"xray"` or `"off"`), `metrics` (`"all"` or `"alarmed"`), `dashboard` or `lambda_logs` (`"all"` or `"failures"`). Each is described in `infra/modules/environment`, and a plan fails with a combination that can't work, such as the Free plan with custom hosts.
+`setup` sets the defaults for CloudFront, the WAF, tracing, metrics, the dashboard, Lambda's logs and table encryption. To change one of them alone, set its override: `cloudfront_plan` (`"free"` or `"pay-as-you-go"`), `custom_hosts`, `tracing` (`"xray"` or `"off"`), `metrics` (`"all"` or `"alarmed"`), `dashboard`, `lambda_logs` (`"all"` or `"failures"`) or `table_encryption` (`"customer-managed"` or `"aws-owned"`; [Architecture.md](Architecture.md#data) has the trade-off). Each is described in `infra/modules/environment`, and a plan fails with a combination that can't work, such as the Free plan with custom hosts.
 
 Both files are git-ignored.
 
@@ -269,6 +269,8 @@ Lambda code updates take effect without downtime. Each package is signed with th
 Upgrading from a version with the synthetic monitor removes its Lambda function, schedule and alarm. Its configuration parameter (`/litelogin-<environment>/canary`) was never managed by Terraform: delete it with `aws ssm delete-parameter`.
 
 Upgrading from a version before `setup` replaces two variables: `cloudfront_free_plan = true` is now `cloudfront_plan = "free"`, and `monitoring = "reduced"` is `metrics = "alarmed"`, `dashboard = false` and `lambda_logs = "failures"` (or `setup = "lean"` for all of them, with no custom hosts). `tracing` takes `"xray"` or `"off"` instead of a bool, and is on by default in Full: set `tracing = "off"` to keep it off.
+
+Upgrading a Lean deployment from a version before `table_encryption` switches its tables from the customer managed key to DynamoDB's AWS owned key, in place and without downtime. Point-in-time restore points from before the switch still need the old key, and a key pending deletion can't be used, so keep it for the 35 days those restore points last: set `keep_table_key = true` in the same change, and remove it once 35 days have passed, which schedules the key's deletion. The plan shows the key kept, or, without `keep_table_key`, destroyed. To keep the customer managed key instead, set `table_encryption = "customer-managed"`.
 
 ## Deploying from GitHub Actions
 

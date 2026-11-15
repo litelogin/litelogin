@@ -53,8 +53,9 @@ variable "session_table_arn" {
 }
 
 variable "table_kms_key_arn" {
-  description = "Customer managed key encrypting the tables and their streams."
+  description = "Customer managed key encrypting the tables and their streams, or null if they use DynamoDB's AWS owned key."
   type        = string
+  default     = null
 }
 
 variable "custom_hosts" {
@@ -182,19 +183,25 @@ data "aws_iam_policy_document" "worker" {
   }
 
   # The tables and their stream are encrypted with the customer managed key.
-  statement {
-    actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*", "kms:DescribeKey"]
-    resources = [var.table_kms_key_arn]
-    condition {
-      test     = "StringEquals"
-      variable = "kms:ViaService"
-      values   = ["dynamodb.${data.aws_region.current.region}.amazonaws.com"]
+  dynamic "statement" {
+    for_each = var.table_kms_key_arn == null ? [] : [var.table_kms_key_arn]
+    content {
+      actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*", "kms:DescribeKey"]
+      resources = [var.table_kms_key_arn]
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["dynamodb.${data.aws_region.current.region}.amazonaws.com"]
+      }
     }
   }
   # Lambda reads the stream for the function, outside a DynamoDB call.
-  statement {
-    actions   = ["kms:Decrypt"]
-    resources = [var.table_kms_key_arn]
+  dynamic "statement" {
+    for_each = var.table_kms_key_arn == null ? [] : [var.table_kms_key_arn]
+    content {
+      actions   = ["kms:Decrypt"]
+      resources = [var.table_kms_key_arn]
+    }
   }
 
   statement {

@@ -17,8 +17,9 @@ variable "name_prefix" {
 }
 
 variable "kms_key_arn" {
-  description = "Customer managed KMS key used to encrypt both tables."
+  description = "Customer managed KMS key that encrypts both tables, or null for DynamoDB's AWS owned key."
   type        = string
+  default     = null
 }
 
 variable "deletion_protection" {
@@ -102,8 +103,9 @@ resource "aws_dynamodb_table" "config" {
     enabled = true
   }
 
+  # Not enabled means DynamoDB's AWS owned key.
   server_side_encryption {
-    enabled     = true
+    enabled     = var.kms_key_arn != null
     kms_key_arn = var.kms_key_arn
   }
 }
@@ -156,8 +158,9 @@ resource "aws_dynamodb_table" "session" {
     enabled = var.session_point_in_time_recovery
   }
 
+  # Not enabled means DynamoDB's AWS owned key.
   server_side_encryption {
-    enabled     = true
+    enabled     = var.kms_key_arn != null
     kms_key_arn = var.kms_key_arn
   }
 }

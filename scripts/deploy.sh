@@ -49,8 +49,9 @@ New environment (infra/envs/<environment> doesn't exist yet):
   --domain <domain>       Parent domain of the default login hosts, e.g.
                           login.example.com (required)
   --setup lean|full       Default: lean, for small deployments; full adds
-                          custom login hosts, the full WAF, tracing and the
-                          dashboard (Cost.md, "Setups")
+                          custom login hosts, the full WAF, tracing, the
+                          dashboard and a customer managed table key
+                          (Cost.md, "Setups")
   --alarm-email <address> Where alarms go (optional)
 
 Options:

@@ -59,8 +59,9 @@ variable "session_table_name" {
 }
 
 variable "table_kms_key_arn" {
-  description = "Customer managed key encrypting the tables."
+  description = "Customer managed key encrypting the tables, or null if they use DynamoDB's AWS owned key."
   type        = string
+  default     = null
 }
 
 variable "schedule_expression" {
@@ -95,13 +96,16 @@ data "aws_iam_policy_document" "rotate" {
   }
 
   # Reading and writing an encrypted table uses its KMS key through DynamoDB.
-  statement {
-    actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*", "kms:DescribeKey"]
-    resources = [var.table_kms_key_arn]
-    condition {
-      test     = "StringEquals"
-      variable = "kms:ViaService"
-      values   = ["dynamodb.${data.aws_region.current.region}.amazonaws.com"]
+  dynamic "statement" {
+    for_each = var.table_kms_key_arn == null ? [] : [var.table_kms_key_arn]
+    content {
+      actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*", "kms:DescribeKey"]
+      resources = [var.table_kms_key_arn]
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["dynamodb.${data.aws_region.current.region}.amazonaws.com"]
+      }
     }
   }
 

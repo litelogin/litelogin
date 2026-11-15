@@ -39,7 +39,7 @@ variable "alarm_email" {
 }
 
 variable "setup" {
-  description = "\"lean\" or \"full\": the defaults for CloudFront, the WAF, tracing, metrics, the dashboard and Lambda's logs (Cost.md, \"Setups\"; infra/modules/environment)."
+  description = "\"lean\" or \"full\": the defaults for CloudFront, the WAF, tracing, metrics, the dashboard, Lambda's logs and table encryption (Cost.md, \"Setups\"; infra/modules/environment)."
   type        = string
   default     = "full"
 }
@@ -82,6 +82,18 @@ variable "lambda_logs" {
   default     = null
 }
 
+variable "table_encryption" {
+  description = "\"aws-owned\" or \"customer-managed\"."
+  type        = string
+  default     = null
+}
+
+variable "keep_table_key" {
+  description = "Keep the customer managed table key after switching to \"aws-owned\", for 35 days (SelfHosting.md, \"Upgrading\")."
+  type        = bool
+  default     = false
+}
+
 variable "rate_limit_exempt_cidrs" {
   description = "Addresses exempt from WAF rate limits, only while a load test runs (test/load/README.md)."
   type        = list(string)
@@ -113,6 +125,8 @@ module "litelogin" {
   metrics                 = var.metrics
   dashboard               = var.dashboard
   lambda_logs             = var.lambda_logs
+  table_encryption        = var.table_encryption
+  keep_table_key          = var.keep_table_key
   rate_limit_exempt_cidrs = var.rate_limit_exempt_cidrs
 }
 
