@@ -68,6 +68,7 @@ Every request is handled by a Lambda function and all state is in two on-demand 
 ## Documentation
 
 - [SelfHosting.md](SelfHosting.md): deploy LiteLogin in your own AWS account
+- [Local.md](Local.md): run LiteLogin on your machine, sign in, and add a passkey
 - [Architecture.md](Architecture.md): how it works
 - [Datamodel.md](Datamodel.md): the DynamoDB tables and every access pattern
 - [Cost.md](Cost.md): the monthly cost on AWS, fixed and per request
@@ -88,7 +89,7 @@ dist/litelogin --endpoint http://localhost:8081 init --org Acme --client "Acme P
   --redirect-uri http://localhost:3000/callback
 ```
 
-Then open <http://acme.litelogin.localhost:8080/login>. CONTRIBUTING.md has the details.
+[Local.md](Local.md) goes through this in detail, then creates a user, signs in at <http://acme.litelogin.localhost:8080/login>, and adds a passkey.
 
 ## The CLI
 
