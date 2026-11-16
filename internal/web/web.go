@@ -193,6 +193,9 @@ func (s *Server) Handler() http.Handler {
 	page("POST /account/passkeys/remove", s.removePasskey)
 	page("POST /account/2fa/setup", s.startMFASetup)
 	page("POST /account/2fa/confirm", s.confirmMFASetup)
+	page("POST /account/2fa/disable", s.disableMFA)
+	page("POST /account/2fa/recovery-codes", s.replaceRecoveryCodes)
+	page("POST /account/verify", s.confirmIdentity)
 	// Passkey ceremonies, called by the pages' script. They answer JSON.
 	page("POST /passkey/login/options", s.passkeyLoginOptions)
 	page("POST /passkey/login", s.passkeyLogin)
@@ -393,9 +396,11 @@ type pageData struct {
 	MaxPasskeys     int
 	// MFAPassword: turning on two-factor sign-in needs the password (the
 	// sign-in isn't recent). RecoveryCodesLeft is how many unused
-	// recovery codes the user has.
+	// recovery codes the user has. StepUp: the user has two-factor
+	// sign-in and must confirm it's them before sensitive changes.
 	MFAPassword       bool
 	RecoveryCodesLeft int
+	StepUp            bool
 	// QR and TOTPKey show a new authenticator app secret, as a QR code
 	// and as text; Action is where its form posts the confirming code.
 	QR      template.HTML

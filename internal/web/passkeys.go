@@ -335,7 +335,12 @@ func (s *Server) passkeyRegisterOptions(w http.ResponseWriter, r *http.Request, 
 	if sess == nil {
 		return
 	}
-	if !s.recentSignIn(sess) {
+	switch {
+	case u.MFA && !s.mfaFresh(sess, u):
+		// With two-factor sign-in, the password isn't enough.
+		jsonError(w, http.StatusUnauthorized, msgConfirmFirst)
+		return
+	case !u.MFA && !s.recentSignIn(sess):
 		ok, err := s.checkCurrentPassword(r, u, r.PostFormValue("password"))
 		if err != nil {
 			s.failJSON(w, r, err)
@@ -520,6 +525,9 @@ func (s *Server) renamePasskey(w http.ResponseWriter, r *http.Request, t *tenant
 func (s *Server) removePasskey(w http.ResponseWriter, r *http.Request, t *tenant) {
 	sess, u := s.signedIn(w, r, t)
 	if sess == nil {
+		return
+	}
+	if !s.needFresh(w, r, t, sess, u) {
 		return
 	}
 	ctx := r.Context()

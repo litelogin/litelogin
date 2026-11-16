@@ -191,6 +191,9 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, t *tenant,
 			s.log().WarnContext(ctx, "delete previous session", "error", err)
 		}
 	}
+	if authTime == 0 {
+		authTime = s.now().Unix()
+	}
 	token := crypto.NewToken()
 	sess := &store.Session{
 		Hash: crypto.HashToken(token), OrgID: t.Org.ID, PoolID: t.Pool.ID, UserID: u.ID, ClientID: t.clientID(),

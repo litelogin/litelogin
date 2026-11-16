@@ -27,6 +27,8 @@ var accountNotices = map[string]string{
 	"passkey_renamed":  "The passkey was renamed.",
 	"passkey_removed":  "The passkey was removed. You're still signed in here; every other session was signed out.",
 	"mfa_enabled":      "Two-factor sign-in is on. You're still signed in here; every other session was signed out.",
+	"mfa_disabled":     "Two-factor sign-in is off. You're still signed in here; every other session was signed out.",
+	"confirmed":        "Thanks. For the next 10 minutes you can change your password, email, passkeys and two-factor sign-in.",
 }
 
 // sessionView is one of the user's sessions on the account page.
@@ -104,9 +106,9 @@ func (s *Server) renderAccount(w http.ResponseWriter, r *http.Request, t *tenant
 			return
 		}
 	}
-	d.MFAPassword = !s.recentSignIn(sess)
+	d.MFAPassword, d.StepUp = !s.recentSignIn(sess), !s.mfaFresh(sess, u)
 	d.Title, d.Account, d.Sessions = "Your account", u, views
-	d.Passkeys, d.PasskeyPassword, d.MaxPasskeys = passkeyViews(passkeys), !s.recentSignIn(sess), store.MaxPasskeysPerUser
+	d.Passkeys, d.PasskeyPassword, d.MaxPasskeys = passkeyViews(passkeys), !u.MFA && !s.recentSignIn(sess), store.MaxPasskeysPerUser
 	d.Script = pageScript(t)
 	s.render(w, r, t, status, "account", d)
 }
@@ -198,6 +200,9 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, t *tenan
 	if sess == nil {
 		return
 	}
+	if !s.needFresh(w, r, t, sess, u) {
+		return
+	}
 	again := func(msg string) {
 		s.renderAccount(w, r, t, http.StatusBadRequest, sess, u, pageData{Error: msg})
 	}
@@ -226,7 +231,13 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, t *tenan
 		return
 	}
 	u.AuthVersion = v
-	if err := s.startSession(w, r, t, u, amrPassword, 0); err != nil {
+	// The user just showed their password; with two-factor sign-in, the
+	// session had shown the second factor too.
+	amr := amrPassword
+	if u.MFA {
+		amr = signInMethods(sess.AMR)
+	}
+	if err := s.startSession(w, r, t, u, amr, 0); err != nil {
 		s.fail(w, r, t, err)
 		return
 	}
@@ -238,6 +249,9 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, t *tenan
 func (s *Server) changeEmail(w http.ResponseWriter, r *http.Request, t *tenant) {
 	sess, u := s.signedIn(w, r, t)
 	if sess == nil {
+		return
+	}
+	if !s.needFresh(w, r, t, sess, u) {
 		return
 	}
 	ctx := r.Context()

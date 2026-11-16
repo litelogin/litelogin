@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/litelogin/litelogin/internal/crypto"
+	"github.com/litelogin/litelogin/internal/store"
 	"github.com/litelogin/litelogin/internal/web"
 )
 
@@ -319,4 +320,89 @@ func TestMFASignInRevoked(t *testing.T) {
 	expectRedirect(t, e.signInStep(other, password, crypto.TOTPCode(secret, step+1)), "/account")
 	expectRedirect(t, other.post("/account", "/account/password", url.Values{"current_password": {password}, "new_password": {"a whole new password"}}), "/account?n=password_changed")
 	expectRedirect(t, b.post("/login/2fa", "/login/2fa", url.Values{"code": {crypto.TOTPCode(secret, step+2)}}), "/login?n=mfa_expired")
+}
+
+// With two-factor sign-in, sensitive changes take a recent second factor,
+// not just the password.
+func TestMFAConfirmBeforeChanges(t *testing.T) {
+	e := newEnv(t, false)
+	e.updateHost(func(h *store.LoginHost) { h.PasskeysEnabled = true })
+	secret, codes, step := e.mfaUser()
+	b := e.browser()
+	expectRedirect(t, e.signInStep(b, password, crypto.TOTPCode(secret, step+1)), "/account")
+	// Just signed in with both factors: no need to confirm.
+	if strings.Contains(b.get("/account").body, "Confirm it's you") {
+		t.Fatal("asked to confirm right after a two-factor sign-in")
+	}
+
+	e.skew.Store(int64(web.RecentSignIn + time.Minute))
+	p := b.get("/account")
+	expect(t, p, http.StatusOK, "Confirm it's you")
+	if strings.Contains(p.body, `action="/account/password"`) || strings.Contains(p.body, `action="/account/2fa/disable"`) {
+		t.Fatal("sensitive forms shown before confirming")
+	}
+	changePassword := url.Values{"current_password": {password}, "new_password": {"a whole new password"}}
+	for path, fields := range map[string]url.Values{
+		"/account/password":           changePassword,
+		"/account/email":              {"new_email": {"bob@example.com"}, "password": {password}},
+		"/account/2fa/disable":        {},
+		"/account/2fa/recovery-codes": {},
+		"/account/passkeys/remove":    {"passkey": {strings.Repeat("a", 64)}},
+	} {
+		expect(t, b.post("/account", path, fields), http.StatusForbidden, "First confirm")
+	}
+	expectAnswer(t, b.ceremony("/account", "/passkey/register/options", url.Values{"password": {password}}), http.StatusUnauthorized, "error", "First confirm")
+
+	// A wrong code doesn't confirm; the app's next code does.
+	expect(t, b.post("/account", "/account/verify", url.Values{"code": {crypto.TOTPCode(secret, step+1)}}), http.StatusUnauthorized, "isn&#39;t right")
+	expectRedirect(t, b.post("/account", "/account/verify", url.Values{"code": {e.totpCode(secret)}}), "/account?n=confirmed")
+	expectRedirect(t, b.post("/account", "/account/password", changePassword), "/account?n=password_changed")
+	// Changing the password kept the confirmation.
+	if strings.Contains(b.get("/account").body, "Confirm it's you") {
+		t.Error("asked to confirm again after changing the password")
+	}
+
+	// A recovery code confirms too.
+	e.skew.Store(int64(2 * (web.RecentSignIn + time.Minute)))
+	expectRedirect(t, b.post("/account", "/account/verify", url.Values{"code": {codes[0]}}), "/account?n=confirmed")
+}
+
+func TestMFADisable(t *testing.T) {
+	e := newEnv(t, false)
+	secret, codes, step := e.mfaUser()
+	here, there := e.browser(), e.browser()
+	expectRedirect(t, e.signInStep(here, password, crypto.TOTPCode(secret, step+1)), "/account")
+	expectRedirect(t, e.signInStep(there, password, codes[0]), "/account")
+
+	expectRedirect(t, here.post("/account", "/account/2fa/disable", url.Values{}), "/account?n=mfa_disabled")
+	expect(t, here.get("/account?n=mfa_disabled"), http.StatusOK, "Set up two-factor sign-in")
+	expectRedirect(t, there.get("/account"), "/login")
+	msgs := e.mail.Messages()
+	if last := msgs[len(msgs)-1]; !strings.Contains(last.Subject, "Two-factor sign-in is off") {
+		t.Errorf("last email: %q", last.Subject)
+	}
+	// The password alone signs in again.
+	e.signIn("alice@example.com", password)
+}
+
+func TestMFAReplaceRecoveryCodes(t *testing.T) {
+	e := newEnv(t, false)
+	secret, old, step := e.mfaUser()
+	b := e.browser()
+	expectRedirect(t, e.signInStep(b, password, crypto.TOTPCode(secret, step+1)), "/account")
+	p := b.post("/account", "/account/2fa/recovery-codes", url.Values{})
+	expect(t, p, http.StatusOK, "Your old recovery codes no longer work")
+	var codes []string
+	for _, m := range recoveryCodeRE.FindAllStringSubmatch(p.body, -1) {
+		codes = append(codes, m[1])
+	}
+	if len(codes) != crypto.RecoveryCodeCount || slices.Contains(codes, old[0]) {
+		t.Fatalf("new codes: %v", codes)
+	}
+	msgs := e.mail.Messages()
+	if last := msgs[len(msgs)-1]; !strings.Contains(last.Subject, "New recovery codes") {
+		t.Errorf("last email: %q", last.Subject)
+	}
+	expect(t, e.signInStep(e.browser(), password, old[0]), http.StatusUnauthorized, "isn&#39;t right")
+	expectRedirect(t, e.signInStep(e.browser(), password, codes[0]), "/account")
 }

@@ -6,6 +6,17 @@
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <button type="submit">Sign out</button>
 </form>
+{{if .StepUp}}
+<section>
+<h2>Confirm it's you</h2>
+<p class="hint">To change your password, email, passkeys or two-factor sign-in, enter a code from your authenticator app, or a recovery code.</p>
+<form method="post" action="/account/verify" class="row">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input name="code" type="text" autocomplete="one-time-code" autocapitalize="none" spellcheck="false" maxlength="40" aria-label="Code" required>
+<button type="submit">Confirm</button>
+</form>
+</section>
+{{end}}
 
 <section>
 <h2>Where you're signed in</h2>
@@ -40,15 +51,15 @@
 <input name="name" type="text" value="{{.Name}}" maxlength="64" aria-label="Passkey name" required>
 <button type="submit" class="secondary">Rename</button>
 </form>
-<form method="post" action="/account/passkeys/remove">
+{{if not $.StepUp}}<form method="post" action="/account/passkeys/remove">
 <input type="hidden" name="csrf" value="{{$.CSRF}}">
 <input type="hidden" name="passkey" value="{{.ID}}">
 <button type="submit" class="secondary">Remove this passkey</button>
-</form>
+</form>{{end}}
 </li>{{end}}
 </ul>
 <p class="hint">Removing a passkey signs you out everywhere else.</p>{{end}}
-{{if and .PasskeysEnabled (lt (len .Passkeys) .MaxPasskeys)}}<form id="passkey-add" hidden>
+{{if and .PasskeysEnabled (lt (len .Passkeys) .MaxPasskeys) (not .StepUp)}}<form id="passkey-add" hidden>
 <label for="passkey_name">Name (optional)</label>
 <input id="passkey_name" name="name" type="text" maxlength="64" placeholder="Work laptop">
 <div id="passkey-password-field"{{if not .PasskeyPassword}} hidden{{end}}>
@@ -64,6 +75,15 @@
 <h2>Two-factor sign-in</h2>
 {{if .Account.MFA}}<p>On. Signing in with your password also takes a code from your authenticator app.</p>
 <p class="hint">You have {{.RecoveryCodesLeft}} unused recovery code{{if ne .RecoveryCodesLeft 1}}s{{end}}. Each works once, if you lose your authenticator app.</p>
+{{if not .StepUp}}<form method="post" action="/account/2fa/recovery-codes">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<button type="submit" class="secondary">Get new recovery codes</button>
+</form>
+<form method="post" action="/account/2fa/disable">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<p class="hint">Turning it off signs you out everywhere else.</p>
+<button type="submit" class="secondary">Turn off two-factor sign-in</button>
+</form>{{end}}
 {{else}}<p class="hint">Signing in with your password will also take a code from an authenticator app on your phone, such as Google Authenticator, Microsoft Authenticator or 1Password. A stolen password is then not enough.</p>
 <form method="post" action="/account/2fa/setup">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -75,7 +95,7 @@
 
 <section>
 <h2>Change password</h2>
-<form method="post" action="/account/password">
+{{if .StepUp}}<p class="hint">Confirm it's you above first.</p>{{else}}<form method="post" action="/account/password">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="current_password">Current password</label>
 <input id="current_password" name="current_password" type="password" autocomplete="current-password" required>
@@ -83,12 +103,12 @@
 <input id="new_password" name="new_password" type="password" autocomplete="new-password" minlength="{{.MinPassword}}" required>
 <p class="hint">At least {{.MinPassword}} characters. This signs you out everywhere else.</p>
 <button type="submit">Change password</button>
-</form>
+</form>{{end}}
 </section>
 
 <section>
 <h2>Change email</h2>
-<form method="post" action="/account/email">
+{{if .StepUp}}<p class="hint">Confirm it's you above first.</p>{{else}}<form method="post" action="/account/email">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="new_email">New email</label>
 <input id="new_email" name="new_email" type="email" autocomplete="email" value="{{.Email}}" required>
@@ -96,6 +116,6 @@
 <input id="email_password" name="password" type="password" autocomplete="current-password" required>
 <p class="hint">We'll send a link to the new address. Your email changes once you open it.</p>
 <button type="submit">Send confirmation link</button>
-</form>
+</form>{{end}}
 </section>
 {{end}}

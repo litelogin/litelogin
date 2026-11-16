@@ -481,6 +481,150 @@ func (s *Server) wrongSecondFactor(w http.ResponseWriter, r *http.Request, t *te
 	s.renderSecondStep(w, r, t, http.StatusUnauthorized, p, msgWrongSignInCode)
 }
 
+// ---- Confirm it's you (account page) ----
+
+// mfaFresh reports whether a session may make sensitive changes to a user
+// with two-factor sign-in: changing the password or email, adding or
+// removing a passkey, new recovery codes, turning two-factor sign-in off.
+// For those, the password alone isn't enough: the session must have shown
+// a second factor (or signed in with a passkey) within RecentSignIn. A
+// user without two-factor sign-in needs no more than before.
+func (s *Server) mfaFresh(sess *store.Session, u *store.User) bool {
+	return !u.MFA || slices.Contains(signInMethods(sess.AMR), "mfa") && s.recentSignIn(sess)
+}
+
+const msgConfirmFirst = "First confirm it's you, with a code from your authenticator app."
+
+// needFresh renders the account page asking the user to confirm it's them,
+// and reports false, unless the session may make sensitive changes.
+func (s *Server) needFresh(w http.ResponseWriter, r *http.Request, t *tenant, sess *store.Session, u *store.User) bool {
+	if s.mfaFresh(sess, u) {
+		return true
+	}
+	s.renderAccount(w, r, t, http.StatusForbidden, sess, u, pageData{Error: msgConfirmFirst})
+	return false
+}
+
+// confirmIdentity takes a code from a signed-in user with two-factor
+// sign-in and renews their session as a two-factor sign-in now, so they
+// can make sensitive changes for RecentSignIn. Wrong codes count as at
+// sign-in.
+func (s *Server) confirmIdentity(w http.ResponseWriter, r *http.Request, t *tenant) {
+	sess, u := s.signedIn(w, r, t)
+	if sess == nil {
+		return
+	}
+	ctx := r.Context()
+	if !u.MFA {
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
+	}
+	if u.MFALockedUntil > s.now().Unix() {
+		metrics.Count(s.Metrics, metrics.MFAFailed, 1, metrics.Reason("locked"))
+		s.renderAccount(w, r, t, http.StatusTooManyRequests, sess, u, pageData{Error: msgMFALocked})
+		return
+	}
+	amr, recovery, err := s.useSecondFactor(ctx, u, r.PostFormValue("code"))
+	var wrong errWrongCode
+	if errors.As(err, &wrong) {
+		metrics.Count(s.Metrics, metrics.MFAFailed, 1, metrics.Reason(wrong.reason))
+		locked, err := s.Store.RecordFailedMFA(ctx, u.ID, MaxFailedMFA, MFALockoutDuration)
+		if err != nil {
+			s.fail(w, r, t, err)
+			return
+		}
+		msg := msgWrongSignInCode
+		if locked {
+			metrics.Count(s.Metrics, metrics.MFALockout, 1)
+			s.notify(ctx, t, u, email.MFALocked, email.Data{})
+			msg = msgMFALocked
+		}
+		s.renderAccount(w, r, t, http.StatusUnauthorized, sess, u, pageData{Error: msg})
+		return
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	if u.MFAFailedCount != 0 {
+		if err := s.Store.ResetFailedMFA(ctx, u.ID); err != nil {
+			s.log().WarnContext(ctx, "reset failed codes", "error", err)
+		}
+	}
+	if recovery {
+		left, err := s.Store.CountRecoveryCodes(ctx, u.ID)
+		if err != nil {
+			s.log().WarnContext(ctx, "count recovery codes", "error", err)
+		}
+		s.notify(ctx, t, u, email.RecoveryCodeUsed, email.Data{Count: left})
+	}
+	// A new session (and cookie) for the stronger sign-in.
+	if err := s.startSession(w, r, t, u, amr, 0); err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	http.Redirect(w, r, "/account?n=confirmed", http.StatusSeeOther)
+}
+
+// disableMFA turns two-factor sign-in off. Every session ends; this
+// browser gets a new one with the same sign-in.
+func (s *Server) disableMFA(w http.ResponseWriter, r *http.Request, t *tenant) {
+	sess, u := s.signedIn(w, r, t)
+	if sess == nil {
+		return
+	}
+	if !u.MFA {
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
+	}
+	if !s.needFresh(w, r, t, sess, u) {
+		return
+	}
+	ctx := r.Context()
+	v, err := s.Store.DisableMFA(ctx, u.ID)
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	u.AuthVersion, u.MFA = v, false
+	if err := s.startSession(w, r, t, u, sess.AMR, sess.AuthTime); err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	s.notify(ctx, t, u, email.MFADisabled, email.Data{})
+	http.Redirect(w, r, "/account?n=mfa_disabled", http.StatusSeeOther)
+}
+
+// replaceRecoveryCodes makes a new set of recovery codes; the old ones stop
+// working.
+func (s *Server) replaceRecoveryCodes(w http.ResponseWriter, r *http.Request, t *tenant) {
+	sess, u := s.signedIn(w, r, t)
+	if sess == nil {
+		return
+	}
+	if !u.MFA {
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
+	}
+	if !s.needFresh(w, r, t, sess, u) {
+		return
+	}
+	ctx := r.Context()
+	codes, hashes := newRecoveryCodes()
+	if err := s.Store.ReplaceRecoveryCodes(ctx, u.ID, hashes); errors.Is(err, store.ErrConditionFailed) {
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
+	} else if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	s.notify(ctx, t, u, email.RecoveryCodesReplaced, email.Data{})
+	s.render(w, r, t, http.StatusOK, "mfa_codes", pageData{
+		Title: "Save your recovery codes", RecoveryCodes: codes, Continue: "/account",
+		Notice: "Your old recovery codes no longer work.",
+	})
+}
+
 const (
 	msgWrongSignInCode = "That code isn't right, or it was already used. Enter the code your app shows now, or an unused recovery code."
 	msgMFALocked       = "Too many wrong codes were entered for this account. Wait 15 minutes, then try again."
