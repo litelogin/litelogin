@@ -159,7 +159,7 @@ Passkeys (WebAuthn) are an extra way to sign in; users keep their passwords. A h
 - **Endpoints:** the script posts forms (with the CSRF token) to `/passkey/*` and gets JSON back. Each ceremony has a challenge that lasts 5 minutes and works once.
 - **Adding one:** needs a sign-in within the last 10 minutes, or the password, so a stolen session can't add the thief's passkey. The user is emailed whenever a passkey is added. A user can have up to 20.
 - **Signing in:** the passkey's user handle is the user ID. The user must be in the host's pool, active, and verified if the pool requires it. The password lockout doesn't apply. A signature counter that goes backwards (other than 0, which synced passkeys always report) is refused as a possible clone.
-- **`amr`:** `["swk", "user"]` for a passkey that can be synced, `["hwk", "user"]` for one bound to a device (RFC 8176), told apart by the backup-eligible flag.
+- **`amr` and `acr`:** a passkey sign-in is `amr` `["pop", "user", "mfa"]` and `acr` `phr`. `pop` is proof of possession of a key (OpenID EAP ACR Values 1.0), which leaves open whether the key is in hardware: without attestation LiteLogin can't tell. `user` and `mfa` are RFC 8176: user verification is required and checked, so the device and the biometric or PIN that unlocks it are two factors. `phr` (phishing-resistant) is the same register's `acr`. Sessions, codes and refresh families recorded before this say `hwk` or `swk` instead, and tokens issued from them say `["pop", "user", "mfa"]`.
 - **Removing one** signs the user out everywhere else (it increments `auth_version`), since sessions and tokens aren't linked to the passkey they came from, and the usual reason is a lost device.
 
 ## Protocol
@@ -193,10 +193,11 @@ Authorization codes are bound to the client, the redirect URI, the PKCE challeng
 | Format | JWT, `typ: at+jwt` (RFC 9068) | JWT (OIDC Core) | Opaque random value |
 | Signing | RS256, `kid` in header | RS256, `kid` in header | Not signed; stored hashed |
 | Lifetime | `access_token_ttl` (default 15 minutes) | `id_token_ttl` (default 15 minutes) | `refresh_token_ttl`, capped by the family's lifetime |
-| Claims | `iss`, `sub`, `aud`, `client_id`, `scope`, `exp`, `iat`, `jti` | `iss`, `sub`, `aud`, `azp`, `exp`, `iat`, `auth_time`, `nonce`, `amr`; plus `email` and `email_verified` with the `email` scope | n/a |
+| Claims | `iss`, `sub`, `aud`, `client_id`, `scope`, `exp`, `iat`, `jti`, `auth_time`, `acr` | `iss`, `sub`, `aud`, `azp`, `exp`, `iat`, `auth_time`, `nonce`, `acr`, `amr`; plus `email` and `email_verified` with the `email` scope | n/a |
 | Validated by | The relying party, locally with the JWKS | The relying party, locally with the JWKS | LiteLogin only |
 
 - **Minimal claims:** access tokens carry no email or profile data. Relying parties that need it call `/userinfo` or read the ID token.
+- **How the user signed in:** `acr` is one value a client can check without interpreting `amr`: `phr` for a passkey, `urn:litelogin:acr:pwd` for a password. Discovery lists them in `acr_values_supported`. Access tokens carry `acr` and `auth_time` too (RFC 9068 §2.2.1), so a resource server can ask for a stronger or more recent sign-in (RFC 9470). `acr_values` in an authorization request isn't acted on yet.
 - **Audience:** `aud` is the client ID for both token types until resource indicators (RFC 8707) are supported.
 - **No `auth_version` claim:** relying parties can't check it, so it isn't included.
 

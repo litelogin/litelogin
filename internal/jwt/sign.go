@@ -83,6 +83,11 @@ type AccessTokenClaims struct {
 	ExpiresAt int64  `json:"exp"`
 	IssuedAt  int64  `json:"iat"`
 	JWTID     string `json:"jti"`
+	// AuthTime and ACR say when and how the user signed in (RFC 9068
+	// §2.2.1), so a resource server can ask for a newer or stronger
+	// sign-in (RFC 9470).
+	AuthTime int64  `json:"auth_time,omitempty"`
+	ACR      string `json:"acr,omitempty"`
 }
 
 // IDTokenClaims are the claims of an ID token (OIDC Core §2). Email and
@@ -96,6 +101,7 @@ type IDTokenClaims struct {
 	IssuedAt        int64    `json:"iat"`
 	AuthTime        int64    `json:"auth_time"`
 	Nonce           string   `json:"nonce,omitempty"`
+	ACR             string   `json:"acr,omitempty"`
 	AMR             []string `json:"amr,omitempty"`
 	Email           string   `json:"email,omitempty"`
 	EmailVerified   *bool    `json:"email_verified,omitempty"`
@@ -107,6 +113,8 @@ type AccessTokenParams struct {
 	UserID   string
 	ClientID string
 	Scope    string
+	AuthTime int64
+	ACR      string
 	TTL      time.Duration
 	Now      time.Time
 }
@@ -117,6 +125,7 @@ func NewAccessTokenClaims(p AccessTokenParams) AccessTokenClaims {
 	return AccessTokenClaims{
 		Issuer: p.Issuer, Subject: p.UserID, Audience: p.ClientID, ClientID: p.ClientID, Scope: p.Scope,
 		IssuedAt: p.Now.Unix(), ExpiresAt: p.Now.Add(p.TTL).Unix(), JWTID: crypto.NewID(),
+		AuthTime: p.AuthTime, ACR: p.ACR,
 	}
 }
 
@@ -127,6 +136,7 @@ type IDTokenParams struct {
 	ClientID string
 	AuthTime int64
 	Nonce    string
+	ACR      string
 	AMR      []string
 	// IncludeEmail adds email and email_verified (the email scope).
 	IncludeEmail  bool
@@ -140,7 +150,7 @@ type IDTokenParams struct {
 func NewIDTokenClaims(p IDTokenParams) IDTokenClaims {
 	c := IDTokenClaims{
 		Issuer: p.Issuer, Subject: p.UserID, Audience: p.ClientID, AuthorizedParty: p.ClientID,
-		IssuedAt: p.Now.Unix(), ExpiresAt: p.Now.Add(p.TTL).Unix(), AuthTime: p.AuthTime, Nonce: p.Nonce, AMR: p.AMR,
+		IssuedAt: p.Now.Unix(), ExpiresAt: p.Now.Add(p.TTL).Unix(), AuthTime: p.AuthTime, Nonce: p.Nonce, ACR: p.ACR, AMR: p.AMR,
 	}
 	if p.IncludeEmail {
 		verified := p.EmailVerified

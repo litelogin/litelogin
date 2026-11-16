@@ -288,14 +288,19 @@ func TestPasskeyRegisterAndSignIn(t *testing.T) {
 		t.Error("PasskeyLoginSucceeded wasn't counted")
 	}
 
-	// A synced passkey is a software key in amr.
+	// A passkey sign-in is multi-factor and phishing-resistant, in the ID
+	// token and the access token.
 	verifier, challenge := pkce()
 	r := e.exchange(b2.authorize(e.authzQuery(challenge)).Query().Get("code"), verifier)
 	if r.status != http.StatusOK {
 		t.Fatalf("exchange: %d %v", r.status, r.body)
 	}
-	if got := amr(claims(t, r.body["id_token"].(string))); !slices.Equal(got, []string{"swk", "user"}) {
-		t.Errorf("amr = %v", got)
+	id := claims(t, r.body["id_token"].(string))
+	if got := amr(id); !slices.Equal(got, []string{"pop", "user", "mfa"}) || id["acr"] != "phr" {
+		t.Errorf("amr = %v, acr = %v", got, id["acr"])
+	}
+	if at := claims(t, r.body["access_token"].(string)); at["acr"] != "phr" || at["auth_time"] != id["auth_time"] {
+		t.Errorf("access token acr = %v, auth_time = %v", at["acr"], at["auth_time"])
 	}
 }
 
@@ -308,7 +313,7 @@ func TestDeviceBoundPasskey(t *testing.T) {
 	expectAnswer(t, b.passkeyLogin(a), http.StatusOK, "redirect", "/account")
 	verifier, challenge := pkce()
 	r := e.exchange(b.authorize(e.authzQuery(challenge)).Query().Get("code"), verifier)
-	if got := amr(claims(t, r.body["id_token"].(string))); !slices.Equal(got, []string{"hwk", "user"}) {
+	if got := amr(claims(t, r.body["id_token"].(string))); !slices.Equal(got, []string{"pop", "user", "mfa"}) {
 		t.Errorf("amr = %v", got)
 	}
 

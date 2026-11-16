@@ -95,15 +95,12 @@ func credential(p *store.Passkey) webauthn.Credential {
 	}
 }
 
-// passkeyAMR is the amr (RFC 8176) of a passkey sign-in: a software key
-// if the passkey can be synced between devices, a hardware key if it's
-// bound to one; "user" because user verification is required.
-func passkeyAMR(backupEligible bool) []string {
-	if backupEligible {
-		return []string{"swk", "user"}
-	}
-	return []string{"hwk", "user"}
-}
+// passkeyAMR is the amr of a passkey sign-in: proof of possession of a key
+// ("pop", OpenID EAP ACR Values 1.0, which leaves open whether the key is
+// in hardware; without attestation LiteLogin can't tell), "user" because
+// user verification is required and checked, and so "mfa" (RFC 8176): the
+// device and the biometric or PIN that unlocks it.
+var passkeyAMR = []string{"pop", "user", "mfa"}
 
 func ceremonyJSON(w http.ResponseWriter, status int, v any) {
 	h := w.Header()
@@ -297,7 +294,7 @@ func (s *Server) passkeyLogin(w http.ResponseWriter, r *http.Request, t *tenant)
 		s.failJSON(w, r, err)
 		return
 	}
-	if err := s.startSession(w, r, t, u, passkeyAMR(pk.BackupEligible), 0); err != nil {
+	if err := s.startSession(w, r, t, u, passkeyAMR, 0); err != nil {
 		s.failJSON(w, r, err)
 		return
 	}

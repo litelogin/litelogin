@@ -70,8 +70,9 @@ func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
 		"code_challenge_methods_supported":      []string{store.CodeChallengeS256},
 		"scopes_supported":                      []string{"openid", "email", "offline_access"},
 		"claims_supported": []string{
-			"iss", "sub", "aud", "azp", "exp", "iat", "auth_time", "nonce", "amr", "email", "email_verified",
+			"iss", "sub", "aud", "azp", "exp", "iat", "auth_time", "nonce", "acr", "amr", "email", "email_verified",
 		},
+		"acr_values_supported":                           acrValues,
 		"prompt_values_supported":                        []string{"none", "login"},
 		"authorization_response_iss_parameter_supported": true,
 		"claims_parameter_supported":                     false,
@@ -722,8 +723,11 @@ func (s *Server) issue(r *http.Request, t *tenant, u *store.User, iss, scope str
 	ctx := r.Context()
 	now := s.now()
 	scopes := strings.Fields(scope)
+	amr = signInMethods(amr)
+	acr := signInLevel(amr)
 	at, err := s.Signer.SignAccessToken(ctx, jwt.NewAccessTokenClaims(jwt.AccessTokenParams{
-		Issuer: iss, UserID: u.ID, ClientID: t.Client.ID, Scope: scope, TTL: seconds(t.Client.AccessTokenTTL), Now: now,
+		Issuer: iss, UserID: u.ID, ClientID: t.Client.ID, Scope: scope, AuthTime: authTime, ACR: acr,
+		TTL: seconds(t.Client.AccessTokenTTL), Now: now,
 	}))
 	if err != nil {
 		return nil, err
@@ -733,7 +737,7 @@ func (s *Server) issue(r *http.Request, t *tenant, u *store.User, iss, scope str
 	}
 	if slices.Contains(scopes, "openid") {
 		resp.IDToken, err = s.Signer.SignIDToken(ctx, jwt.NewIDTokenClaims(jwt.IDTokenParams{
-			Issuer: iss, UserID: u.ID, ClientID: t.Client.ID, AuthTime: authTime, Nonce: nonce, AMR: signInMethods(amr),
+			Issuer: iss, UserID: u.ID, ClientID: t.Client.ID, AuthTime: authTime, Nonce: nonce, AMR: amr, ACR: acr,
 			IncludeEmail: slices.Contains(scopes, "email"), Email: u.Email, EmailVerified: u.EmailVerified,
 			TTL: seconds(t.Client.IDTokenTTL), Now: now,
 		}))
@@ -862,12 +866,38 @@ func (s *Server) jsonFailure(w http.ResponseWriter, r *http.Request, err error) 
 	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 }
 
-// signInMethods is the ID token's amr. Codes and refresh families created
-// before they recorded it have none; every one of those came from a
-// password sign-in, the only method there was.
+// signInMethods is the ID token's amr, from what the sign-in recorded.
+// Codes and refresh families created before they recorded it have none;
+// every one of those came from a password sign-in, the only method there
+// was. Passkey sign-ins recorded "hwk" or "swk" before they recorded
+// passkeyAMR, and are reported as passkeyAMR.
 func signInMethods(amr []string) []string {
-	if len(amr) == 0 {
-		return []string{"pwd"}
+	switch {
+	case len(amr) == 0:
+		return amrPassword
+	case slices.Contains(amr, "hwk") || slices.Contains(amr, "swk"):
+		return passkeyAMR
 	}
 	return amr
+}
+
+// Authentication context class references (acr, OIDC Core §2): one value
+// that says how strong the sign-in was, so clients needn't interpret amr.
+const (
+	// acrPhishingResistant ("phr", OpenID EAP ACR Values 1.0) is a passkey
+	// sign-in.
+	acrPhishingResistant = "phr"
+	// acrPassword is a password sign-in.
+	acrPassword = "urn:litelogin:acr:pwd" //nolint:gosec // an acr value, not a credential
+)
+
+// acrValues are the acr values tokens carry, as discovery lists them.
+var acrValues = []string{acrPhishingResistant, acrPassword}
+
+// signInLevel is the acr of a sign-in with these methods (signInMethods).
+func signInLevel(amr []string) string {
+	if slices.Contains(amr, "pop") && slices.Contains(amr, "mfa") {
+		return acrPhishingResistant
+	}
+	return acrPassword
 }

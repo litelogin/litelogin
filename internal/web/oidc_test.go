@@ -156,6 +156,9 @@ func TestDiscoveryAndJWKS(t *testing.T) {
 	if doc["issuer"] != issuer || doc["token_endpoint"] != issuer+"/token" || doc["jwks_uri"] != issuer+"/.well-known/jwks.json" {
 		t.Errorf("discovery: %v", doc)
 	}
+	if acr, _ := doc["acr_values_supported"].([]any); len(acr) != 2 || acr[0] != "phr" || acr[1] != "urn:litelogin:acr:pwd" {
+		t.Errorf("acr_values_supported = %v", doc["acr_values_supported"])
+	}
 	if p.header.Get("Access-Control-Allow-Origin") != "*" {
 		t.Error("discovery isn't public CORS")
 	}
@@ -191,11 +194,11 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 	if id["iss"] != issuer || id["aud"] != e.client.ID || id["nonce"] != "n-1" || id["email"] != "alice@example.com" || id["auth_time"] == nil {
 		t.Errorf("ID token claims: %v", id)
 	}
-	if got := amr(id); !slices.Equal(got, []string{"pwd"}) {
-		t.Errorf("amr = %v, want [pwd]", got)
+	if got := amr(id); !slices.Equal(got, []string{"pwd"}) || id["acr"] != "urn:litelogin:acr:pwd" {
+		t.Errorf("amr = %v, acr = %v, want [pwd], urn:litelogin:acr:pwd", got, id["acr"])
 	}
 	at := claims(t, r.body["access_token"].(string))
-	if at["client_id"] != e.client.ID || at["email"] != nil {
+	if at["client_id"] != e.client.ID || at["email"] != nil || at["acr"] != id["acr"] || at["auth_time"] != id["auth_time"] {
 		t.Errorf("access token claims: %v", at)
 	}
 
@@ -261,7 +264,8 @@ func TestAuthorizationCodeFlow(t *testing.T) {
 }
 
 // The ID token's amr is how the session signed in, through the code and
-// every refresh, not a fixed value.
+// every refresh, not a fixed value. A passkey session recorded before amr
+// said "pop" and "mfa" ("swk" here) is reported as one recorded now.
 func TestAMRComesFromTheSession(t *testing.T) {
 	e := newEnv(t, false)
 	e.newUser()
@@ -294,7 +298,7 @@ func TestAMRComesFromTheSession(t *testing.T) {
 	if r.status != 200 {
 		t.Fatalf("exchange: %d %v", r.status, r.body)
 	}
-	want := []string{"swk", "user"}
+	want := []string{"pop", "user", "mfa"}
 	if got := amr(claims(t, r.body["id_token"].(string))); !slices.Equal(got, want) {
 		t.Errorf("ID token amr = %v, want %v", got, want)
 	}
