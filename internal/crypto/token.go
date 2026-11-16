@@ -1,6 +1,6 @@
 // Package crypto provides LiteLogin's credential primitives: random tokens,
-// SHA-256 hashing of stored secrets, constant-time comparison, and argon2id
-// password hashing.
+// SHA-256 hashing of stored secrets, constant-time comparison, argon2id
+// password hashing, and TOTP and recovery codes for two-factor sign-in.
 package crypto
 
 import (
