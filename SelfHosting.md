@@ -254,7 +254,7 @@ Users can turn on two-factor sign-in with an authenticator app on their account 
 dist/litelogin pool update POOL --mfa-required
 ```
 
-Users without it set it up at their next sign-in (after verifying their email); passkey sign-ins already count. Sessions and refresh tokens from password-only sign-ins stop working at their next use.
+Within 30 seconds (the Auth Lambda caches configuration that long), users without it set it up at their next sign-in (after verifying their email); passkey sign-ins already count. Sessions and refresh tokens from password-only sign-ins stop working at their next use.
 
 A user who lost both their authenticator app and their recovery codes needs an administrator: check it's really them, then run `dist/litelogin user reset-2fa USER`. That turns it off, signs them out everywhere and emails them (pass `--host` if the org's default host isn't on their pool).
 
