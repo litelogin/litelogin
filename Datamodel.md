@@ -281,8 +281,9 @@ Every read in both patterns is of configuration that rarely changes, so they're 
    - Wrong password: UpdateItem ADD `failed_login_count 1`. If the new count reaches the limit (e.g. 5), SET `locked_until = now + 15 min` and reset the count.
    - Correct password with a non-zero count: UpdateItem SET `failed_login_count = 0`.
 5. If the hash uses outdated parameters, rehash and UpdateItem `password_hash`, condition `password_hash = :old`, so a concurrent password change is never overwritten.
-6. Put `SESSION#{session_hash}` / `DETAILS` with `auth_time=now`, the user's current `auth_version`, `login_host`, the `client_id` of the sign-in request (if any, for the user's session list), GSI1 keys, and the host's session lifetimes. Set the session cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, host-only).
-7. Continue the pending `/authorize` request.
+6. If the user has `mfa=true`, don't create a session: Put a pending second step (`MFA#{pending_hash}`, see "Two-factor sign-in") and ask for the code. The session (step 7) is created once the code is accepted, if the user is still active and their `auth_version` unchanged. While `mfa_locked_until > now`, stop here.
+7. Put `SESSION#{session_hash}` / `DETAILS` with `auth_time=now`, the user's current `auth_version`, `login_host`, the `client_id` of the sign-in request (if any, for the user's session list), GSI1 keys, and the host's session lifetimes. Set the session cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, host-only).
+8. Continue the pending `/authorize` request.
 
 ### Authorize (`/authorize`)
 

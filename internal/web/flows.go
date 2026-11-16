@@ -22,6 +22,7 @@ var notices = map[string]string{
 	"logged_out":            "You're signed out.",
 	"signed_out_everywhere": "You're signed out everywhere: on every device and in every app.",
 	"email_changed":         "Your email address was changed. Sign in to continue.",
+	"mfa_expired":           "Signing in took too long, or too many codes were wrong. Sign in again.",
 }
 
 const msgBadLogin = "Incorrect email or password."
@@ -147,6 +148,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 		return
 	}
 
+	if u.MFA {
+		// The password is right: the second step decides.
+		s.startSecondStep(w, r, t, u, authz)
+		return
+	}
 	if err := s.startSession(w, r, t, u, amrPassword, 0); err != nil {
 		s.fail(w, r, t, err)
 		return

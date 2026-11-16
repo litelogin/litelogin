@@ -10,6 +10,7 @@ What LiteLogin protects, from whom, and how, with each control checked against t
 | Passwords and their hashes | Reused passwords are worth more than the account. |
 | Sessions, authorization codes, refresh tokens | Each is a way into an account. |
 | One-time email links (verification, reset, email change) | A reset link is a password. |
+| TOTP secrets and recovery codes | Either is a second factor; the secret can't be stored hashed. |
 | Tenant configuration (orgs, pools, hosts, clients) | Changing a redirect URI or a client sends tokens elsewhere. |
 | The code that runs | Changing it bypasses every other control. |
 
@@ -45,7 +46,11 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 | A stolen session adding the thief's passkey | Adding a passkey needs a sign-in within 10 minutes or the password; the challenge is tied to the session; the user is emailed whenever one is added | verified |
 | Cloned authenticators | A signature counter that goes backwards is refused (synced passkeys report 0, which can't be checked) | verified |
 | Replayed passkey responses | Each challenge is single use (a conditional delete) and lasts 5 minutes | verified |
-| Account recovery | The password reset link still opens an account that has passkeys, so email is the weakest way in. Removing a passkey signs the user out everywhere else. | accepted (F7) |
+| A stolen password | Users can turn on two-factor sign-in (an authenticator app): a password sign-in then also takes a code. The secret is encrypted with a KMS key only the Auth Lambda may use, bound to the user by the encryption context (internal/secretbox, internal/web/mfa.go) | verified |
+| Guessing the second factor | Each code works once (a conditional write on the last step used); 5 wrong codes end a sign-in, 10 in a row pause the second step for 15 minutes and email the user; each try needs the password, and `/login/2fa` is under the WAF's `/login` rate limit | verified |
+| Phishing the second factor | Authenticator app codes can be phished in real time, like passwords (an attacker's proxy relays them). Passkeys are the phishing-resistant option, and stay available | accepted |
+| A stolen session binding the thief's authenticator | Setting up two-factor sign-in needs a sign-in within 10 minutes or the password; the setup is tied to the session; turning it on ends every other session and emails the user | verified |
+| Account recovery | The password reset link still opens an account that has passkeys, so email is the weakest way in; with two-factor sign-in on, a reset changes the password but the next sign-in still takes a code. Removing a passkey signs the user out everywhere else. | accepted (F7) |
 | Reset and verification links leaking | Stored hashed; single use; reset links last 30 minutes, verification 24 hours; `Referrer-Policy: no-referrer` | verified |
 
 ### OAuth and OIDC
@@ -103,7 +108,7 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 
 **F6 — Reset tokens in WAF samples (accepted).** WAF keeps sampled requests, URI included, for 3 hours, visible to anyone with WAF read access. Reset links last 30 minutes and work once. *Recommendation:* keep WAF read access to operators; don't enable full WAF logging without redacting the query string.
 
-**F7 — Email is the weakest way in (accepted).** A user with a passkey can still reset their password by email, and every account has a password. So an attacker with the user's email account doesn't need the passkey. *Later:* passkey-only accounts, with a recovery path that doesn't rely on email alone.
+**F7 — Email is the weakest way in (accepted).** A user with a passkey can still reset their password by email, and every account has a password. So an attacker with the user's email account doesn't need the passkey. For a user with two-factor sign-in, a reset no longer gets in: it changes the password, and the next sign-in still takes the authenticator app's code or a recovery code. *Later:* passkey-only accounts, with a recovery path that doesn't rely on email alone.
 
 ## Not covered here
 

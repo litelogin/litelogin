@@ -170,6 +170,8 @@ func (s *Server) Handler() http.Handler {
 	page("GET /{$}", s.home)
 	page("GET /login", s.loginForm)
 	page("POST /login", s.login)
+	page("GET /login/2fa", s.secondStepForm)
+	page("POST /login/2fa", s.secondStep)
 	page("GET /register", s.registerForm)
 	page("POST /register", s.register)
 	page("GET /verify-email", s.verifyEmailForm)

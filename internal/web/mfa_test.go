@@ -59,11 +59,13 @@ func startSetup(t *testing.T, b *browser, fields url.Values) (page, []byte) {
 }
 
 // setupMFA turns on two-factor sign-in for the user signed in in b, and
-// returns the secret and recovery codes.
-func (e *env) setupMFA(b *browser) ([]byte, []string) {
+// returns the secret, the recovery codes and the step of the code that
+// confirmed it.
+func (e *env) setupMFA(b *browser) ([]byte, []string, int64) {
 	e.t.Helper()
 	p, secret := startSetup(e.t, b, url.Values{})
-	done := b.do(http.MethodPost, "/account/2fa/confirm", url.Values{"csrf": {csrfOf(e.t, p)}, "code": {e.totpCode(secret)}})
+	step := crypto.TOTPStep(e.now())
+	done := b.do(http.MethodPost, "/account/2fa/confirm", url.Values{"csrf": {csrfOf(e.t, p)}, "code": {crypto.TOTPCode(secret, step)}})
 	expect(e.t, done, http.StatusOK, "Save your recovery codes")
 	var codes []string
 	for _, m := range recoveryCodeRE.FindAllStringSubmatch(done.body, -1) {
@@ -72,7 +74,7 @@ func (e *env) setupMFA(b *browser) ([]byte, []string) {
 	if len(codes) != crypto.RecoveryCodeCount {
 		e.t.Fatalf("%d recovery codes shown:\n%s", len(codes), done.body)
 	}
-	return secret, codes
+	return secret, codes, step
 }
 
 func TestMFASetup(t *testing.T) {
@@ -82,7 +84,7 @@ func TestMFASetup(t *testing.T) {
 	refresh := e.refreshToken(there)
 
 	expect(t, here.get("/account"), http.StatusOK, "Set up two-factor sign-in")
-	_, codes := e.setupMFA(here)
+	_, codes, _ := e.setupMFA(here)
 	if len(slices.Compact(slices.Sorted(slices.Values(codes)))) != len(codes) {
 		t.Fatal("recovery codes repeat")
 	}
@@ -159,4 +161,162 @@ func TestMFASetupOtherSession(t *testing.T) {
 	expectRedirect(t, b.post("/login", "/login", creds("alice@example.com", password)), "/account")
 	r := b.do(http.MethodPost, "/account/2fa/confirm", url.Values{"csrf": {csrfOf(t, p)}, "code": {e.totpCode(secret)}})
 	expect(t, r, http.StatusBadRequest, "Start again")
+}
+
+// signInStep posts the password, expects the second step, and posts code.
+func (e *env) signInStep(b *browser, pw, code string) page {
+	e.t.Helper()
+	expectRedirect(e.t, b.post("/login", "/login", creds("alice@example.com", pw)), "/login/2fa")
+	return b.post("/login/2fa", "/login/2fa", url.Values{"code": {code}})
+}
+
+// mfaUser makes alice, with two-factor sign-in, and returns the secret,
+// her recovery codes and the step of the last code used.
+func (e *env) mfaUser() ([]byte, []string, int64) {
+	e.t.Helper()
+	e.newUser()
+	return e.setupMFA(e.signIn("alice@example.com", password))
+}
+
+func TestMFASignIn(t *testing.T) {
+	e := newEnv(t, false)
+	secret, _, step := e.mfaUser()
+
+	// The password alone doesn't sign in.
+	b := e.browser()
+	expectRedirect(t, b.post("/login", "/login", creds("alice@example.com", password)), "/login/2fa")
+	expectRedirect(t, b.get("/account"), "/login")
+	expect(t, b.get("/login/2fa"), http.StatusOK, "Code from your authenticator app")
+	wrong := crypto.TOTPCode(secret, step+5)
+	expect(t, b.post("/login/2fa", "/login/2fa", url.Values{"code": {wrong}}), http.StatusUnauthorized, "isn&#39;t right")
+	// The code that turned it on was used; the next one works, once.
+	used := crypto.TOTPCode(secret, step)
+	expect(t, b.post("/login/2fa", "/login/2fa", url.Values{"code": {used}}), http.StatusUnauthorized, "already used")
+	next := crypto.TOTPCode(secret, step+1)
+	expectRedirect(t, b.post("/login/2fa", "/login/2fa", url.Values{"code": {next[:3] + " " + next[3:]}}), "/account")
+	expect(t, b.get("/account"), http.StatusOK, "alice@example.com")
+	expectRedirect(t, b.get("/login/2fa"), "/login")
+
+	expect(t, e.signInStep(e.browser(), password, next), http.StatusUnauthorized, "already used")
+
+	// A wrong password never reaches the second step.
+	expect(t, e.browser().post("/login", "/login", creds("alice@example.com", "wrong password")), http.StatusUnauthorized, "Incorrect email or password")
+}
+
+func TestMFASignInDuringAuthorization(t *testing.T) {
+	e := newEnv(t, false)
+	secret, _, step := e.mfaUser()
+	b := e.browser()
+	verifier, challenge := pkce()
+	p := b.get("/authorize?" + e.authzQuery(challenge).Encode())
+	if p.status != http.StatusSeeOther || !strings.HasPrefix(p.location, "/login?") {
+		t.Fatalf("authorize: %d %q", p.status, p.location)
+	}
+	expectRedirect(t, b.post(p.location, "/login", creds("alice@example.com", password)), "/login/2fa")
+	form := b.get("/login/2fa")
+	// The page's form ends at the client: its CSP allows the redirect URI.
+	if csp := form.header.Get("Content-Security-Policy"); !strings.Contains(csp, "https://app.example.com") {
+		t.Errorf("CSP doesn't allow the client: %s", csp)
+	}
+	p = b.do(http.MethodPost, "/login/2fa", url.Values{"csrf": {csrfOf(t, form)}, "code": {crypto.TOTPCode(secret, step+1)}})
+	if p.status != http.StatusSeeOther || !strings.HasPrefix(p.location, "/authorize?") {
+		t.Fatalf("second step: %d %q", p.status, p.location)
+	}
+	p = b.get(p.location)
+	loc, _ := url.Parse(p.location)
+	r := e.exchange(loc.Query().Get("code"), verifier)
+	if r.status != http.StatusOK {
+		t.Fatalf("exchange: %d %v", r.status, r.body)
+	}
+	id := claims(t, r.body["id_token"].(string))
+	if got := amr(id); !slices.Equal(got, []string{"pwd", "otp", "mfa"}) || id["acr"] != "urn:litelogin:acr:mfa" {
+		t.Errorf("amr = %v, acr = %v", got, id["acr"])
+	}
+}
+
+func TestMFARecoveryCode(t *testing.T) {
+	e := newEnv(t, false)
+	_, codes, _ := e.mfaUser()
+	// However it's typed.
+	typed := strings.ToUpper(strings.ReplaceAll(codes[3], "-", ""))
+	b := e.browser()
+	expectRedirect(t, e.signInStep(b, password, typed), "/account")
+	expect(t, b.get("/account"), http.StatusOK, "9 unused recovery codes")
+	msgs := e.mail.Messages()
+	if last := msgs[len(msgs)-1]; !strings.Contains(last.Subject, "recovery code was used") || !strings.Contains(last.Text, "You have 9 left") {
+		t.Errorf("last email: %q\n%s", last.Subject, last.Text)
+	}
+
+	verifier, challenge := pkce()
+	r := e.exchange(b.authorize(e.authzQuery(challenge)).Query().Get("code"), verifier)
+	if got := amr(claims(t, r.body["id_token"].(string))); !slices.Equal(got, []string{"pwd", "mfa"}) {
+		t.Errorf("amr = %v", got)
+	}
+
+	// Once.
+	expect(t, e.signInStep(e.browser(), password, codes[3]), http.StatusUnauthorized, "isn&#39;t right")
+}
+
+// Wrong codes end a sign-in after MaxMFAAttempts, and pause the second
+// step after MaxFailedMFA in a row, across sign-ins.
+func TestMFALockout(t *testing.T) {
+	e := newEnv(t, false)
+	secret, _, step := e.mfaUser()
+	wrong := crypto.TOTPCode(secret, step+7)
+	fails := 0
+	for fails < web.MaxFailedMFA {
+		b := e.browser()
+		expectRedirect(t, b.post("/login", "/login", creds("alice@example.com", password)), "/login/2fa")
+		for i := 1; i <= web.MaxMFAAttempts && fails < web.MaxFailedMFA; i++ {
+			fails++
+			p := b.post("/login/2fa", "/login/2fa", url.Values{"code": {wrong}})
+			switch {
+			case fails == web.MaxFailedMFA:
+				expect(t, p, http.StatusTooManyRequests, "Wait 15 minutes")
+			case i == web.MaxMFAAttempts:
+				expectRedirect(t, p, "/login?n=mfa_expired")
+			default:
+				expect(t, p, http.StatusUnauthorized, "isn&#39;t right")
+			}
+		}
+	}
+	msgs := e.mail.Messages()
+	if last := msgs[len(msgs)-1]; !strings.Contains(last.Subject, "Someone has your") {
+		t.Errorf("last email: %q", last.Subject)
+	}
+
+	// The password alone gets no further while it's paused.
+	expect(t, e.browser().post("/login", "/login", creds("alice@example.com", password)), http.StatusTooManyRequests, "Wait 15 minutes")
+
+	// Afterwards the right code signs in.
+	e.skew.Store(int64(web.MFALockoutDuration + time.Minute))
+	expectRedirect(t, e.signInStep(e.browser(), password, e.totpCode(secret)), "/account")
+}
+
+// Resetting the password by email doesn't sign the user in, and doesn't
+// get around the second factor.
+func TestMFAPasswordReset(t *testing.T) {
+	e := newEnv(t, false)
+	secret, _, step := e.mfaUser()
+	b := e.browser()
+	expect(t, b.post("/password/forgot", "/password/forgot", url.Values{"email": {"alice@example.com"}}), http.StatusOK, "")
+	link := e.lastLink("alice@example.com", "Reset")
+	token := regexp.MustCompile(`token=([^&\s]+)`).FindStringSubmatch(link)[1]
+	const newPassword = "battery horse staple"
+	expectRedirect(t, b.post(link, "/password/reset", url.Values{"token": {token}, "password": {newPassword}}), "/login?n=reset")
+	expectRedirect(t, b.get("/account"), "/login")
+	expectRedirect(t, e.signInStep(b, newPassword, crypto.TOTPCode(secret, step+1)), "/account")
+}
+
+// A pending sign-in ends when the user is signed out everywhere (here, a
+// password change) between the two steps.
+func TestMFASignInRevoked(t *testing.T) {
+	e := newEnv(t, false)
+	secret, _, step := e.mfaUser()
+	b := e.browser()
+	expectRedirect(t, b.post("/login", "/login", creds("alice@example.com", password)), "/login/2fa")
+	other := e.browser()
+	expectRedirect(t, e.signInStep(other, password, crypto.TOTPCode(secret, step+1)), "/account")
+	expectRedirect(t, other.post("/account", "/account/password", url.Values{"current_password": {password}, "new_password": {"a whole new password"}}), "/account?n=password_changed")
+	expectRedirect(t, b.post("/login/2fa", "/login/2fa", url.Values{"code": {crypto.TOTPCode(secret, step+2)}}), "/login?n=mfa_expired")
 }

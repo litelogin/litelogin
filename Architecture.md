@@ -171,7 +171,10 @@ Users can turn on two-factor sign-in with an authenticator app (TOTP, RFC 6238).
 - **The secret** is the one credential LiteLogin must read back, so it's encrypted with its own KMS key, which only the Auth Lambda may use, bound by the encryption context to the user. The local development server uses AES-GCM with a fixed key.
 - **Setting it up** is on the account page. Like adding a passkey, it needs a sign-in within the last 10 minutes or the password. The page shows a QR code (inline SVG, drawn on the server: no script and no image request) and the key as text; one code from the app turns it on. That ends the user's other sessions, which signed in without it, and this browser gets a new session that counts as two-factor. The user gets 10 recovery codes, shown once, and an email.
 - **Recovery codes** are 120 random bits each, stored as SHA-256 hashes (a slow hash is needed only below 112 bits, NIST SP 800-63B-4), and each works once.
-- **`amr` and `acr`:** a password sign-in with an app code is `["pwd", "otp", "mfa"]` and `urn:litelogin:acr:mfa`.
+- **Signing in:** a correct password doesn't start a session. It starts a pending sign-in (`MFA#`, named by a `__Host-` cookie, 5 minutes) and goes to `/login/2fa`, which takes the app's code or a recovery code; only then does the session start, and the browser continues to the pending `/authorize` request. The pending sign-in ends if the user is disabled, signed out everywhere or has their password reset in between.
+- **Wrong codes:** 5 end a sign-in. 10 in a row, across sign-ins, pause the second step for 15 minutes, and the user is emailed: whoever is trying has their password. Every sign-in needs the password, so the account-wide count is what bounds guessing; the WAF's rate limit on `/login` covers `/login/2fa` too. A recovery code used to sign in is emailed about, with how many are left.
+- **A password reset** changes the password, never signs in, and leaves two-factor sign-in on: the next sign-in still takes a code. Email alone isn't a way past the second factor.
+- **`amr` and `acr`:** a password sign-in with an app code is `["pwd", "otp", "mfa"]`, with a recovery code `["pwd", "mfa"]`; both are `urn:litelogin:acr:mfa`.
 
 ## Protocol
 

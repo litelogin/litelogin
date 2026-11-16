@@ -38,8 +38,12 @@ const (
 const MFACookie = "__Host-litelogin_mfa"
 
 // amrTOTP is the amr of a password sign-in with an authenticator app code
-// (RFC 8176).
-var amrTOTP = []string{"pwd", "otp", "mfa"}
+// (RFC 8176), amrRecovery one with a recovery code: those aren't OTPs in
+// the RFC 4226/6238 sense, but they're still a second factor.
+var (
+	amrTOTP     = []string{"pwd", "otp", "mfa"}
+	amrRecovery = []string{"pwd", "mfa"}
+)
 
 // totpContext is the encryption context of a user's TOTP secret: a secret
 // copied to another user's item doesn't decrypt.
@@ -281,7 +285,205 @@ func (s *Server) confirmMFASetup(w http.ResponseWriter, r *http.Request, t *tena
 	})
 }
 
+// ---- Sign in: the second step ----
+
+// startSecondStep is a password sign-in by a user with two-factor sign-in:
+// instead of a session, a pending sign-in, and the page that asks for the
+// code. While too many wrong codes have paused the second step, the
+// password alone gets no further.
+func (s *Server) startSecondStep(w http.ResponseWriter, r *http.Request, t *tenant, u *store.User, authz string) {
+	if u.MFALockedUntil > s.now().Unix() {
+		metrics.Count(s.Metrics, metrics.MFAFailed, 1, metrics.Reason("locked"))
+		s.render(w, r, t, http.StatusTooManyRequests, "login", pageData{Title: "Sign in", Email: u.Email, Error: msgMFALocked, Authz: authz, Script: pageScript(t)})
+		return
+	}
+	p := &store.PendingMFA{Purpose: store.MFAVerify, Host: t.Host, PoolID: t.Pool.ID, UserID: u.ID, AuthVersion: u.AuthVersion, Authz: authz}
+	if err := s.newPendingMFA(w, r, p); err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	http.Redirect(w, r, "/login/2fa", http.StatusSeeOther)
+}
+
+func (s *Server) renderSecondStep(w http.ResponseWriter, r *http.Request, t *tenant, status int, p *store.PendingMFA, msg string) {
+	// The page's form ends at the client's redirect URI: its CSP must
+	// allow it.
+	s.useAuthzClient(r, t, p.Authz)
+	s.render(w, r, t, status, "mfa_verify", pageData{Title: "Two-factor sign-in", Error: msg})
+}
+
+func (s *Server) secondStepForm(w http.ResponseWriter, r *http.Request, t *tenant) {
+	p, err := s.pendingMFA(r, t, store.MFAVerify)
+	if errors.Is(err, store.ErrNotFound) {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	s.renderSecondStep(w, r, t, http.StatusOK, p, "")
+}
+
+// errWrongCode is a code that isn't the user's: wrong, used, or neither an
+// app code nor a recovery code. reason is the metric's.
+type errWrongCode struct{ reason string }
+
+func (e errWrongCode) Error() string { return "web: wrong code (" + e.reason + ")" }
+
+// secondStep checks the code of a pending sign-in: an authenticator app
+// code or a recovery code, each accepted once. Wrong codes count against
+// the sign-in (MaxMFAAttempts) and the user (MaxFailedMFA, across
+// sign-ins: each needs the password, so this bounds guessing by whoever
+// has it).
+func (s *Server) secondStep(w http.ResponseWriter, r *http.Request, t *tenant) {
+	ctx := r.Context()
+	p, err := s.pendingMFA(r, t, store.MFAVerify)
+	if errors.Is(err, store.ErrNotFound) {
+		clearMFACookie(w)
+		http.Redirect(w, r, "/login?n=mfa_expired", http.StatusSeeOther)
+		return
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	u, err := s.Store.GetUser(ctx, p.UserID)
+	if err == nil && (u.Status != store.UserActive || u.AuthVersion != p.AuthVersion || !u.MFA || u.PoolID != t.Pool.ID) {
+		// Disabled, signed out everywhere, its password reset or two-factor
+		// sign-in turned off since the password step: start again.
+		err = store.ErrNotFound
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		_ = s.Store.DeletePendingMFA(ctx, p.Hash)
+		clearMFACookie(w)
+		http.Redirect(w, r, "/login?n=mfa_expired", http.StatusSeeOther)
+		return
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	if u.MFALockedUntil > s.now().Unix() {
+		metrics.Count(s.Metrics, metrics.MFAFailed, 1, metrics.Reason("locked"))
+		s.renderSecondStep(w, r, t, http.StatusTooManyRequests, p, msgMFALocked)
+		return
+	}
+
+	amr, recovery, err := s.useSecondFactor(ctx, u, r.PostFormValue("code"))
+	var wrong errWrongCode
+	if errors.As(err, &wrong) {
+		s.wrongSecondFactor(w, r, t, u, p, wrong.reason)
+		return
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	if err := s.Store.ConsumePendingMFA(ctx, p.Hash); errors.Is(err, store.ErrNotFound) {
+		clearMFACookie(w)
+		http.Redirect(w, r, "/login?n=mfa_expired", http.StatusSeeOther)
+		return
+	} else if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	clearMFACookie(w)
+	if u.MFAFailedCount != 0 {
+		if err := s.Store.ResetFailedMFA(ctx, u.ID); err != nil {
+			s.log().WarnContext(ctx, "reset failed codes", "error", err)
+		}
+	}
+	if err := s.startSession(w, r, t, u, amr, 0); err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	if recovery {
+		left, err := s.Store.CountRecoveryCodes(ctx, u.ID)
+		if err != nil {
+			s.log().WarnContext(ctx, "count recovery codes", "error", err)
+		}
+		s.notify(ctx, t, u, email.RecoveryCodeUsed, email.Data{Count: left})
+	}
+	metrics.Count(s.Metrics, metrics.LoginSucceeded, 1)
+	http.Redirect(w, r, continueAuthz(p.Authz), http.StatusSeeOther) //nolint:gosec // always a path on this host: /authorize or /account
+}
+
+// useSecondFactor checks code as the user's authenticator app code or one
+// of their recovery codes, and uses it up. It returns the sign-in's amr and
+// whether it was a recovery code, or errWrongCode.
+func (s *Server) useSecondFactor(ctx context.Context, u *store.User, code string) ([]string, bool, error) {
+	if crypto.NormalizeTOTPCode(code) != "" {
+		totp, err := s.Store.GetTOTP(ctx, u.ID)
+		if err != nil {
+			return nil, false, err
+		}
+		secret, err := s.Secrets.Open(ctx, totp.Secret, totpContext(u))
+		if err != nil {
+			return nil, false, err
+		}
+		step, ok := crypto.VerifyTOTP(secret, code, s.now(), totp.LastStep)
+		if !ok {
+			return nil, false, errWrongCode{"wrong_code"}
+		}
+		switch err := s.Store.UseTOTPStep(ctx, u.ID, step); {
+		case errors.Is(err, store.ErrConditionFailed):
+			// The same code, used by a concurrent request.
+			return nil, false, errWrongCode{"reused_code"}
+		case err != nil:
+			return nil, false, err
+		}
+		return amrTOTP, false, nil
+	}
+	hash := crypto.HashRecoveryCode(code)
+	if hash == "" {
+		return nil, false, errWrongCode{"wrong_code"}
+	}
+	switch err := s.Store.UseRecoveryCode(ctx, u.ID, hash); {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, false, errWrongCode{"wrong_code"}
+	case err != nil:
+		return nil, false, err
+	}
+	return amrRecovery, true, nil
+}
+
+// wrongSecondFactor counts a wrong code. The sign-in ends after
+// MaxMFAAttempts; the second step pauses after MaxFailedMFA in a row, and
+// the user is told: whoever is trying has their password.
+func (s *Server) wrongSecondFactor(w http.ResponseWriter, r *http.Request, t *tenant, u *store.User, p *store.PendingMFA, reason string) {
+	ctx := r.Context()
+	metrics.Count(s.Metrics, metrics.MFAFailed, 1, metrics.Reason(reason))
+	locked, err := s.Store.RecordFailedMFA(ctx, u.ID, MaxFailedMFA, MFALockoutDuration)
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	if locked {
+		metrics.Count(s.Metrics, metrics.MFALockout, 1)
+		s.notify(ctx, t, u, email.MFALocked, email.Data{})
+		_ = s.Store.DeletePendingMFA(ctx, p.Hash)
+		clearMFACookie(w)
+		s.useAuthzClient(r, t, p.Authz)
+		s.render(w, r, t, http.StatusTooManyRequests, "login", pageData{Title: "Sign in", Email: u.Email, Error: msgMFALocked, Authz: p.Authz, Script: pageScript(t)})
+		return
+	}
+	switch err := s.Store.RecordPendingMFAAttempt(ctx, p.Hash, MaxMFAAttempts); {
+	case errors.Is(err, store.ErrNotFound):
+		_ = s.Store.DeletePendingMFA(ctx, p.Hash)
+		clearMFACookie(w)
+		http.Redirect(w, r, "/login?n=mfa_expired", http.StatusSeeOther)
+		return
+	case err != nil:
+		s.fail(w, r, t, err)
+		return
+	}
+	s.renderSecondStep(w, r, t, http.StatusUnauthorized, p, msgWrongSignInCode)
+}
+
 const (
+	msgWrongSignInCode = "That code isn't right, or it was already used. Enter the code your app shows now, or an unused recovery code."
+	msgMFALocked       = "Too many wrong codes were entered for this account. Wait 15 minutes, then try again."
 	msgWrongCode       = "That code isn't right. Check that your device's clock is correct, and enter the code your app shows now."
 	msgMFASetupExpired = "Setting up two-factor sign-in took too long, or too many codes were wrong. Start again."
 )
