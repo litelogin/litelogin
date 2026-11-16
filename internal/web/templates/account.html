@@ -79,11 +79,11 @@
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <button type="submit" class="secondary">Get new recovery codes</button>
 </form>
-<form method="post" action="/account/2fa/disable">
+{{if not .MFARequired}}<form method="post" action="/account/2fa/disable">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <p class="hint">Turning it off signs you out everywhere else.</p>
 <button type="submit" class="secondary">Turn off two-factor sign-in</button>
-</form>{{end}}
+</form>{{end}}{{end}}
 {{else}}<p class="hint">Signing in with your password will also take a code from an authenticator app on your phone, such as Google Authenticator, Microsoft Authenticator or 1Password. A stolen password is then not enough.</p>
 <form method="post" action="/account/2fa/setup">
 <input type="hidden" name="csrf" value="{{.CSRF}}">

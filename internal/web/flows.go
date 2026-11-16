@@ -134,7 +134,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 			}
 		}
 	}
-	if t.Pool.RequireEmailVerified && !u.EmailVerified {
+	// A pool that requires a second factor requires a verified email too:
+	// otherwise whoever registered first with an address could bind their
+	// authenticator to it.
+	if (t.Pool.RequireEmailVerified || t.Pool.MFARequired) && !u.EmailVerified {
 		// The password is correct, so telling this person that the
 		// account exists reveals nothing. Send a fresh link.
 		if err := s.sendVerification(ctx, t, u); err != nil {
@@ -151,6 +154,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 	if u.MFA {
 		// The password is right: the second step decides.
 		s.startSecondStep(w, r, t, u, authz)
+		return
+	}
+	if t.Pool.MFARequired {
+		s.startEnrollment(w, r, t, u, authz)
 		return
 	}
 	if err := s.startSession(w, r, t, u, amrPassword, 0); err != nil {

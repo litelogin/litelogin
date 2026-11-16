@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -275,18 +276,19 @@ func listPages[T any](a *App, cmd *cobra.Command, path string, q url.Values, lim
 
 func (a *App) poolCommand() *cobra.Command {
 	var org, name, desc, key string
-	var verified bool
+	var verified, mfa bool
 	create := &cobra.Command{
 		Use: "create", Short: "Create a user pool in an org", Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return createAndShow[admin.Pool](a, cmd, "/v1/orgs/"+esc(org)+"/pools", key,
-				map[string]any{"name": name, "description": desc, "require_email_verified": verified})
+				map[string]any{"name": name, "description": desc, "require_email_verified": verified, "mfa_required": mfa})
 		},
 	}
 	create.Flags().StringVar(&org, "org", "", "org ID (required)")
 	create.Flags().StringVar(&name, "name", "", "name (required)")
 	create.Flags().StringVar(&desc, "description", "", "description")
 	create.Flags().BoolVar(&verified, "require-email-verified", false, "users must verify their email before they can log in")
+	create.Flags().BoolVar(&mfa, "mfa-required", false, mfaRequiredHelp)
 	_ = create.MarkFlagRequired("org")
 	_ = create.MarkFlagRequired("name")
 	idempotencyFlag(create, &key)
@@ -298,7 +300,7 @@ func (a *App) poolCommand() *cobra.Command {
 			if _, err := a.get(cmd, "/v1/orgs/"+esc(org)+"/pools", &out); err != nil {
 				return err
 			}
-			return printList(a.Stdout, a.output, out.Items, "", "id", "name", "status", "require_email_verified", "version")
+			return printList(a.Stdout, a.output, out.Items, "", "id", "name", "status", "require_email_verified", "mfa_required", "version")
 		},
 	}
 	list.Flags().StringVar(&org, "org", "", "org ID (required)")
@@ -308,12 +310,13 @@ func (a *App) poolCommand() *cobra.Command {
 		Use: "update POOL", Short: "Change a user pool's settings", Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return update[admin.Pool](a, cmd, "/v1/pools/"+esc(args[0]),
-				changed(cmd, map[string]any{"name": &name, "description": &desc, "require-email-verified": &verified}))
+				changed(cmd, map[string]any{"name": &name, "description": &desc, "require-email-verified": &verified, "mfa-required": &mfa}))
 		},
 	}
 	upd.Flags().StringVar(&name, "name", "", "new name")
 	upd.Flags().StringVar(&desc, "description", "", "new description")
 	upd.Flags().BoolVar(&verified, "require-email-verified", false, "users must verify their email before they can log in")
+	upd.Flags().BoolVar(&mfa, "mfa-required", false, mfaRequiredHelp)
 
 	return group("pool", "Manage user pools",
 		create, list,
@@ -322,6 +325,8 @@ func (a *App) poolCommand() *cobra.Command {
 		deleteCommand(a, "delete POOL", "Delete a user pool and all its users (in the background)", "/v1/pools/", "pool"),
 	)
 }
+
+const mfaRequiredHelp = "users must sign in with a passkey, or a password and an authenticator app (those without either set one up at their next sign-in)"
 
 // ---- client ----
 
@@ -731,13 +736,41 @@ func (a *App) userCommand() *cobra.Command {
 		},
 	)
 
+	var resetHost string
+	resetMFA := &cobra.Command{
+		Use: "reset-2fa USER", Short: "Turn off a user's two-factor sign-in and log them out everywhere", Args: cobra.ExactArgs(1),
+		Long: "Turn off a user's two-factor sign-in, for a user who lost their authenticator app and recovery codes.\n" +
+			"They sign in with their password alone again (and set up a second factor at once if their pool requires one).\n" +
+			"Check who is asking first: this removes the protection a second factor gives.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := "/v1/users/" + esc(args[0]) + "/mfa"
+			if resetHost != "" {
+				path += "?host=" + url.QueryEscape(resetHost)
+			}
+			resp, err := a.do(cmd, Request{Method: http.MethodDelete, Path: path, IdempotencyKey: a.NewID()})
+			if err != nil {
+				return err
+			}
+			var out admin.MFAResetResult
+			if err := json.Unmarshal(resp.Body, &out); err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(a.Stdout, "turned off two-factor sign-in for user %s\n", args[0])
+			if !out.Notified {
+				_, _ = fmt.Fprintln(a.Stderr, "warning: the user wasn't emailed: pass --host with one of the pool's login hosts")
+			}
+			return nil
+		},
+	}
+	resetMFA.Flags().StringVar(&resetHost, "host", "", "login host the email links to (default: the org's default host)")
+
 	return group("user", "Manage users",
 		create, list,
 		getCommand[admin.User](a, "get USER", "Show a user", "/v1/users/"),
 		upd,
 		actionCommand[admin.User](a, "disable USER", "Disable a user and log them out everywhere", "/v1/users/", "/disable"),
 		actionCommand[admin.User](a, "enable USER", "Enable a disabled user", "/v1/users/", "/enable"),
-		sessions, revoke, passkeys,
+		sessions, revoke, passkeys, resetMFA,
 		deleteCommand(a, "delete USER", "Delete a user", "/v1/users/", "user"),
 	)
 }

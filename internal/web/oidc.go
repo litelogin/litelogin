@@ -700,6 +700,10 @@ func (s *Server) refresh(r *http.Request, t *tenant) (*tokenResponse, error) {
 	if u.Status != store.UserActive || u.AuthVersion != family.AuthVersion {
 		return nil, errInvalidGrant
 	}
+	if !poolSatisfied(t, family.AMR) {
+		// Started before the pool required a second factor.
+		return nil, errInvalidGrant
+	}
 	next := crypto.NewToken()
 	if _, err := s.Store.RotateRefreshToken(ctx, old, family, crypto.HashToken(next), seconds(t.Client.RefreshTokenTTL)); err != nil {
 		switch {

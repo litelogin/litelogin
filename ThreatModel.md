@@ -47,6 +47,8 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 | Cloned authenticators | A signature counter that goes backwards is refused (synced passkeys report 0, which can't be checked) | verified |
 | Replayed passkey responses | Each challenge is single use (a conditional delete) and lasts 5 minutes | verified |
 | A stolen password | Users can turn on two-factor sign-in (an authenticator app): a password sign-in then also takes a code. The secret is encrypted with a KMS key only the Auth Lambda may use, bound to the user by the encryption context (internal/secretbox, internal/web/mfa.go) | verified |
+| A pool's required second factor, skipped by an old session | `mfa_required` is checked at every use of a session or refresh token, not just at sign-in: password-only sign-ins stop counting (internal/web/mfa.go, `poolSatisfied`) | verified |
+| An administrator turning off a user's second factor | Emails the user, revokes everything, audit-logged; not separable from other Admin API rights | accepted (F8) |
 | Guessing the second factor | Each code works once (a conditional write on the last step used); 5 wrong codes end a sign-in, 10 in a row pause the second step for 15 minutes and email the user; each try needs the password, and `/login/2fa` is under the WAF's `/login` rate limit | verified |
 | Phishing the second factor | Authenticator app codes can be phished in real time, like passwords (an attacker's proxy relays them). Passkeys are the phishing-resistant option, and stay available | accepted |
 | A stolen session, or a known password, turning two-factor sign-in off | Turning it off, new recovery codes and every other credential change take a second factor within 10 minutes; the password alone isn't enough (internal/web/mfa.go, `mfaFresh`); every change is emailed | verified |
@@ -110,6 +112,8 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 **F6 — Reset tokens in WAF samples (accepted).** WAF keeps sampled requests, URI included, for 3 hours, visible to anyone with WAF read access. Reset links last 30 minutes and work once. *Recommendation:* keep WAF read access to operators; don't enable full WAF logging without redacting the query string.
 
 **F7 — Email is the weakest way in (accepted).** A user with a passkey can still reset their password by email, and every account has a password. So an attacker with the user's email account doesn't need the passkey. For a user with two-factor sign-in, a reset no longer gets in: it changes the password, and the next sign-in still takes the authenticator app's code or a recovery code. *Later:* passkey-only accounts, with a recovery path that doesn't rely on email alone.
+
+**F8 — Admin reset of two-factor sign-in (accepted).** An administrator can turn off a user's two-factor sign-in (`DELETE /v1/users/{user}/mfa`), the one recovery path for a user who lost their app and recovery codes. The Admin API is a single IAM-authenticated function URL, so this can't be limited to a narrower role than the rest of the API (F3). Anyone who can call it, and has the user's password, gets past the second factor. Mitigations: the user is emailed, every session and refresh token ends, and the call is in the audit log. SelfHosting.md tells operators to check who is asking first. *Later:* a separate reset function with its own IAM policy, if operators need to split the role.
 
 ## Not covered here
 

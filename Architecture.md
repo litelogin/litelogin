@@ -177,6 +177,9 @@ Users can turn on two-factor sign-in with an authenticator app (TOTP, RFC 6238).
 - **Turning it off** ends every other session and emails the user; so does getting new recovery codes, which replace the old ones at once.
 - **A password reset** changes the password, never signs in, and leaves two-factor sign-in on: the next sign-in still takes a code. Email alone isn't a way past the second factor.
 - **`amr` and `acr`:** a password sign-in with an app code is `["pwd", "otp", "mfa"]`, with a recovery code `["pwd", "mfa"]`; both are `urn:litelogin:acr:mfa`.
+- **Requiring it for a pool** (`mfa_required`): every sign-in must take two factors, a passkey or a password and a code. A user without two-factor sign-in sets it up at their next password sign-in, before any session starts, and then continues to the client; they must have verified their email first, so whoever registered an address first can't bind their authenticator to it. Users can't turn it off in such a pool.
+- **Turning the requirement on** is checked lazily: a session or refresh token from a password-only sign-in stops counting at its next use (the session is ignored, so `/authorize` asks for a sign-in and `prompt=none` returns `login_required`; the refresh token returns `invalid_grant`). Nothing has to be revoked in bulk.
+- **An administrator reset** (`DELETE /v1/users/{user}/mfa`, `litelogin user reset-2fa`) is for a user who lost both their app and recovery codes. It turns two-factor sign-in off, ends every session and refresh token, and emails the user, through the org's default host or `?host=`. Anyone who can call the Admin API can do it, like everything else there (see ThreatModel.md); it's in the audit log.
 
 ## Protocol
 
@@ -272,6 +275,7 @@ The admin API is for deployment operators.
 | `/v1/users/{user}` | Get, update, disable, enable, delete |
 | `/v1/users/{user}/sessions` | List, revoke all (increments `auth_version`) |
 | `/v1/users/{user}/passkeys` | List; remove one (`DELETE /v1/users/{user}/passkeys/{passkey}`, which also revokes the user's sessions) |
+| `/v1/users/{user}/mfa` | Reset (`DELETE`): turns two-factor sign-in off, revokes the user's sessions, and emails them |
 | `/v1/keys` | List signing keys and their status |
 
 ### Conventions

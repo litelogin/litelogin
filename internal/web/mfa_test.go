@@ -1,6 +1,7 @@
 package web_test
 
 import (
+	"context"
 	"encoding/base32"
 	"html"
 	"net/http"
@@ -405,4 +406,104 @@ func TestMFAReplaceRecoveryCodes(t *testing.T) {
 	}
 	expect(t, e.signInStep(e.browser(), password, old[0]), http.StatusUnauthorized, "isn&#39;t right")
 	expectRedirect(t, e.signInStep(e.browser(), password, codes[0]), "/account")
+}
+
+// requireMFA turns on the pool's mfa_required.
+func (e *env) requireMFA() {
+	e.t.Helper()
+	ctx := context.Background()
+	p, err := e.st.GetPool(ctx, e.pool.ID)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	p.MFARequired = true
+	if err := e.st.UpdatePool(ctx, p); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// verifyEmail follows the last verification link sent to addr.
+func (e *env) verifyEmail(addr string) {
+	e.t.Helper()
+	b := e.browser()
+	link := e.lastLink(addr, "Verify")
+	token := regexp.MustCompile(`name="token" value="([^"]+)"`).FindStringSubmatch(b.get(link).body)[1]
+	expectRedirect(e.t, b.post(link, "/verify-email", url.Values{"token": {token}}), "/login?n=verified")
+}
+
+func keyOf(t *testing.T, p page) []byte {
+	t.Helper()
+	m := totpKeyRE.FindStringSubmatch(p.body)
+	if m == nil {
+		t.Fatalf("no key on the page:\n%s", p.body)
+	}
+	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ReplaceAll(m[1], " ", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return secret
+}
+
+// In a pool that requires two-factor sign-in, a user without it sets it up
+// at sign-in, after verifying their email, and then continues to the
+// client.
+func TestMFARequiredEnrollment(t *testing.T) {
+	e := newEnv(t, false)
+	e.requireMFA()
+	e.newUser()
+	b := e.browser()
+	expect(t, b.post("/login", "/login", creds("alice@example.com", password)), http.StatusOK, "verify your email")
+	e.verifyEmail("alice@example.com")
+
+	verifier, challenge := pkce()
+	p := b.get("/authorize?" + e.authzQuery(challenge).Encode())
+	expectRedirect(t, b.post(p.location, "/login", creds("alice@example.com", password)), "/login/2fa/setup")
+	expectRedirect(t, b.get("/account"), "/login")
+	form := b.get("/login/2fa/setup")
+	expect(t, form, http.StatusOK, "This account needs two-factor sign-in")
+	if csp := form.header.Get("Content-Security-Policy"); !strings.Contains(csp, "https://app.example.com") {
+		t.Errorf("CSP doesn't allow the client: %s", csp)
+	}
+	secret := keyOf(t, form)
+	expect(t, b.do(http.MethodPost, "/login/2fa/setup", url.Values{"csrf": {csrfOf(t, form)}, "code": {"000000"}}), http.StatusUnauthorized, "")
+	done := b.do(http.MethodPost, "/login/2fa/setup", url.Values{"csrf": {csrfOf(t, form)}, "code": {e.totpCode(secret)}})
+	expect(t, done, http.StatusOK, "Save your recovery codes")
+	cont := regexp.MustCompile(`<a href="(/authorize\?[^"]+)">`).FindStringSubmatch(done.body)
+	if cont == nil {
+		t.Fatalf("no link to continue:\n%s", done.body)
+	}
+	p = b.get(strings.ReplaceAll(cont[1], "&amp;", "&"))
+	loc, _ := url.Parse(p.location)
+	r := e.exchange(loc.Query().Get("code"), verifier)
+	if got := amr(claims(t, r.body["id_token"].(string))); !slices.Equal(got, []string{"pwd", "otp", "mfa"}) {
+		t.Errorf("amr = %v", got)
+	}
+
+	// From now on, it's the second step; it can't be turned off.
+	expectRedirect(t, e.signInStep(b, password, crypto.TOTPCode(secret, crypto.TOTPStep(e.now())+1)), "/account")
+	if strings.Contains(b.get("/account").body, `action="/account/2fa/disable"`) {
+		t.Error("offered to turn off required two-factor sign-in")
+	}
+	expect(t, b.post("/account", "/account/2fa/disable", url.Values{}), http.StatusForbidden, "required")
+}
+
+// Turning mfa_required on ends sessions and refresh tokens that signed in
+// with a password alone; passkey sign-ins already count.
+func TestMFARequiredEndsOldSignIns(t *testing.T) {
+	e := newEnv(t, false)
+	e.newUser()
+	e.verifyEmail("alice@example.com")
+	b := e.signIn("alice@example.com", password)
+	refresh := e.refreshToken(b)
+	e.requireMFA()
+
+	expectRedirect(t, b.get("/account"), "/login")
+	expectTokenError(t, e.refresh(refresh), http.StatusBadRequest, "invalid_grant")
+	_, challenge := pkce()
+	q := e.authzQuery(challenge)
+	q.Set("prompt", "none")
+	p := b.get("/authorize?" + q.Encode())
+	if !strings.Contains(p.location, "error=login_required") {
+		t.Errorf("prompt=none: %d %q", p.status, p.location)
+	}
 }

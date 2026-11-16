@@ -19,6 +19,7 @@ import (
 	kmstypes "github.com/aws/aws-sdk-go-v2/service/kms/types"
 
 	"github.com/litelogin/litelogin/internal/crypto"
+	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -585,4 +586,67 @@ func TestKMSCursors(t *testing.T) {
 	if last, _ := c.Sign(ctx, "scope", ""); last != "" {
 		t.Fatal("last page got a cursor")
 	}
+}
+
+// mfaStore adds users with two-factor sign-in to fakeStore.
+type mfaStore struct {
+	*fakeStore
+	users map[string]store.User
+}
+
+func (f *mfaStore) GetUser(_ context.Context, id string) (*store.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[id]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return &u, nil
+}
+
+func (f *mfaStore) DisableMFA(_ context.Context, id string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.users[id]
+	if !ok {
+		return 0, store.ErrNotFound
+	}
+	u.MFA, u.AuthVersion = false, u.AuthVersion+1
+	f.users[id] = u
+	return u.AuthVersion, nil
+}
+
+// An administrator can turn off a user's two-factor sign-in; the user is
+// emailed through the org's default host, or the host asked for.
+func TestResetMFA(t *testing.T) {
+	r := newRig(t)
+	wantCode(t, r.call("POST", "/v1/orgs", `{"name":"Acme"}`), 201, "")
+	var poolID string
+	for id := range r.store.pools {
+		poolID = id
+	}
+	ms := &mfaStore{fakeStore: r.store, users: map[string]store.User{
+		"u1": {ID: "u1", PoolID: poolID, Email: "alice@example.com", MFA: true, AuthVersion: 3, Status: store.UserActive},
+		"u2": {ID: "u2", PoolID: poolID, Email: "bob@example.com", AuthVersion: 1, Status: store.UserActive},
+	}}
+	mail := &email.Recorder{}
+	r.srv.Store, r.srv.Email = ms, mail
+	r.h = r.srv.Handler()
+
+	wantCode(t, r.call("DELETE", "/v1/users/u1/mfa?host=nope.litelogin.test", ""), 400, "invalid_request")
+	if !ms.users["u1"].MFA {
+		t.Fatal("reset with a bad host went ahead")
+	}
+	res := r.call("DELETE", "/v1/users/u1/mfa", "")
+	wantCode(t, res, 200, "")
+	if res.body["auth_version"] != float64(4) || res.body["notified"] != true || ms.users["u1"].MFA {
+		t.Fatalf("reset: %s, user %+v", res.raw, ms.users["u1"])
+	}
+	msgs := mail.Messages()
+	if len(msgs) != 1 || msgs[0].To != "alice@example.com" || !strings.Contains(msgs[0].Subject, "reset") ||
+		!strings.Contains(msgs[0].Text, "https://acme.litelogin.test/account") {
+		t.Fatalf("email: %+v", msgs)
+	}
+	wantCode(t, r.call("DELETE", "/v1/users/u2/mfa", ""), 409, "mfa_not_enabled")
+	wantCode(t, r.call("DELETE", "/v1/users/nobody/mfa", ""), 404, "not_found")
 }

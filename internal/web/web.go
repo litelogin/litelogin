@@ -172,6 +172,8 @@ func (s *Server) Handler() http.Handler {
 	page("POST /login", s.login)
 	page("GET /login/2fa", s.secondStepForm)
 	page("POST /login/2fa", s.secondStep)
+	page("GET /login/2fa/setup", s.enrollmentForm)
+	page("POST /login/2fa/setup", s.enroll)
 	page("GET /register", s.registerForm)
 	page("POST /register", s.register)
 	page("GET /verify-email", s.verifyEmailForm)
@@ -401,6 +403,9 @@ type pageData struct {
 	MFAPassword       bool
 	RecoveryCodesLeft int
 	StepUp            bool
+	// MFARequired: the pool requires two-factor sign-in; it can't be
+	// turned off.
+	MFARequired bool
 	// QR and TOTPKey show a new authenticator app secret, as a QR code
 	// and as text; Action is where its form posts the confirming code.
 	QR      template.HTML
@@ -605,6 +610,11 @@ func (s *Server) currentSession(r *http.Request, t *tenant) (*store.Session, *st
 		return nil, nil, err
 	}
 	if u.Status != store.UserActive || u.AuthVersion != sess.AuthVersion {
+		return nil, nil, nil
+	}
+	if !poolSatisfied(t, sess.AMR) {
+		// The pool has required a second factor since this sign-in: it
+		// no longer counts (sign in again).
 		return nil, nil, nil
 	}
 	if _, err := s.Store.TouchSession(ctx, sess, time.Duration(t.Login.SessionIdleTTL)*time.Second); err != nil {

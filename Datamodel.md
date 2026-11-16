@@ -55,6 +55,7 @@ erDiagram
         string description
         string status
         boolean require_email_verified
+        boolean mfa_required
     }
 
     USER {
@@ -149,7 +150,7 @@ erDiagram
 | ORG#{org} | CLIENT#{client} |  |
 | ORG#{org} | POOL#{pool} |  |
 | ORG#{org} | LOGIN_HOST#{login_host} |  |
-| POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, created_at, updated_at, version, (while deleting) GSI2PK=WORK, GSI2SK=pool_deletion#{pool}, work_attempts, work_updated_at |
+| POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, mfa_required (omitted when false), created_at, updated_at, version, (while deleting) GSI2PK=WORK, GSI2SK=pool_deletion#{pool}, work_attempts, work_updated_at |
 | USER#{user} | DETAILS | pool_id, email=example@example.com, password_hash="$argon2id$v=19$m=19456,t=2,p=1$...", email_verified=true, status=active\|disabled, auth_version=1, failed_login_count, locked_until, password_updated_at, mfa=true (only with two-factor sign-in), mfa_failed_count, mfa_locked_until, created_at, updated_at, version, GSI1PK=POOL#{pool}, GSI1SK=EMAIL#{email} |
 | POOL#{pool}#EMAIL#{email} | EMAIL | user_id |
 | USER#{user} | TOTP | secret (encrypted with the MFA KMS key), last_step, created_at |
@@ -241,7 +242,7 @@ Used by every endpoint on a login host.
 
 1. GetItem `LOGIN_HOST#{host}` / `DETAILS` → `org_id`, `pool_id`, `status` and the host settings. Reject unless `status=verified`.
 2. GetItem `ORG#{org}` / `DETAILS` → `status`. Reject unless `status=active`.
-3. GetItem `POOL#{pool}` / `DETAILS` → `status`, `require_email_verified`. Reject unless `status=active`.
+3. GetItem `POOL#{pool}` / `DETAILS` → `status`, `require_email_verified`, `mfa_required`. Reject unless `status=active`.
 
 ### Resolve client on a host
 
@@ -277,11 +278,11 @@ Every read in both patterns is of configuration that rarely changes, so they're 
 1. Resolve the login host → `pool_id`.
 2. GetItem `POOL#{pool}#EMAIL#{email}` / `EMAIL` (strongly consistent) → `user_id`. If not found, verify the password against a dummy hash anyway (so response time doesn't reveal which emails exist), then fail.
 3. GetItem `USER#{user}` / `DETAILS` (strongly consistent) → `password_hash`, `status`, `email_verified`, `locked_until`, `auth_version`.
-4. Reject if `locked_until > now`. Verify the password. Reject unless `status=active`, and unless `email_verified` is true when the pool's `require_email_verified` is true. Use the same error message for every failure.
+4. Reject if `locked_until > now`. Verify the password. Reject unless `status=active`, and unless `email_verified` is true when the pool's `require_email_verified` or `mfa_required` is true. Use the same error message for every failure.
    - Wrong password: UpdateItem ADD `failed_login_count 1`. If the new count reaches the limit (e.g. 5), SET `locked_until = now + 15 min` and reset the count.
    - Correct password with a non-zero count: UpdateItem SET `failed_login_count = 0`.
 5. If the hash uses outdated parameters, rehash and UpdateItem `password_hash`, condition `password_hash = :old`, so a concurrent password change is never overwritten.
-6. If the user has `mfa=true`, don't create a session: Put a pending second step (`MFA#{pending_hash}`, see "Two-factor sign-in") and ask for the code. The session (step 7) is created once the code is accepted, if the user is still active and their `auth_version` unchanged. While `mfa_locked_until > now`, stop here.
+6. If the user has `mfa=true`, don't create a session: Put a pending second step (`MFA#{pending_hash}`, see "Two-factor sign-in") and ask for the code. The session (step 7) is created once the code is accepted, if the user is still active and their `auth_version` unchanged. While `mfa_locked_until > now`, stop here. If the user hasn't, but the pool has `mfa_required`, Put a pending enrollment (`purpose=mfa_enroll`, with a new encrypted secret) instead: the session is created once a code from the app is accepted and `EnableMFA` succeeds.
 7. Put `SESSION#{session_hash}` / `DETAILS` with `auth_time=now`, the user's current `auth_version`, `login_host`, the `client_id` of the sign-in request (if any, for the user's session list), GSI1 keys, and the host's session lifetimes. Set the session cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, host-only).
 8. Continue the pending `/authorize` request.
 

@@ -28,15 +28,20 @@ type User struct {
 	PasswordSet       *bool  `json:"password_set,omitempty"`
 	PasswordUpdatedAt string `json:"password_updated_at,omitempty"`
 	LockedUntil       string `json:"locked_until,omitempty"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at,omitempty"`
-	Version           int64  `json:"version,omitempty"`
+	// MFAEnabled: the user signs in with a password and an authenticator
+	// app.
+	MFAEnabled     bool   `json:"mfa_enabled"`
+	MFALockedUntil string `json:"mfa_locked_until,omitempty"`
+	CreatedAt      string `json:"created_at"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
+	Version        int64  `json:"version,omitempty"`
 }
 
 func userJSON(u *store.User) User {
 	set := u.PasswordHash != ""
 	return User{ID: u.ID, PoolID: u.PoolID, Email: u.Email, EmailVerified: u.EmailVerified, Status: u.Status,
 		PasswordSet: &set, PasswordUpdatedAt: timestamp(u.PasswordUpdatedAt), LockedUntil: timestamp(u.LockedUntil),
+		MFAEnabled: u.MFA, MFALockedUntil: timestamp(u.MFALockedUntil),
 		CreatedAt: timestamp(u.CreatedAt), UpdatedAt: timestamp(u.UpdatedAt), Version: u.Version}
 }
 
@@ -211,6 +216,25 @@ func (s *Server) inviteHost(r *http.Request, poolID, host, clientID string) (*st
 }
 
 func (s *Server) sendInvite(ctx context.Context, h *store.LoginHost, org *store.Org, addr, token string) error {
+	link := s.hostLink(h, "/password/reset", url.Values{"token": {token}})
+	m, err := email.Render(email.Invite, addr, email.Data{Brand: hostBrand(h, org), Host: h.Host, Link: link, Expires: "7 days"})
+	if err != nil {
+		return err
+	}
+	return s.Email.Send(ctx, m)
+}
+
+// sendNotice emails a user a security notice linking to their account
+// page on h.
+func (s *Server) sendNotice(ctx context.Context, h *store.LoginHost, org *store.Org, addr string, kind email.Kind) error {
+	m, err := email.Render(kind, addr, email.Data{Brand: hostBrand(h, org), Host: h.Host, Link: s.hostLink(h, "/account", nil)})
+	if err != nil {
+		return err
+	}
+	return s.Email.Send(ctx, m)
+}
+
+func (s *Server) hostLink(h *store.LoginHost, path string, q url.Values) string {
 	scheme, host := s.LinkScheme, h.Host
 	if scheme == "" {
 		scheme = "https"
@@ -218,16 +242,14 @@ func (s *Server) sendInvite(ctx context.Context, h *store.LoginHost, org *store.
 	if s.LinkPort != "" {
 		host += ":" + s.LinkPort
 	}
-	link := (&url.URL{Scheme: scheme, Host: host, Path: "/password/reset", RawQuery: url.Values{"token": {token}}.Encode()}).String()
-	brand := org.Name
+	return (&url.URL{Scheme: scheme, Host: host, Path: path, RawQuery: q.Encode()}).String()
+}
+
+func hostBrand(h *store.LoginHost, org *store.Org) string {
 	if v := h.Theme["brand_name"]; v != "" {
-		brand = v
+		return v
 	}
-	m, err := email.Render(email.Invite, addr, email.Data{Brand: brand, Host: h.Host, Link: link, Expires: "7 days"})
-	if err != nil {
-		return err
-	}
-	return s.Email.Send(ctx, m)
+	return org.Name
 }
 
 const (
@@ -440,6 +462,53 @@ func (s *Server) revokeSessions(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, RevokeResult{AuthVersion: v})
+	return nil
+}
+
+// MFAResetResult is the response to resetting a user's two-factor sign-in.
+type MFAResetResult struct {
+	AuthVersion int64 `json:"auth_version"`
+	// Notified: the user was emailed. It's false when no login host could
+	// be picked for the email's link (pass host).
+	Notified bool `json:"notified"`
+}
+
+// resetMFA turns off a user's two-factor sign-in, for a user who lost
+// both their authenticator app and recovery codes: they sign in with the
+// password alone again (and, if their pool requires it, set up a second
+// factor right away). Every session and refresh token ends, and the user
+// is emailed, through the login host in ?host= or the org's default.
+func (s *Server) resetMFA(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathValue(r, "user")
+	if err != nil {
+		return err
+	}
+	ctx := r.Context()
+	u, err := s.Store.GetUser(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !u.MFA {
+		return errConflict("mfa_not_enabled", "user "+id+" doesn't have two-factor sign-in")
+	}
+	host := r.URL.Query().Get("host")
+	h, org, herr := s.inviteHost(r, u.PoolID, host, "")
+	if herr != nil && host != "" {
+		return herr
+	}
+	v, err := s.Store.DisableMFA(ctx, id)
+	if err != nil {
+		return err
+	}
+	out := MFAResetResult{AuthVersion: v}
+	if herr == nil && s.Email != nil {
+		if err := s.sendNotice(ctx, h, org, u.Email, email.MFAReset); err != nil {
+			s.log().ErrorContext(ctx, "send reset notice", "error", err)
+		} else {
+			out.Notified = true
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 	return nil
 }
 

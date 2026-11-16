@@ -60,9 +60,12 @@ type Pool struct {
 	Description          string `dynamodbav:"description,omitempty"`
 	Status               string `dynamodbav:"status"`
 	RequireEmailVerified bool   `dynamodbav:"require_email_verified"`
-	CreatedAt            int64  `dynamodbav:"created_at"`
-	UpdatedAt            int64  `dynamodbav:"updated_at"`
-	Version              int64  `dynamodbav:"version"`
+	// MFARequired: every user of the pool signs in with a second factor,
+	// a passkey or a password and an authenticator app.
+	MFARequired bool  `dynamodbav:"mfa_required,omitempty"`
+	CreatedAt   int64 `dynamodbav:"created_at"`
+	UpdatedAt   int64 `dynamodbav:"updated_at"`
+	Version     int64 `dynamodbav:"version"`
 }
 
 type poolItem struct {
@@ -327,7 +330,8 @@ func (s *Store) ListPools(ctx context.Context, orgID string) ([]Pool, error) {
 	return pools, nil
 }
 
-// UpdatePool saves a pool's name, description and require_email_verified,
+// UpdatePool saves a pool's name, description, require_email_verified and
+// mfa_required,
 // if its version is still pool.Version. On success, pool holds the saved
 // values, including the new version.
 func (s *Store) UpdatePool(ctx context.Context, pool *Pool) error {
@@ -336,6 +340,7 @@ func (s *Store) UpdatePool(ctx context.Context, pool *Pool) error {
 		"name":                   avS(pool.Name),
 		"description":            avS(pool.Description),
 		"require_email_verified": avB(pool.RequireEmailVerified),
+		"mfa_required":           avB(pool.MFARequired),
 	}, &it)
 	if err != nil {
 		return err

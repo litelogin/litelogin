@@ -238,6 +238,7 @@ type Pool struct {
 	Description          string `json:"description"`
 	Status               string `json:"status"`
 	RequireEmailVerified bool   `json:"require_email_verified"`
+	MFARequired          bool   `json:"mfa_required"`
 	CreatedAt            string `json:"created_at"`
 	UpdatedAt            string `json:"updated_at"`
 	Version              int64  `json:"version"`
@@ -245,7 +246,7 @@ type Pool struct {
 
 func poolJSON(p *store.Pool) Pool {
 	return Pool{ID: p.ID, OrgID: p.OrgID, Name: p.Name, Description: p.Description, Status: p.Status,
-		RequireEmailVerified: p.RequireEmailVerified, CreatedAt: timestamp(p.CreatedAt),
+		RequireEmailVerified: p.RequireEmailVerified, MFARequired: p.MFARequired, CreatedAt: timestamp(p.CreatedAt),
 		UpdatedAt: timestamp(p.UpdatedAt), Version: p.Version}
 }
 
@@ -254,6 +255,10 @@ type PoolInput struct {
 	Name                 *string `json:"name"`
 	Description          *string `json:"description"`
 	RequireEmailVerified *bool   `json:"require_email_verified"`
+	// MFARequired: every user signs in with a passkey, or a password and
+	// an authenticator app; users without either set one up at their
+	// next sign-in.
+	MFARequired *bool `json:"mfa_required"`
 }
 
 func (s *Server) createPool(w http.ResponseWriter, r *http.Request) error {
@@ -265,7 +270,7 @@ func (s *Server) createPool(w http.ResponseWriter, r *http.Request) error {
 	if err := decode(r, &in); err != nil {
 		return err
 	}
-	pool := &store.Pool{ID: crypto.NewID(), OrgID: orgID, RequireEmailVerified: deref(in.RequireEmailVerified)}
+	pool := &store.Pool{ID: crypto.NewID(), OrgID: orgID, RequireEmailVerified: deref(in.RequireEmailVerified), MFARequired: deref(in.MFARequired)}
 	if pool.Name, err = validName(deref(in.Name)); err != nil {
 		return err
 	}
@@ -347,6 +352,9 @@ func (s *Server) updatePool(w http.ResponseWriter, r *http.Request) error {
 	}
 	if in.RequireEmailVerified != nil {
 		pool.RequireEmailVerified = *in.RequireEmailVerified
+	}
+	if in.MFARequired != nil {
+		pool.MFARequired = *in.MFARequired
 	}
 	pool.Version = version
 	if err := s.Store.UpdatePool(r.Context(), pool); err != nil {

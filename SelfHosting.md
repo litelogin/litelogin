@@ -246,6 +246,18 @@ dist/litelogin host update login.acme.com --passkeys
 
 Users can then add a passkey on their account page and sign in with it. A passkey works only on the host it was made on: moving an org's clients to a new host means its users add new passkeys there. To remove a lost passkey for a user, use `dist/litelogin user passkey list USER` and `user passkey remove USER PASSKEY`, which also signs the user out everywhere.
 
+### Two-factor sign-in
+
+Users can turn on two-factor sign-in with an authenticator app on their account page. To require it for everyone in a pool:
+
+```sh
+dist/litelogin pool update POOL --mfa-required
+```
+
+Users without it set it up at their next sign-in (after verifying their email); passkey sign-ins already count. Sessions and refresh tokens from password-only sign-ins stop working at their next use.
+
+A user who lost both their authenticator app and their recovery codes needs an administrator: check it's really them, then run `dist/litelogin user reset-2fa USER`. That turns it off, signs them out everywhere and emails them (pass `--host` if the org's default host isn't on their pool).
+
 ## Monitoring
 
 - **Dashboard:** `tofu output dashboard` links to the environment's CloudWatch dashboard (Full only, or `dashboard = true`). It shows sign-ins, token issuance, latency (from the log, with Logs Insights), security events (such as reused refresh tokens), failures and background work.

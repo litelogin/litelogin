@@ -162,9 +162,142 @@ func (s *Server) renderMFASetup(w http.ResponseWriter, r *http.Request, t *tenan
 		s.fail(w, r, t, err)
 		return
 	}
-	s.render(w, r, t, status, "mfa_setup", pageData{
+	d := pageData{
 		Title: "Set up two-factor sign-in", Error: msg, QR: svg, TOTPKey: crypto.EncodeTOTPSecret(secret),
-		Action: action, Account: u,
+		Action: action, Account: u, Continue: "/account",
+	}
+	if p.Purpose == store.MFAEnroll {
+		// Signing in: the form ends at the client's redirect URI.
+		s.useAuthzClient(r, t, p.Authz)
+		d.Continue, d.Account = "/login", nil
+		d.Notice = "This account needs two-factor sign-in. Set it up to continue."
+	}
+	s.render(w, r, t, status, "mfa_setup", d)
+}
+
+// ---- Sign in: setting up a required second factor ----
+
+// poolSatisfied reports whether a sign-in with amr meets the pool's
+// policy: a pool with mfa_required takes a second factor (or a passkey).
+func poolSatisfied(t *tenant, amr []string) bool {
+	return !t.Pool.MFARequired || slices.Contains(signInMethods(amr), "mfa")
+}
+
+// startEnrollment is a password sign-in, in a pool that requires
+// two-factor sign-in, by a user without it: instead of a session, they set
+// up an authenticator app first. The user has shown their password and,
+// before this, verified their email.
+func (s *Server) startEnrollment(w http.ResponseWriter, r *http.Request, t *tenant, u *store.User, authz string) {
+	sealed, err := s.Secrets.Seal(r.Context(), crypto.NewTOTPSecret(), totpContext(u))
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	p := &store.PendingMFA{
+		Purpose: store.MFAEnroll, Host: t.Host, PoolID: t.Pool.ID, UserID: u.ID, AuthVersion: u.AuthVersion,
+		Authz: authz, Secret: sealed,
+	}
+	if err := s.newPendingMFA(w, r, p); err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	http.Redirect(w, r, "/login/2fa/setup", http.StatusSeeOther)
+}
+
+// pendingEnrollment loads the pending enrollment and its user, or sends
+// the browser back to sign in.
+func (s *Server) pendingEnrollment(w http.ResponseWriter, r *http.Request, t *tenant) (*store.PendingMFA, *store.User) {
+	ctx := r.Context()
+	p, err := s.pendingMFA(r, t, store.MFAEnroll)
+	var u *store.User
+	if err == nil {
+		u, err = s.Store.GetUser(ctx, p.UserID)
+		if err == nil && (u.Status != store.UserActive || u.AuthVersion != p.AuthVersion || u.MFA || u.PoolID != t.Pool.ID) {
+			err = store.ErrNotFound
+		}
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		if p != nil {
+			_ = s.Store.DeletePendingMFA(ctx, p.Hash)
+		}
+		clearMFACookie(w)
+		http.Redirect(w, r, "/login?n=mfa_expired", http.StatusSeeOther)
+		return nil, nil
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return nil, nil
+	}
+	return p, u
+}
+
+func (s *Server) enrollmentForm(w http.ResponseWriter, r *http.Request, t *tenant) {
+	p, u := s.pendingEnrollment(w, r, t)
+	if p == nil {
+		return
+	}
+	s.renderMFASetup(w, r, t, http.StatusOK, u, p, "/login/2fa/setup", "")
+}
+
+// enroll turns on two-factor sign-in once the code shows the app has the
+// secret, signs the user in with both factors, and shows the recovery
+// codes, which continue to the pending /authorize request.
+func (s *Server) enroll(w http.ResponseWriter, r *http.Request, t *tenant) {
+	ctx := r.Context()
+	p, u := s.pendingEnrollment(w, r, t)
+	if p == nil {
+		return
+	}
+	secret, err := s.Secrets.Open(ctx, p.Secret, totpContext(u))
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	step, ok := crypto.VerifyTOTP(secret, r.PostFormValue("code"), s.now(), 0)
+	if !ok {
+		metrics.Count(s.Metrics, metrics.MFAFailed, 1, metrics.Reason("wrong_code"))
+		switch err := s.Store.RecordPendingMFAAttempt(ctx, p.Hash, MaxMFAAttempts); {
+		case errors.Is(err, store.ErrNotFound):
+			_ = s.Store.DeletePendingMFA(ctx, p.Hash)
+			clearMFACookie(w)
+			http.Redirect(w, r, "/login?n=mfa_expired", http.StatusSeeOther)
+		case err != nil:
+			s.fail(w, r, t, err)
+		default:
+			s.renderMFASetup(w, r, t, http.StatusUnauthorized, u, p, "/login/2fa/setup", msgWrongCode)
+		}
+		return
+	}
+	if err := s.Store.ConsumePendingMFA(ctx, p.Hash); errors.Is(err, store.ErrNotFound) {
+		clearMFACookie(w)
+		http.Redirect(w, r, "/login?n=mfa_expired", http.StatusSeeOther)
+		return
+	} else if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	clearMFACookie(w)
+	codes, hashes := newRecoveryCodes()
+	v, err := s.Store.EnableMFA(ctx, u.ID, p.AuthVersion, p.Secret, step, hashes)
+	if errors.Is(err, store.ErrConditionFailed) {
+		http.Redirect(w, r, "/login?n=mfa_expired", http.StatusSeeOther)
+		return
+	}
+	if err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	u.AuthVersion, u.MFA = v, true
+	if err := s.startSession(w, r, t, u, amrTOTP, 0); err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	metrics.Count(s.Metrics, metrics.MFAEnabled, 1)
+	metrics.Count(s.Metrics, metrics.LoginSucceeded, 1)
+	s.notify(ctx, t, u, email.MFAEnabled, email.Data{})
+	s.render(w, r, t, http.StatusOK, "mfa_codes", pageData{
+		Title: "Save your recovery codes", RecoveryCodes: codes, Continue: continueAuthz(p.Authz),
+		Notice: "Two-factor sign-in is on.",
 	})
 }
 
@@ -575,6 +708,10 @@ func (s *Server) disableMFA(w http.ResponseWriter, r *http.Request, t *tenant) {
 	}
 	if !u.MFA {
 		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
+	}
+	if t.Pool.MFARequired {
+		s.renderAccount(w, r, t, http.StatusForbidden, sess, u, pageData{Error: "Two-factor sign-in is required for this account."})
 		return
 	}
 	if !s.needFresh(w, r, t, sess, u) {

@@ -106,7 +106,7 @@ func (s *Server) renderAccount(w http.ResponseWriter, r *http.Request, t *tenant
 			return
 		}
 	}
-	d.MFAPassword, d.StepUp = !s.recentSignIn(sess), !s.mfaFresh(sess, u)
+	d.MFAPassword, d.StepUp, d.MFARequired = !s.recentSignIn(sess), !s.mfaFresh(sess, u), t.Pool.MFARequired
 	d.Title, d.Account, d.Sessions = "Your account", u, views
 	d.Passkeys, d.PasskeyPassword, d.MaxPasskeys = passkeyViews(passkeys), !u.MFA && !s.recentSignIn(sess), store.MaxPasskeysPerUser
 	d.Script = pageScript(t)
