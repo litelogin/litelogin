@@ -61,6 +61,19 @@
 </section>{{end}}
 
 <section>
+<h2>Two-factor sign-in</h2>
+{{if .Account.MFA}}<p>On. Signing in with your password also takes a code from your authenticator app.</p>
+<p class="hint">You have {{.RecoveryCodesLeft}} unused recovery code{{if ne .RecoveryCodesLeft 1}}s{{end}}. Each works once, if you lose your authenticator app.</p>
+{{else}}<p class="hint">Signing in with your password will also take a code from an authenticator app on your phone, such as Google Authenticator, Microsoft Authenticator or 1Password. A stolen password is then not enough.</p>
+<form method="post" action="/account/2fa/setup">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+{{if .MFAPassword}}<label for="mfa_password">Current password</label>
+<input id="mfa_password" name="password" type="password" autocomplete="current-password" required>
+{{end}}<button type="submit">Set up two-factor sign-in</button>
+</form>{{end}}
+</section>
+
+<section>
 <h2>Change password</h2>
 <form method="post" action="/account/password">
 <input type="hidden" name="csrf" value="{{.CSRF}}">

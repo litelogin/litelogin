@@ -44,7 +44,44 @@ const (
 	Invite            Kind = "invite"
 	ChangeEmail       Kind = "change_email"
 	PasskeyAdded      Kind = "passkey_added"
+
+	// Security notices: what changed on the account, sent to the user's
+	// address. They share one template (security_notice).
+	MFAEnabled            Kind = "mfa_enabled"
+	MFADisabled           Kind = "mfa_disabled"
+	MFAReset              Kind = "mfa_reset"
+	RecoveryCodeUsed      Kind = "recovery_code_used"
+	RecoveryCodesReplaced Kind = "recovery_codes_replaced"
+	MFALocked             Kind = "mfa_locked"
 )
+
+const securityNotice = "security_notice"
+
+// notice is a security notice's heading and body, templates of Data.
+type notice struct{ heading, body string }
+
+const unexpected = " If you did this, there's nothing to do. If you didn't, someone else may have your password: " +
+	"open your account page and change it."
+
+var notices = map[Kind]notice{
+	MFAEnabled: {"Two-factor sign-in is on",
+		"Two-factor sign-in was turned on for your {{.Brand}} account. Signing in with your password now also takes " +
+			"a code from your authenticator app, or a recovery code." + unexpected},
+	MFADisabled: {"Two-factor sign-in is off",
+		"Two-factor sign-in was turned off for your {{.Brand}} account. Signing in now takes only your password." + unexpected},
+	MFAReset: {"Two-factor sign-in was reset",
+		"An administrator turned off two-factor sign-in for your {{.Brand}} account, and signed you out everywhere. " +
+			"Signing in now takes only your password. If you didn't ask for this, contact the administrator, then " +
+			"change your password and turn two-factor sign-in on again."},
+	RecoveryCodeUsed: {"A recovery code was used",
+		"A recovery code was used to sign in to your {{.Brand}} account. You have {{.Count}} left; each works once. " +
+			"If you've lost your authenticator app, set up two-factor sign-in again from your account page." + unexpected},
+	RecoveryCodesReplaced: {"You have new recovery codes",
+		"New recovery codes were made for your {{.Brand}} account. The old ones no longer work." + unexpected},
+	MFALocked: {"Someone has your password",
+		"Someone signed in to your {{.Brand}} account with your correct password, then entered wrong two-factor codes " +
+			"too many times, so two-factor sign-in is paused for a while. If it wasn't you, change your password now."},
+}
 
 var subjects = map[Kind]string{ //nolint:gosec // email subjects, not credentials
 	VerifyEmail:       "Verify your email for {{.Brand}}",
@@ -53,6 +90,13 @@ var subjects = map[Kind]string{ //nolint:gosec // email subjects, not credential
 	Invite:            "You've been invited to {{.Brand}}",
 	ChangeEmail:       "Confirm your new email for {{.Brand}}",
 	PasskeyAdded:      "A passkey was added to your {{.Brand}} account",
+
+	MFAEnabled:            "Two-factor sign-in is on for your {{.Brand}} account",
+	MFADisabled:           "Two-factor sign-in is off for your {{.Brand}} account",
+	MFAReset:              "Two-factor sign-in was reset on your {{.Brand}} account",
+	RecoveryCodeUsed:      "A recovery code was used on your {{.Brand}} account",
+	RecoveryCodesReplaced: "New recovery codes for your {{.Brand}} account",
+	MFALocked:             "Someone has your {{.Brand}} password",
 }
 
 // Data fills a message template.
@@ -62,6 +106,10 @@ type Data struct {
 	Link    string // the action link (verification, reset), or the account page
 	Name    string // a passkey's name
 	Expires string // how long the link works, e.g. "24 hours"
+	Count   int    // how many recovery codes are left
+
+	// Heading and Body are set by Render for security notices.
+	Heading, Body string
 }
 
 //go:embed templates/*
@@ -94,17 +142,25 @@ func Render(kind Kind, to string, d Data) (Message, error) {
 		return Message{}, fmt.Errorf("email: unknown kind %q", kind)
 	}
 	var s, t, h bytes.Buffer
-	st, err := texttemplate.New("subject").Parse(subj)
-	if err != nil {
+	if err := execText(&s, subj, d); err != nil {
 		return Message{}, err
 	}
-	if err := st.Execute(&s, d); err != nil {
+	name := string(kind)
+	if n, ok := notices[kind]; ok {
+		name = securityNotice
+		var heading, body bytes.Buffer
+		if err := execText(&heading, n.heading, d); err != nil {
+			return Message{}, err
+		}
+		if err := execText(&body, n.body, d); err != nil {
+			return Message{}, err
+		}
+		d.Heading, d.Body = heading.String(), body.String()
+	}
+	if err := texts.ExecuteTemplate(&t, name+".txt", d); err != nil {
 		return Message{}, err
 	}
-	if err := texts.ExecuteTemplate(&t, string(kind)+".txt", d); err != nil {
-		return Message{}, err
-	}
-	if err := htmls.ExecuteTemplate(&h, string(kind)+".html", d); err != nil {
+	if err := htmls.ExecuteTemplate(&h, name+".html", d); err != nil {
 		return Message{}, err
 	}
 	// A brand name is operator-controlled, but keep header injection out
@@ -116,6 +172,15 @@ func Render(kind Kind, to string, d Data) (Message, error) {
 		return r
 	}, s.String())
 	return Message{To: to, Subject: subject, Text: t.String(), HTML: h.String()}, nil
+}
+
+// execText executes a text template of Data.
+func execText(w *bytes.Buffer, tmpl string, d Data) error {
+	t, err := texttemplate.New("").Parse(tmpl)
+	if err != nil {
+		return err
+	}
+	return t.Execute(w, d)
 }
 
 // SESAPI is the part of the SES v2 client SES uses.

@@ -70,6 +70,21 @@ type Store interface {
 	VerifyEmail(ctx context.Context, hash string) (string, error)
 	CompletePasswordReset(ctx context.Context, hash, newPasswordHash string) (string, error)
 	ConfirmEmailChange(ctx context.Context, hash string) (string, error)
+
+	EnableMFA(ctx context.Context, userID string, authVersion int64, secret []byte, step int64, recoveryHashes []string) (int64, error)
+	DisableMFA(ctx context.Context, userID string) (int64, error)
+	GetTOTP(ctx context.Context, userID string) (*store.TOTP, error)
+	UseTOTPStep(ctx context.Context, userID string, step int64) error
+	UseRecoveryCode(ctx context.Context, userID, hash string) error
+	CountRecoveryCodes(ctx context.Context, userID string) (int, error)
+	ReplaceRecoveryCodes(ctx context.Context, userID string, hashes []string) error
+	RecordFailedMFA(ctx context.Context, userID string, limit int64, lockFor time.Duration) (bool, error)
+	ResetFailedMFA(ctx context.Context, userID string) error
+	CreatePendingMFA(ctx context.Context, p *store.PendingMFA, lifetime time.Duration) error
+	GetPendingMFA(ctx context.Context, hash, purpose, host string) (*store.PendingMFA, error)
+	RecordPendingMFAAttempt(ctx context.Context, hash string, maxAttempts int64) error
+	ConsumePendingMFA(ctx context.Context, hash string) error
+	DeletePendingMFA(ctx context.Context, hash string) error
 }
 
 var _ Store = (*store.Store)(nil)
@@ -174,6 +189,8 @@ func (s *Server) Handler() http.Handler {
 	page("POST /account/sign-out-everywhere", s.signOutEverywhere)
 	page("POST /account/passkeys/rename", s.renamePasskey)
 	page("POST /account/passkeys/remove", s.removePasskey)
+	page("POST /account/2fa/setup", s.startMFASetup)
+	page("POST /account/2fa/confirm", s.confirmMFASetup)
 	// Passkey ceremonies, called by the pages' script. They answer JSON.
 	page("POST /passkey/login/options", s.passkeyLoginOptions)
 	page("POST /passkey/login", s.passkeyLogin)
@@ -372,6 +389,20 @@ type pageData struct {
 	// isn't recent).
 	PasskeyPassword bool
 	MaxPasskeys     int
+	// MFAPassword: turning on two-factor sign-in needs the password (the
+	// sign-in isn't recent). RecoveryCodesLeft is how many unused
+	// recovery codes the user has.
+	MFAPassword       bool
+	RecoveryCodesLeft int
+	// QR and TOTPKey show a new authenticator app secret, as a QR code
+	// and as text; Action is where its form posts the confirming code.
+	QR      template.HTML
+	TOTPKey string
+	Action  string
+	// RecoveryCodes are new recovery codes, shown once; Continue is where
+	// the user goes after saving them.
+	RecoveryCodes []string
+	Continue      string
 	// Authz is a pending authorization request's query, carried through
 	// the login form.
 	Authz string

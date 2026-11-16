@@ -57,4 +57,5 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
+	rsc.io/qr v0.2.0 // indirect
 )

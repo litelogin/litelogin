@@ -162,6 +162,17 @@ Passkeys (WebAuthn) are an extra way to sign in; users keep their passwords. A h
 - **`amr` and `acr`:** a passkey sign-in is `amr` `["pop", "user", "mfa"]` and `acr` `phr`. `pop` is proof of possession of a key (OpenID EAP ACR Values 1.0), which leaves open whether the key is in hardware: without attestation LiteLogin can't tell. `user` and `mfa` are RFC 8176: user verification is required and checked, so the device and the biometric or PIN that unlocks it are two factors. `phr` (phishing-resistant) is the same register's `acr`. Sessions, codes and refresh families recorded before this say `hwk` or `swk` instead, and tokens issued from them say `["pop", "user", "mfa"]`.
 - **Removing one** signs the user out everywhere else (it increments `auth_version`), since sessions and tokens aren't linked to the passkey they came from, and the usual reason is a lost device.
 
+### Two-factor sign-in
+
+Users can turn on two-factor sign-in with an authenticator app (TOTP, RFC 6238). A password sign-in then also takes a code from the app, or one of the user's recovery codes. A passkey sign-in already takes two factors (the device, and the biometric or PIN that unlocks it), so it doesn't ask for a code.
+
+- **Parameters:** HMAC-SHA-1, 6 digits, a 30-second step, a 160-bit secret: what every authenticator app supports. Apps that don't support other values ignore them and show wrong codes, so none is configurable. One step either side of the current one is accepted, for clock drift.
+- **Each code works once:** the TOTP item records the last step a code was accepted for, and a code is accepted only for a later one, with a conditional write.
+- **The secret** is the one credential LiteLogin must read back, so it's encrypted with its own KMS key, which only the Auth Lambda may use, bound by the encryption context to the user. The local development server uses AES-GCM with a fixed key.
+- **Setting it up** is on the account page. Like adding a passkey, it needs a sign-in within the last 10 minutes or the password. The page shows a QR code (inline SVG, drawn on the server: no script and no image request) and the key as text; one code from the app turns it on. That ends the user's other sessions, which signed in without it, and this browser gets a new session that counts as two-factor. The user gets 10 recovery codes, shown once, and an email.
+- **Recovery codes** are 120 random bits each, stored as SHA-256 hashes (a slow hash is needed only below 112 bits, NIST SP 800-63B-4), and each works once.
+- **`amr` and `acr`:** a password sign-in with an app code is `["pwd", "otp", "mfa"]` and `urn:litelogin:acr:mfa`.
+
 ## Protocol
 
 LiteLogin implements the OAuth 2.1 authorization code flow and OpenID Connect Core. The rules below are enforced by the access patterns in [Datamodel.md](Datamodel.md).

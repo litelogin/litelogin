@@ -26,6 +26,7 @@ var accountNotices = map[string]string{
 	"passkey_added":    "Your passkey was added. You can use it to sign in here.",
 	"passkey_renamed":  "The passkey was renamed.",
 	"passkey_removed":  "The passkey was removed. You're still signed in here; every other session was signed out.",
+	"mfa_enabled":      "Two-factor sign-in is on. You're still signed in here; every other session was signed out.",
 }
 
 // sessionView is one of the user's sessions on the account page.
@@ -97,6 +98,13 @@ func (s *Server) renderAccount(w http.ResponseWriter, r *http.Request, t *tenant
 		s.fail(w, r, t, err)
 		return
 	}
+	if u.MFA {
+		if d.RecoveryCodesLeft, err = s.Store.CountRecoveryCodes(r.Context(), u.ID); err != nil {
+			s.fail(w, r, t, err)
+			return
+		}
+	}
+	d.MFAPassword = !s.recentSignIn(sess)
 	d.Title, d.Account, d.Sessions = "Your account", u, views
 	d.Passkeys, d.PasskeyPassword, d.MaxPasskeys = passkeyViews(passkeys), !s.recentSignIn(sess), store.MaxPasskeysPerUser
 	d.Script = pageScript(t)

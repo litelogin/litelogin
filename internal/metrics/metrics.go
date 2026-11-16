@@ -40,6 +40,9 @@ const (
 	PasskeyAdded          = "PasskeyAdded"
 	PasskeyLoginSucceeded = "PasskeyLoginSucceeded" //nolint:gosec // a metric name, not a credential
 	PasskeyLoginFailed    = "PasskeyLoginFailed"    // Reason: unknown_passkey, invalid, expired, cloned, inactive, unverified_email
+	MFAEnabled            = "MFAEnabled"
+	MFAFailed             = "MFAFailed" // Reason: wrong_code, reused_code, locked, expired
+	MFALockout            = "MFALockout"
 )
 
 // logOnly are the records written as plain log fields, not metrics: each

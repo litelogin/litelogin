@@ -887,17 +887,23 @@ const (
 	// acrPhishingResistant ("phr", OpenID EAP ACR Values 1.0) is a passkey
 	// sign-in.
 	acrPhishingResistant = "phr"
+	// acrMFA is a password sign-in with a second factor: an authenticator
+	// app code or a recovery code.
+	acrMFA = "urn:litelogin:acr:mfa"
 	// acrPassword is a password sign-in.
 	acrPassword = "urn:litelogin:acr:pwd" //nolint:gosec // an acr value, not a credential
 )
 
 // acrValues are the acr values tokens carry, as discovery lists them.
-var acrValues = []string{acrPhishingResistant, acrPassword}
+var acrValues = []string{acrPhishingResistant, acrMFA, acrPassword}
 
 // signInLevel is the acr of a sign-in with these methods (signInMethods).
 func signInLevel(amr []string) string {
-	if slices.Contains(amr, "pop") && slices.Contains(amr, "mfa") {
+	switch {
+	case slices.Contains(amr, "pop") && slices.Contains(amr, "mfa"):
 		return acrPhishingResistant
+	case slices.Contains(amr, "mfa"):
+		return acrMFA
 	}
 	return acrPassword
 }

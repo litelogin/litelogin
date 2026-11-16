@@ -47,3 +47,23 @@ func TestSES(t *testing.T) {
 		t.Errorf("SendEmail input: from %q, set %q", *f.in.FromEmailAddress, *f.in.ConfigurationSetName)
 	}
 }
+
+func TestSecurityNotices(t *testing.T) {
+	d := Data{Brand: "Acme <b>Portal</b>", Host: "portal.example.com", Link: "https://portal.example.com/account", Count: 7}
+	for k := range notices {
+		m, err := Render(k, "a@example.com", d)
+		if err != nil {
+			t.Fatalf("%s: %v", k, err)
+		}
+		if m.Subject == "" || !strings.Contains(m.Text, d.Link) || !strings.Contains(m.Text, "Acme <b>Portal</b>") {
+			t.Errorf("%s: subject %q, text:\n%s", k, m.Subject, m.Text)
+		}
+		if strings.Contains(m.HTML, "<b>Portal") || !strings.Contains(m.HTML, "Acme &lt;b&gt;Portal") {
+			t.Errorf("%s: HTML not escaped:\n%s", k, m.HTML)
+		}
+	}
+	m, _ := Render(RecoveryCodeUsed, "a@example.com", d)
+	if !strings.Contains(m.Text, "You have 7 left") {
+		t.Errorf("recovery code count missing:\n%s", m.Text)
+	}
+}

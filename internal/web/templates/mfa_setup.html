@@ -1,0 +1,13 @@
+{{define "content"}}
+<p>Scan this QR code with your authenticator app.</p>
+{{.QR}}
+<p class="hint">Can't scan it? Add an account in the app by hand, with this key:</p>
+<p class="key">{{.TOTPKey}}</p>
+<form method="post" action="{{.Action}}">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="code">Then enter the 6-digit code the app shows</label>
+<input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]*" maxlength="8" required autofocus>
+<button type="submit">Turn on two-factor sign-in</button>
+</form>
+<div class="links"><a href="/account">Cancel</a></div>
+{{end}}

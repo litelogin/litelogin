@@ -156,7 +156,7 @@ func TestDiscoveryAndJWKS(t *testing.T) {
 	if doc["issuer"] != issuer || doc["token_endpoint"] != issuer+"/token" || doc["jwks_uri"] != issuer+"/.well-known/jwks.json" {
 		t.Errorf("discovery: %v", doc)
 	}
-	if acr, _ := doc["acr_values_supported"].([]any); len(acr) != 2 || acr[0] != "phr" || acr[1] != "urn:litelogin:acr:pwd" {
+	if acr, _ := doc["acr_values_supported"].([]any); len(acr) != 3 || acr[0] != "phr" || acr[1] != "urn:litelogin:acr:mfa" || acr[2] != "urn:litelogin:acr:pwd" {
 		t.Errorf("acr_values_supported = %v", doc["acr_values_supported"])
 	}
 	if p.header.Get("Access-Control-Allow-Origin") != "*" {
