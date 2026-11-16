@@ -40,9 +40,9 @@ func (f *fakeStore) CleanupUserCredentials(_ context.Context, userID, cursor str
 	return 1, "", nil
 }
 
-// CleanupDeletedUserPasskeys records that the user's passkeys were cleaned
+// CleanupDeletedUserItems records that the user's passkeys were cleaned
 // up, after their credentials.
-func (f *fakeStore) CleanupDeletedUserPasskeys(_ context.Context, userID string) (int, error) {
+func (f *fakeStore) CleanupDeletedUserItems(_ context.Context, userID string) (int, error) {
 	f.passkeys = append(f.passkeys, userID)
 	return 0, nil
 }

@@ -214,23 +214,29 @@ func (s *Store) DeletePasskey(ctx context.Context, userID, id string) error {
 	return nil
 }
 
-// CleanupDeletedUserPasskeys deletes the passkeys of a user that no longer
-// exists, and returns how many it deleted. For a user that still exists, it
-// does nothing. The passkeys stopped working when the user item was deleted;
-// this only removes them.
-func (s *Store) CleanupDeletedUserPasskeys(ctx context.Context, userID string) (int, error) {
+// CleanupDeletedUserItems deletes the items of a user that no longer
+// exists (passkeys, TOTP and recovery codes), and returns how many it
+// deleted. For a user that still exists, it does nothing. The items stopped
+// working when the user item was deleted; this only removes them.
+func (s *Store) CleanupDeletedUserItems(ctx context.Context, userID string) (int, error) {
 	if _, err := s.GetUser(ctx, userID); !errors.Is(err, ErrNotFound) {
 		return 0, err
 	}
 	var ks []map[string]types.AttributeValue
-	in := s.passkeyQuery(userID)
-	in.ProjectionExpression = aws.String("PK, SK")
-	err := s.queryAll(ctx, in, func(raw map[string]types.AttributeValue) error {
+	err := s.queryAll(ctx, &dynamodb.QueryInput{
+		TableName:                 aws.String(s.config),
+		ConsistentRead:            aws.Bool(true),
+		KeyConditionExpression:    aws.String("PK = :pk"),
+		ProjectionExpression:      aws.String("PK, SK"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": avS(pfxUser + userID)},
+	}, func(raw map[string]types.AttributeValue) error {
 		var k keys
 		if err := unmarshal(raw, &k); err != nil {
 			return err
 		}
-		ks = append(ks, key(k.PK, k.SK))
+		if isUserItem(k.SK) {
+			ks = append(ks, key(k.PK, k.SK))
+		}
 		return nil
 	})
 	if err != nil {

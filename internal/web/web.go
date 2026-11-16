@@ -25,6 +25,7 @@ import (
 	"github.com/litelogin/litelogin/internal/jwt"
 	"github.com/litelogin/litelogin/internal/logctx"
 	"github.com/litelogin/litelogin/internal/metrics"
+	"github.com/litelogin/litelogin/internal/secretbox"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -100,7 +101,9 @@ type Server struct {
 	Keys     *jwt.KeySet
 	Signer   *jwt.Signer
 	Verifier *jwt.Verifier
-	Log      *slog.Logger
+	// Secrets encrypts TOTP secrets.
+	Secrets secretbox.Box
+	Log     *slog.Logger
 	// Metrics records the service's metrics; nil records none.
 	Metrics metrics.Recorder
 	Now     func() time.Time

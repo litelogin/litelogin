@@ -28,6 +28,7 @@ import (
 	"github.com/litelogin/litelogin/internal/kmsfake"
 	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/platform"
+	"github.com/litelogin/litelogin/internal/secretbox"
 	"github.com/litelogin/litelogin/internal/store"
 	"github.com/litelogin/litelogin/internal/web"
 )
@@ -115,7 +116,12 @@ func newEnvWith(t *testing.T, requireVerified bool, opts envOptions) *env {
 
 	mail := &email.Recorder{}
 	e.metrics = &metrics.Memory{}
+	secrets, err := secretbox.NewLocal(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ws := &web.Server{
+		Secrets: secrets,
 		Metrics: e.metrics,
 		Now:     func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) },
 		Store:   st,

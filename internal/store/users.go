@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,9 +34,16 @@ type User struct {
 	FailedLoginCount  int64  `dynamodbav:"failed_login_count"`
 	LockedUntil       int64  `dynamodbav:"locked_until,omitempty"`
 	PasswordUpdatedAt int64  `dynamodbav:"password_updated_at,omitempty"`
-	CreatedAt         int64  `dynamodbav:"created_at"`
-	UpdatedAt         int64  `dynamodbav:"updated_at"`
-	Version           int64  `dynamodbav:"version"`
+	// MFA is whether the user has two-factor sign-in (an authenticator
+	// app: a TOTP item and recovery codes). MFAFailedCount and
+	// MFALockedUntil count wrong codes across sign-ins, like the password
+	// lockout.
+	MFA            bool  `dynamodbav:"mfa,omitempty"`
+	MFAFailedCount int64 `dynamodbav:"mfa_failed_count,omitempty"`
+	MFALockedUntil int64 `dynamodbav:"mfa_locked_until,omitempty"`
+	CreatedAt      int64 `dynamodbav:"created_at"`
+	UpdatedAt      int64 `dynamodbav:"updated_at"`
+	Version        int64 `dynamodbav:"version"`
 }
 
 type userItem struct {
@@ -155,12 +163,19 @@ func (s *Store) GetUserByEmail(ctx context.Context, poolID, email string) (*User
 // limit, the user is locked until now+lockFor and the count is reset. It
 // reports whether the user is now locked.
 func (s *Store) RecordFailedLogin(ctx context.Context, userID string, limit int64, lockFor time.Duration) (bool, error) {
+	return s.recordFailure(ctx, userID, "failed_login_count", "locked_until", limit, lockFor)
+}
+
+// recordFailure adds one to a user's failure count. When it reaches limit,
+// it sets the lock attribute to now+lockFor and resets the count, and
+// reports that the user is now locked.
+func (s *Store) recordFailure(ctx context.Context, userID, countAttr, lockAttr string, limit int64, lockFor time.Duration) (bool, error) {
 	out, err := s.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                 aws.String(s.config),
 		Key:                       userKey(userID),
-		UpdateExpression:          aws.String("ADD #failed_login_count :one"),
+		UpdateExpression:          aws.String("ADD #count :one"),
 		ConditionExpression:       aws.String("attribute_exists(PK)"),
-		ExpressionAttributeNames:  names("failed_login_count"),
+		ExpressionAttributeNames:  map[string]string{"#count": countAttr},
 		ExpressionAttributeValues: map[string]types.AttributeValue{":one": avN(1)},
 		ReturnValues:              types.ReturnValueUpdatedNew,
 	})
@@ -168,23 +183,21 @@ func (s *Store) RecordFailedLogin(ctx context.Context, userID string, limit int6
 		return false, ErrNotFound
 	}
 	if err != nil {
-		return false, fmt.Errorf("store: record failed login: %w", err)
+		return false, fmt.Errorf("store: record failure: %w", err)
 	}
-	var counts struct {
-		FailedLoginCount int64 `dynamodbav:"failed_login_count"`
+	var count int64
+	if v, ok := out.Attributes[countAttr].(*types.AttributeValueMemberN); ok {
+		count, _ = strconv.ParseInt(v.Value, 10, 64)
 	}
-	if err := unmarshal(out.Attributes, &counts); err != nil {
-		return false, err
-	}
-	if counts.FailedLoginCount < limit {
+	if count < limit {
 		return false, nil
 	}
 	_, err = s.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                aws.String(s.config),
 		Key:                      userKey(userID),
-		UpdateExpression:         aws.String("SET #locked_until = :until, #failed_login_count = :zero"),
-		ConditionExpression:      aws.String("#failed_login_count >= :limit"),
-		ExpressionAttributeNames: names("locked_until", "failed_login_count"),
+		UpdateExpression:         aws.String("SET #lock = :until, #count = :zero"),
+		ConditionExpression:      aws.String("#count >= :limit"),
+		ExpressionAttributeNames: map[string]string{"#lock": lockAttr, "#count": countAttr},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":until": avN(s.now().Add(lockFor).Unix()), ":zero": avN(0), ":limit": avN(limit),
 		},

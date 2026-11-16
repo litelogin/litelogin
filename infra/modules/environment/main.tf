@@ -171,7 +171,8 @@ module "dns" {
   domain = var.default_host_domain
 }
 
-# The table key, only with table_encryption = "customer-managed".
+# The table key, only with table_encryption = "customer-managed", and the
+# key for TOTP secrets.
 module "kms" {
   source      = "../kms"
   name_prefix = local.name_prefix
@@ -231,6 +232,18 @@ data "aws_iam_policy_document" "auth" {
     }
   }
 
+  # Encrypting and decrypting TOTP secrets, only with the context every
+  # one carries.
+  statement {
+    actions   = ["kms:Encrypt", "kms:Decrypt"]
+    resources = [module.kms.mfa_key_arn]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:purpose"
+      values   = ["totp"]
+    }
+  }
+
   # Sending only from the environment's address. identity/* because in the
   # SES sandbox the recipient's identity is authorized too.
   statement {
@@ -269,6 +282,7 @@ module "auth" {
     LITELOGIN_ORIGIN_SECRET_HASHES = join(",", module.edge.origin_secret_hashes)
     LITELOGIN_EMAIL_FROM           = module.email.from_address
     LITELOGIN_SES_CONFIGURATION    = module.email.configuration_set_name
+    LITELOGIN_MFA_KEY_ID           = module.kms.mfa_key_arn
   }, local.reduced_metrics ? { LITELOGIN_METRICS = "reduced" } : {})
 }
 

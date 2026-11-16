@@ -118,24 +118,29 @@ func TestPasskeyLimit(t *testing.T) {
 	}
 }
 
-func TestCleanupDeletedUserPasskeys(t *testing.T) {
+func TestCleanupDeletedUserItems(t *testing.T) {
 	e := newTestEnv(t)
 	f := e.newFixture(t)
 	e.newPasskey(t, f, "cred-1")
 	e.newPasskey(t, f, "cred-2")
+	_, err := e.EnableMFA(e.ctx, f.user.ID, f.user.AuthVersion, []byte("sealed"), 1, []string{"h1", "h2"})
+	must(t, err)
 
 	// Nothing happens while the user exists.
-	n, err := e.CleanupDeletedUserPasskeys(e.ctx, f.user.ID)
+	n, err := e.CleanupDeletedUserItems(e.ctx, f.user.ID)
 	must(t, err)
 	if n != 0 {
 		t.Fatalf("cleanup of an existing user deleted %d passkeys", n)
 	}
 
 	must(t, e.DeleteUser(e.ctx, f.user.ID))
-	n, err = e.CleanupDeletedUserPasskeys(e.ctx, f.user.ID)
+	n, err = e.CleanupDeletedUserItems(e.ctx, f.user.ID)
 	must(t, err)
-	if n != 2 {
-		t.Fatalf("cleanup deleted %d passkeys, want 2", n)
+	if n != 5 { // 2 passkeys, the TOTP item, 2 recovery codes
+		t.Fatalf("cleanup deleted %d items, want 5", n)
+	}
+	if _, err := e.GetTOTP(e.ctx, f.user.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("TOTP left: %v", err)
 	}
 	if list, err := e.ListPasskeys(e.ctx, f.user.ID); err != nil || len(list) != 0 {
 		t.Fatalf("passkeys left: %v, %v", list, err)
