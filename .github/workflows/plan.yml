@@ -86,13 +86,17 @@ jobs:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
+      # Before the credentials, so the build (the branch's Makefile and Go
+      # code) runs without them. The plan itself runs the branch's HCL with
+      # the role, which is why the role can't read table items, logs or
+      # anything KMS protects (scripts/bootstrap-account.sh).
+      - name: Build Lambda packages
+        run: make package
+
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ vars[format('AWS_PLAN_ROLE_ARN_{0}', matrix.vars_suffix)] }}
           aws-region: ${{ env.REGION }}
-
-      - name: Build Lambda packages
-        run: make package
 
       - name: Terraform init
         working-directory: infra/envs/${{ matrix.environment }}

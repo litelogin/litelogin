@@ -296,7 +296,7 @@ That creates:
 
 - a GitHub OIDC identity provider in the account
 - a `litelogin-deploy` role, which only jobs in the matching GitHub environment can assume
-- a read-only `litelogin-plan` role, for pull requests
+- a read-only `litelogin-plan` role, for pull requests. Code from a pull request's branch runs with it, so it can't read table items, logs, queue messages or WAF samples, or use KMS keys
 - with `--github`, the GitHub environment (main branch only, approval required for `prod`) and the variables the workflows read
 
 No AWS credentials are stored in GitHub.

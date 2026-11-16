@@ -12,7 +12,8 @@
 #   - litelogin-deploy: assumed by GitHub Actions jobs that run in the
 #     matching GitHub environment; AdministratorAccess
 #   - litelogin-plan: assumed by pull request jobs; ReadOnlyAccess plus the
-#     state lock files
+#     state lock files, with reading table items, logs, queue messages and
+#     WAF samples, and using KMS keys, denied
 #
 # With --github, also configures the GitHub repository (requires `gh auth login`):
 #   - a GitHub environment named after the LiteLogin environment, limited to
@@ -284,11 +285,44 @@ ensure_roles() {
 
   # Plan: pull request jobs. Read-only, except for the state lock files that
   # `tofu plan` writes and deletes.
+  #
+  # Code from the pull request's branch runs with this role (the plan runs
+  # its HCL), so anyone who can push a branch has its permissions. It must
+  # never read what users stored: ReadOnlyAccess includes reading table
+  # items, log events, queue messages and WAF sampled requests, so those are
+  # denied for the whole account (each environment has its own account), and
+  # so is every use of a KMS key's material. A plan only describes resources,
+  # so it needs none of them.
   ensure_role "$PLAN_ROLE" \
     "GitHub Actions read-only plans for ${REPO} pull requests" \
     "$(trust_policy "${SUB_PREFIX}:pull_request")"
   aws iam attach-role-policy --role-name "$PLAN_ROLE" \
     --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+  aws iam put-role-policy --role-name "$PLAN_ROLE" --policy-name deny-data --policy-document "$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "DenyReadingData",
+    "Effect": "Deny",
+    "Action": [
+      "dynamodb:GetItem", "dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:Scan",
+      "dynamodb:PartiQLSelect", "dynamodb:ExecuteStatement", "dynamodb:BatchExecuteStatement",
+      "dynamodb:GetRecords", "dynamodb:GetShardIterator", "dynamodb:ExportTableToPointInTime",
+      "logs:GetLogEvents", "logs:FilterLogEvents", "logs:StartQuery", "logs:GetQueryResults",
+      "logs:StartLiveTail", "logs:GetLogRecord", "logs:Unmask",
+      "kms:Decrypt", "kms:ReEncryptFrom", "kms:ReEncryptTo", "kms:GenerateDataKey",
+      "kms:GenerateDataKeyWithoutPlaintext", "kms:GenerateDataKeyPair",
+      "kms:GenerateDataKeyPairWithoutPlaintext", "kms:GenerateMac", "kms:Sign",
+      "sqs:ReceiveMessage",
+      "wafv2:GetSampledRequests",
+      "secretsmanager:GetSecretValue", "ssm:GetParameter", "ssm:GetParameters",
+      "ssm:GetParametersByPath"
+    ],
+    "Resource": "*"
+  }]
+}
+EOF
+)"
   aws iam put-role-policy --role-name "$PLAN_ROLE" --policy-name state-locks --policy-document "$(cat <<EOF
 {
   "Version": "2012-10-17",
