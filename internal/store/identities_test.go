@@ -115,20 +115,20 @@ func TestFederationState(t *testing.T) {
 
 	s := st()
 	must(t, e.CreateFederationState(e.ctx, s, 10*time.Minute))
-	_, err := e.ConsumeFederationState(e.ctx, s.Hash, FedSignIn, "other.login.example.com")
+	_, err := e.ConsumeFederationState(e.ctx, s.Hash, "other.login.example.com", FedSignIn)
 	wantErr(t, err, ErrNotFound)
-	got, err := e.ConsumeFederationState(e.ctx, s.Hash, FedSignIn, f.host)
+	got, err := e.ConsumeFederationState(e.ctx, s.Hash, f.host, FedSignIn)
 	must(t, err)
 	if got.Hash != s.Hash || got.Nonce != "n" || got.Verifier != "v" || got.BrowserHash != "b" || got.Authz != "client_id=x" || got.IDPID != "google" {
 		t.Fatalf("ConsumeFederationState = %+v", got)
 	}
-	_, err = e.ConsumeFederationState(e.ctx, s.Hash, FedSignIn, f.host)
+	_, err = e.ConsumeFederationState(e.ctx, s.Hash, f.host, FedSignIn)
 	wantErr(t, err, ErrNotFound)
 
 	expired := st()
 	must(t, e.CreateFederationState(e.ctx, expired, 10*time.Minute))
 	e.clock.Advance(11 * time.Minute)
-	_, err = e.ConsumeFederationState(e.ctx, expired.Hash, FedSignIn, f.host)
+	_, err = e.ConsumeFederationState(e.ctx, expired.Hash, f.host, FedSignIn)
 	wantErr(t, err, ErrNotFound)
 
 	incomplete := st()
@@ -145,8 +145,139 @@ func TestRaceConsumeFederationState(t *testing.T) {
 		Nonce: "n", Verifier: "v", BrowserHash: "b"}
 	must(t, e.CreateFederationState(e.ctx, s, time.Minute))
 	errs := race(func(int) error {
-		_, err := e.ConsumeFederationState(e.ctx, s.Hash, FedSignIn, f.host)
+		_, err := e.ConsumeFederationState(e.ctx, s.Hash, f.host, FedSignIn)
 		return err
 	})
 	oneWinner(t, errs, ErrNotFound)
+}
+
+func TestLinkAndUnlinkIdentities(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	must(t, e.CreateIDP(e.ctx, newTestIDP(f, "google")))
+	must(t, e.CreateIDP(e.ctx, newTestIDP(f, "work")))
+	u := f.user // has a password
+
+	must(t, e.LinkIdentity(e.ctx, u.ID, u.AuthVersion, &Identity{PoolID: f.pool.ID, IDPID: "google", Subject: "g1", Email: "a@gmail.com"}))
+	got, ident, err := e.GetUserByIdentity(e.ctx, f.pool.ID, "google", "g1")
+	must(t, err)
+	if got.ID != u.ID || got.IdentityCount != 1 || got.AuthVersion != u.AuthVersion || ident.Email != "a@gmail.com" {
+		t.Fatalf("after linking: %+v %+v", got, ident)
+	}
+	// One account per provider per user, and a provider account links one user.
+	wantErr(t, e.LinkIdentity(e.ctx, u.ID, u.AuthVersion, &Identity{PoolID: f.pool.ID, IDPID: "google", Subject: "g2"}), ErrAlreadyExists)
+	other := e.newUser(t, f.pool.ID, "other@example.com")
+	wantErr(t, e.LinkIdentity(e.ctx, other.ID, other.AuthVersion, &Identity{PoolID: f.pool.ID, IDPID: "google", Subject: "g1"}), ErrIdentityTaken)
+	// A revoked session can't link, nor can a user of another pool.
+	wantErr(t, e.LinkIdentity(e.ctx, u.ID, u.AuthVersion+1, &Identity{PoolID: f.pool.ID, IDPID: "work", Subject: "w1"}), ErrConditionFailed)
+	wantErr(t, e.LinkIdentity(e.ctx, u.ID, u.AuthVersion, &Identity{PoolID: f.pool.ID, IDPID: "missing", Subject: "w1"}), ErrIDPNotFound)
+
+	// With a password, the last identity can go; unlinking revokes.
+	v, err := e.UnlinkIdentity(e.ctx, u.ID, "google", false)
+	must(t, err)
+	if v != u.AuthVersion+1 {
+		t.Fatalf("auth_version after unlinking = %d", v)
+	}
+	if _, _, err := e.GetUserByIdentity(e.ctx, f.pool.ID, "google", "g1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("still linked: %v", err)
+	}
+	_, err = e.UnlinkIdentity(e.ctx, u.ID, "google", false)
+	wantErr(t, err, ErrNotFound)
+	// The provider account is free for someone else.
+	must(t, e.LinkIdentity(e.ctx, other.ID, other.AuthVersion, &Identity{PoolID: f.pool.ID, IDPID: "google", Subject: "g1"}))
+}
+
+func TestUnlinkLastSignInMethod(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	must(t, e.CreateIDP(e.ctx, newTestIDP(f, "google")))
+	u := newIdentityUser(f, "social@example.com")
+	must(t, e.CreateUserWithIdentity(e.ctx, u, &Identity{IDPID: "google", Subject: "g1"}))
+
+	// No password and one identity: it can't be unlinked, except by force.
+	_, err := e.UnlinkIdentity(e.ctx, u.ID, "google", false)
+	wantErr(t, err, ErrLastSignInMethod)
+
+	// A first password, once.
+	v, err := e.SetFirstPassword(e.ctx, u.ID, "hash-1")
+	must(t, err)
+	if v != u.AuthVersion+1 {
+		t.Fatalf("auth_version = %d", v)
+	}
+	_, err = e.SetFirstPassword(e.ctx, u.ID, "hash-2")
+	wantErr(t, err, ErrConditionFailed)
+	got, err := e.GetUser(e.ctx, u.ID)
+	must(t, err)
+	if got.PasswordHash != "hash-1" || got.PasswordUpdatedAt == 0 {
+		t.Fatalf("password not set: %+v", got)
+	}
+	_, err = e.UnlinkIdentity(e.ctx, u.ID, "google", false)
+	must(t, err)
+
+	// An administrator may remove the last one.
+	u2 := newIdentityUser(f, "social2@example.com")
+	must(t, e.CreateUserWithIdentity(e.ctx, u2, &Identity{IDPID: "google", Subject: "g2"}))
+	_, err = e.UnlinkIdentity(e.ctx, u2.ID, "google", true)
+	must(t, err)
+	got, err = e.GetUser(e.ctx, u2.ID)
+	must(t, err)
+	if got.IdentityCount != 0 {
+		t.Fatalf("identity_count = %d", got.IdentityCount)
+	}
+	must(t, e.DeleteUser(e.ctx, u2.ID))
+}
+
+// Concurrent unlinks of a passwordless user's last two identities leave
+// one.
+func TestRaceUnlinkLastTwoIdentities(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	must(t, e.CreateIDP(e.ctx, newTestIDP(f, "google")))
+	must(t, e.CreateIDP(e.ctx, newTestIDP(f, "work")))
+	u := newIdentityUser(f, "two@example.com")
+	must(t, e.CreateUserWithIdentity(e.ctx, u, &Identity{IDPID: "google", Subject: "g"}))
+	must(t, e.LinkIdentity(e.ctx, u.ID, u.AuthVersion, &Identity{PoolID: f.pool.ID, IDPID: "work", Subject: "w"}))
+
+	errs := race(func(i int) error {
+		_, err := e.UnlinkIdentity(e.ctx, u.ID, []string{"google", "work"}[i%2], false)
+		return err
+	})
+	ok := 0
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case !errors.Is(err, ErrLastSignInMethod) && !errors.Is(err, ErrNotFound):
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("%d unlinks succeeded, want 1: %v", ok, errs)
+	}
+	ids, err := e.ListIdentities(e.ctx, u.ID)
+	must(t, err)
+	got, err := e.GetUser(e.ctx, u.ID)
+	must(t, err)
+	if len(ids) != 1 || got.IdentityCount != 1 {
+		t.Fatalf("%d identities, identity_count %d", len(ids), got.IdentityCount)
+	}
+}
+
+func TestFederationStateForUser(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	st := &FederationState{Hash: newHash(), Purpose: FedLink, Host: f.host, PoolID: f.pool.ID, IDPID: "google",
+		Nonce: "n", Verifier: "v", BrowserHash: "b"}
+	if err := e.CreateFederationState(e.ctx, st, time.Minute); err == nil {
+		t.Fatal("a link without a user and session was stored")
+	}
+	st.UserID, st.SessionHash, st.AuthVersion = f.user.ID, newHash(), 3
+	must(t, e.CreateFederationState(e.ctx, st, time.Minute))
+	_, err := e.ConsumeFederationState(e.ctx, st.Hash, f.host, FedSignIn)
+	wantErr(t, err, ErrNotFound)
+	got, err := e.ConsumeFederationState(e.ctx, st.Hash, f.host, FedLink)
+	must(t, err)
+	if got.UserID != f.user.ID || got.SessionHash != st.SessionHash || got.AuthVersion != 3 {
+		t.Fatalf("ConsumeFederationState = %+v", got)
+	}
 }

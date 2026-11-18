@@ -91,7 +91,11 @@ type Store interface {
 	GetUserByIdentity(ctx context.Context, poolID, idpID, sub string) (*store.User, *store.Identity, error)
 	RecordIdentityUse(ctx context.Context, userID, idpID string) error
 	CreateFederationState(ctx context.Context, f *store.FederationState, lifetime time.Duration) error
-	ConsumeFederationState(ctx context.Context, hash, purpose, host string) (*store.FederationState, error)
+	ConsumeFederationState(ctx context.Context, hash, host string, purposes ...string) (*store.FederationState, error)
+	ListIdentities(ctx context.Context, userID string) ([]store.Identity, error)
+	LinkIdentity(ctx context.Context, userID string, authVersion int64, id *store.Identity) error
+	UnlinkIdentity(ctx context.Context, userID, idpID string, force bool) (int64, error)
+	SetFirstPassword(ctx context.Context, userID, hash string) (int64, error)
 }
 
 var _ Store = (*store.Store)(nil)
@@ -211,6 +215,10 @@ func (s *Server) Handler() http.Handler {
 	page("POST /account/2fa/disable", s.disableMFA)
 	page("POST /account/2fa/recovery-codes", s.replaceRecoveryCodes)
 	page("POST /account/verify", s.confirmIdentity)
+	page("POST /account/password/set", s.setPassword)
+	page("POST /account/identities/link", s.startLink)
+	page("POST /account/identities/confirm", s.startConfirm)
+	page("POST /account/identities/remove", s.unlinkIdentity)
 	page("GET /federation/start", s.federationStart)
 	page("GET "+FederationCallbackPath, s.federationCallback)
 	// Passkey ceremonies, called by the pages' script. They answer JSON.
@@ -451,6 +459,15 @@ type pageData struct {
 	// IDPs are the identity providers to sign in with, on the sign-in
 	// and registration pages.
 	IDPs []idpButton
+	// Identities are the signed-in user's linked provider accounts, and
+	// Linkable the host's providers they can link. NoPassword: the user
+	// has no password. FedConfirm: they must sign in again through a
+	// linked account before a sensitive change (no password, no recent
+	// sign-in).
+	Identities []identityView
+	Linkable   []linkOption
+	NoPassword bool
+	FedConfirm bool
 	// Script is the page's script: the passkey script on the login and
 	// account pages, if the host allows passkeys.
 	Script template.JS

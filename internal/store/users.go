@@ -240,6 +240,37 @@ func (s *Store) ChangePassword(ctx context.Context, userID, newHash string) (int
 		map[string]types.AttributeValue{":hash": avS(newHash), ":now": avN(now)})
 }
 
+// SetFirstPassword gives a user without a password (one who signed up
+// through an identity provider) a password, and increments auth_version,
+// as changing it does. It returns ErrConditionFailed if the user has a
+// password already or isn't active.
+func (s *Store) SetFirstPassword(ctx context.Context, userID, hash string) (int64, error) {
+	out, err := s.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                aws.String(s.config),
+		Key:                      userKey(userID),
+		UpdateExpression:         aws.String("SET #password_hash = :hash, #password_updated_at = :now, #updated_at = :now ADD #auth_version :one, #version :one"),
+		ConditionExpression:      aws.String("attribute_exists(PK) AND attribute_not_exists(#password_hash) AND #status = :active"),
+		ExpressionAttributeNames: names("password_hash", "password_updated_at", "updated_at", "auth_version", "version", "status"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":hash": avS(hash), ":now": avN(s.unix()), ":one": avN(1), ":active": avS(UserActive),
+		},
+		ReturnValues: types.ReturnValueUpdatedNew,
+	})
+	if ok, _ := conditionFailed(err); ok {
+		return 0, ErrConditionFailed
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: set password: %w", err)
+	}
+	var v struct {
+		AuthVersion int64 `dynamodbav:"auth_version"`
+	}
+	if err := unmarshal(out.Attributes, &v); err != nil {
+		return 0, err
+	}
+	return v.AuthVersion, nil
+}
+
 // RevokeUserCredentials increments the user's auth_version ("logout
 // everywhere"). Every existing session, unredeemed code and refresh family
 // fails validation from this moment; the Worker cleans up afterwards.
@@ -344,11 +375,9 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 		return err
 	}
 	// The identities listed must be all of them.
-	cond, vals := "#email = :email AND attribute_not_exists(#identity_count)", map[string]types.AttributeValue{":email": avS(u.Email)}
-	if u.IdentityCount != 0 {
-		cond = "#email = :email AND #identity_count = :ids"
-		vals[":ids"] = avN(u.IdentityCount)
-	}
+	// (Unlinking the last one leaves identity_count at 0.)
+	cond := "#email = :email AND (attribute_not_exists(#identity_count) OR #identity_count = :ids)"
+	vals := map[string]types.AttributeValue{":email": avS(u.Email), ":ids": avN(u.IdentityCount)}
 	if int64(len(ids)) != u.IdentityCount {
 		return ErrConditionFailed // an identity is being linked or unlinked
 	}

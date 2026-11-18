@@ -745,6 +745,35 @@ func (a *App) userCommand() *cobra.Command {
 		},
 	)
 
+	identities := group("identity", "Manage a user's linked identity provider accounts",
+		&cobra.Command{
+			Use: "list USER", Short: "List a user's linked identity provider accounts", Args: cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				var out struct{ Items []admin.Identity }
+				if _, err := a.get(cmd, "/v1/users/"+esc(args[0])+"/identities", &out); err != nil {
+					return err
+				}
+				return printList(a.Stdout, a.output, out.Items, "", "idp_id", "subject", "email", "created_at", "last_used_at")
+			},
+		},
+		&cobra.Command{
+			Use:   "unlink USER IDP",
+			Short: "Unlink a user's identity provider account and log them out everywhere",
+			Long: "Unlink a user's account at an identity provider and log them out everywhere. Unlike on the account page, " +
+				"this can remove the user's last way to sign in: without a password, they can then only get back in by " +
+				"resetting their password by email.",
+			Args: cobra.ExactArgs(2),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if _, err := a.do(cmd, Request{Method: http.MethodDelete,
+					Path: "/v1/users/" + esc(args[0]) + "/identities/" + esc(args[1]), IdempotencyKey: a.NewID()}); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(a.Stdout, "unlinked %s from user %s\n", args[1], args[0])
+				return nil
+			},
+		},
+	)
+
 	var resetHost string
 	resetMFA := &cobra.Command{
 		Use: "reset-2fa USER", Short: "Turn off a user's two-factor sign-in and log them out everywhere", Args: cobra.ExactArgs(1),
@@ -779,7 +808,7 @@ func (a *App) userCommand() *cobra.Command {
 		upd,
 		actionCommand[admin.User](a, "disable USER", "Disable a user and log them out everywhere", "/v1/users/", "/disable"),
 		actionCommand[admin.User](a, "enable USER", "Enable a disabled user", "/v1/users/", "/enable"),
-		sessions, revoke, passkeys, resetMFA,
+		sessions, revoke, passkeys, identities, resetMFA,
 		deleteCommand(a, "delete USER", "Delete a user", "/v1/users/", "user"),
 	)
 }

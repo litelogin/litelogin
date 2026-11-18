@@ -138,17 +138,23 @@ func (s *Server) federationStart(w http.ResponseWriter, r *http.Request, t *tena
 		s.fail(w, r, t, err)
 		return
 	}
+	s.toProvider(w, r, t, p, &store.FederationState{Purpose: store.FedSignIn, Authz: authz})
+}
+
+// toProvider stores st, for this host and provider, with a new state,
+// nonce and PKCE verifier, binds it to this browser, and redirects to the
+// provider.
+func (s *Server) toProvider(w http.ResponseWriter, r *http.Request, t *tenant, p *store.IDP, st *store.FederationState) {
+	ctx := r.Context()
 	m, err := s.Federation.Discover(ctx, p.Issuer)
 	if err != nil {
 		s.providerError(w, r, t, p, "discovery", err)
 		return
 	}
 	state, browser, nonce, verifier := crypto.NewToken(), crypto.NewToken(), crypto.NewToken(), crypto.NewToken()
-	err = s.Store.CreateFederationState(ctx, &store.FederationState{
-		Hash: crypto.HashToken(state), Purpose: store.FedSignIn, Host: t.Host, PoolID: t.Pool.ID, IDPID: p.ID,
-		Nonce: nonce, Verifier: verifier, BrowserHash: crypto.HashToken(browser), Authz: authz,
-	}, FedLifetime)
-	if err != nil {
+	st.Hash, st.Host, st.PoolID, st.IDPID = crypto.HashToken(state), t.Host, t.Pool.ID, p.ID
+	st.Nonce, st.Verifier, st.BrowserHash = nonce, verifier, crypto.HashToken(browser)
+	if err := s.Store.CreateFederationState(ctx, st, FedLifetime); err != nil {
 		s.fail(w, r, t, err)
 		return
 	}
@@ -157,10 +163,11 @@ func (s *Server) federationStart(w http.ResponseWriter, r *http.Request, t *tena
 	if len(scopes) == 0 {
 		scopes = defaultIDPScopes
 	}
-	http.Redirect(w, r, federation.AuthURL(m, federation.AuthRequest{
+	to := federation.AuthURL(m, federation.AuthRequest{
 		ClientID: p.ClientID, RedirectURI: s.link(t, FederationCallbackPath, nil), Scopes: scopes,
 		State: state, Nonce: nonce, Verifier: verifier,
-	}), http.StatusSeeOther)
+	})
+	http.Redirect(w, r, to, http.StatusSeeOther) //nolint:gosec // the provider's https authorization endpoint, from its checked discovery document
 }
 
 // fedExpired sends the browser back to sign in again: the state is used,
@@ -187,7 +194,7 @@ func (s *Server) federationCallback(w http.ResponseWriter, r *http.Request, t *t
 		s.fedExpired(w, r, "expired")
 		return
 	}
-	st, err := s.Store.ConsumeFederationState(ctx, crypto.HashToken(state), store.FedSignIn, t.Host)
+	st, err := s.Store.ConsumeFederationState(ctx, crypto.HashToken(state), t.Host, store.FedSignIn, store.FedLink, store.FedConfirm)
 	if errors.Is(err, store.ErrNotFound) || err == nil && st.PoolID != t.Pool.ID {
 		s.fedExpired(w, r, "expired")
 		return
@@ -210,6 +217,10 @@ func (s *Server) federationCallback(w http.ResponseWriter, r *http.Request, t *t
 	if q.Get("error") != "" {
 		// Cancelled at the provider, or refused there.
 		s.federationFailed("denied")
+		if st.Purpose != store.FedSignIn {
+			http.Redirect(w, r, "/account?n=fed_cancelled", http.StatusSeeOther)
+			return
+		}
 		s.render(w, r, t, http.StatusUnauthorized, "login", pageData{
 			Title: "Sign in", Error: "Signing in with " + p.Name + " was cancelled.", Authz: st.Authz, Script: pageScript(t),
 		})
@@ -238,7 +249,14 @@ func (s *Server) federationCallback(w http.ResponseWriter, r *http.Request, t *t
 		s.providerError(w, r, t, p, "id_token", err)
 		return
 	}
-	s.federatedSignIn(w, r, t, p, claims, st.Authz)
+	switch st.Purpose {
+	case store.FedLink:
+		s.finishLink(w, r, t, p, claims, st)
+	case store.FedConfirm:
+		s.finishConfirm(w, r, t, p, claims, st)
+	default:
+		s.federatedSignIn(w, r, t, p, claims, st.Authz)
+	}
 }
 
 // mfaEvidence reports whether the provider's ID token shows that the user
@@ -319,7 +337,8 @@ func (s *Server) federatedSignIn(w http.ResponseWriter, r *http.Request, t *tena
 // msgNoLinkedAccount is shown when the provider account isn't linked and
 // can't sign up: registration is off, or the email is registered already.
 // It's the same either way, so it doesn't say which emails have accounts.
-const msgNoLinkedAccount = "There's no account here linked to your %s account. If you already have one, sign in with your email and password."
+const msgNoLinkedAccount = "There's no account here linked to your %s account. If you already have one, sign in another way; " +
+	"you can link them on your account page."
 
 // federatedSignUp creates a user for a provider account that isn't linked
 // to one, with the email the provider gave. It's never linked to an

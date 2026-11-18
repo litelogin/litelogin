@@ -260,7 +260,7 @@ A user who lost both their authenticator app and their recovery codes needs an a
 
 ### Social sign-in
 
-Social sign-in is being built ([#37](https://github.com/litelogin/litelogin/issues/37)). OpenID Connect providers (Google, Microsoft and others) work: the sign-in and registration pages show a "Continue with" link for each provider a host lists, and a first sign-in creates the account when the host allows registration. GitHub and Apple providers can be configured but aren't shown yet, and existing accounts can't be linked to a provider yet: a provider account whose email is already registered can't sign in.
+Social sign-in is being built ([#37](https://github.com/litelogin/litelogin/issues/37)). OpenID Connect providers (Google, Microsoft and others) work: the sign-in and registration pages show a "Continue with" link for each provider a host lists, and a first sign-in creates the account when the host allows registration. Users with an account link providers from their account page: a provider account whose email is already registered isn't linked automatically. GitHub and Apple providers can be configured but aren't shown yet. `litelogin user identity list USER` shows a user's linked accounts, and `user identity unlink USER IDP` removes one and logs them out everywhere.
 
 Each org registers its own app with each provider, with the callback URL of every login host of the pool as a redirect URI: `https://HOST/federation/callback`.
 

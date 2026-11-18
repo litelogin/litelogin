@@ -30,7 +30,9 @@ type User struct {
 	LockedUntil       string `json:"locked_until,omitempty"`
 	// MFAEnabled: the user signs in with a password and an authenticator
 	// app.
-	MFAEnabled     bool   `json:"mfa_enabled"`
+	MFAEnabled bool `json:"mfa_enabled"`
+	// Identities is how many identity provider accounts are linked.
+	Identities     int64  `json:"identities"`
 	MFALockedUntil string `json:"mfa_locked_until,omitempty"`
 	CreatedAt      string `json:"created_at"`
 	UpdatedAt      string `json:"updated_at,omitempty"`
@@ -41,7 +43,7 @@ func userJSON(u *store.User) User {
 	set := u.PasswordHash != ""
 	return User{ID: u.ID, PoolID: u.PoolID, Email: u.Email, EmailVerified: u.EmailVerified, Status: u.Status,
 		PasswordSet: &set, PasswordUpdatedAt: timestamp(u.PasswordUpdatedAt), LockedUntil: timestamp(u.LockedUntil),
-		MFAEnabled: u.MFA, MFALockedUntil: timestamp(u.MFALockedUntil),
+		MFAEnabled: u.MFA, MFALockedUntil: timestamp(u.MFALockedUntil), Identities: u.IdentityCount,
 		CreatedAt: timestamp(u.CreatedAt), UpdatedAt: timestamp(u.UpdatedAt), Version: u.Version}
 }
 
@@ -568,6 +570,61 @@ func (s *Server) deletePasskey(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if _, err := s.Store.RevokeUserCredentials(r.Context(), id); err != nil {
+		return err
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+// Identity is the API representation of a user's account at an identity
+// provider.
+type Identity struct {
+	IDPID string `json:"idp_id"`
+	// Subject is the user's ID at the provider.
+	Subject    string `json:"subject"`
+	Email      string `json:"email,omitempty"`
+	CreatedAt  string `json:"created_at"`
+	LastUsedAt string `json:"last_used_at,omitempty"`
+}
+
+func (s *Server) listIdentities(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathValue(r, "user")
+	if err != nil {
+		return err
+	}
+	if _, err := s.Store.GetUser(r.Context(), id); err != nil {
+		return err
+	}
+	ids, err := s.Store.ListIdentities(r.Context(), id)
+	if err != nil {
+		return err
+	}
+	out := list[Identity]{Items: make([]Identity, 0, len(ids))}
+	for _, i := range ids {
+		out.Items = append(out.Items, Identity{IDPID: i.IDPID, Subject: i.Subject, Email: i.Email,
+			CreatedAt: timestamp(i.CreatedAt), LastUsedAt: timestamp(i.LastUsedAt)})
+	}
+	writeJSON(w, http.StatusOK, out)
+	return nil
+}
+
+// unlinkIdentity unlinks a user's account at a provider and revokes their
+// sessions and refresh tokens. Unlike the account page, it may remove the
+// user's last way to sign in: they can still reset their password by
+// email, and an administrator may mean to lock them out of the provider.
+func (s *Server) unlinkIdentity(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathValue(r, "user")
+	if err != nil {
+		return err
+	}
+	idp, err := pathValue(r, "idp")
+	if err != nil {
+		return err
+	}
+	if !store.ValidIDPID(idp) {
+		return errNotFound("identity provider " + idp + " isn't linked to user " + id)
+	}
+	if _, err := s.Store.UnlinkIdentity(r.Context(), id, idp, true); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -465,6 +465,41 @@ func TestUsers(t *testing.T) {
 		t.Fatalf("unknown user: %q", errOut)
 	}
 
+	// Linked identities: list, and unlink (which revokes).
+	ctx := context.Background()
+	up, err := e.store.GetPool(ctx, u.PoolID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.CreateIDP(ctx, &store.IDP{ID: "google", PoolID: up.ID, OrgID: up.OrgID, Type: store.IDPTypeOIDC,
+		Name: "Google", Issuer: "https://accounts.google.com", ClientID: "id", ClientSecret: []byte("sealed")}); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ = e.store.GetUser(ctx, u.ID)
+	if err := e.store.LinkIdentity(ctx, u.ID, stored.AuthVersion, &store.Identity{PoolID: up.ID, IDPID: "google", Subject: "g-1", Email: "a@gmail.example"}); err != nil {
+		t.Fatal(err)
+	}
+	var ids struct{ Items []admin.Identity }
+	e.json(&ids, "", "user", "identity", "list", u.ID)
+	if len(ids.Items) != 1 || ids.Items[0].IDPID != "google" || ids.Items[0].Subject != "g-1" || ids.Items[0].Email != "a@gmail.example" {
+		t.Fatalf("identity list: %+v", ids)
+	}
+	var withIDs admin.User
+	e.json(&withIDs, "", "user", "get", u.ID)
+	if withIDs.Identities != 1 {
+		t.Fatalf("user get: identities = %d", withIDs.Identities)
+	}
+	if out := e.run("", "user", "identity", "unlink", u.ID, "google"); !strings.Contains(out, "unlinked google") {
+		t.Fatalf("identity unlink: %s", out)
+	}
+	after, _ = e.store.GetUser(ctx, u.ID)
+	if after.AuthVersion != stored.AuthVersion+1 || after.IdentityCount != 0 {
+		t.Fatalf("unlinking didn't revoke: %+v", after)
+	}
+	if _, errOut, code := e.try("", "user", "identity", "unlink", u.ID, "google"); code == 0 || !strings.Contains(errOut, "not_found") {
+		t.Fatalf("unlinking again: %q", errOut)
+	}
+
 	e.run("", "user", "delete", u.ID)
 	if _, errOut, code := e.try("", "user", "get", u.ID); code == 0 || !strings.Contains(errOut, "not_found") {
 		t.Fatalf("deleted user: %q", errOut)
