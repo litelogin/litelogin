@@ -13,9 +13,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -165,6 +167,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /{$}", a.handleHome)
 	mux.HandleFunc("GET /login", a.handleLogin)
 	mux.HandleFunc("GET "+a.cfg.redirectURL.Path, a.handleCallback)
+	mux.HandleFunc("GET /claims", a.handleClaims)
 	return securityHeaders(mux)
 }
 
@@ -175,6 +178,16 @@ func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
 		page.User = s.user
 	}
 	render(w, http.StatusOK, "home", page)
+}
+
+// handleClaims shows the signed-in user's ID token claims.
+func (a *app) handleClaims(w http.ResponseWriter, r *http.Request) {
+	s := a.sessions.get(a.sessionID(r))
+	if s == nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	render(w, http.StatusOK, "claims", struct{ User *user }{s.user})
 }
 
 // handleLogin starts a sign-in: it sends the browser to the issuer with a
@@ -243,17 +256,23 @@ func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, http.StatusBadRequest, "The ID token is for another sign-in.")
 		return
 	}
+	var raw json.RawMessage
+	if err := idToken.Claims(&raw); err != nil {
+		a.fail(w, http.StatusBadGateway, "The ID token's claims can't be read.")
+		return
+	}
 	var claims struct {
 		Email string `json:"email"`
 	}
-	if err := idToken.Claims(&claims); err != nil {
+	var pretty bytes.Buffer
+	if err := json.Unmarshal(raw, &claims); err != nil || json.Indent(&pretty, raw, "", "  ") != nil {
 		a.fail(w, http.StatusBadGateway, "The ID token's claims can't be read.")
 		return
 	}
 
 	// A new session ID on sign-in, so one set before it (by anyone) can't
 	// be used to ride on this one.
-	newID := a.sessions.signIn(id, &user{Subject: idToken.Subject, Email: claims.Email, RawIDToken: rawIDToken})
+	newID := a.sessions.signIn(id, &user{Subject: idToken.Subject, Email: claims.Email, Claims: pretty.String(), RawIDToken: rawIDToken})
 	a.setSessionCookie(w, newID)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -294,8 +313,10 @@ func securityHeaders(next http.Handler) http.Handler {
 
 // user is a signed-in user.
 type user struct {
-	Subject    string
-	Email      string
+	Subject string
+	Email   string
+	// Claims is the ID token's payload, as indented JSON.
+	Claims     string
 	RawIDToken string
 }
 
@@ -442,10 +463,18 @@ var pages = template.Must(template.New("").Parse(`
 {{define "home"}}{{template "top"}}
 {{if .User}}
 <p>Signed in as <strong>{{or .User.Email .User.Subject}}</strong>.</p>
+<p><a href="/claims">Your ID token's claims</a></p>
 {{else}}
 <p>You're not signed in.</p>
 <p><a href="/login">Sign in</a></p>
 {{end}}
+{{template "bottom"}}{{end}}
+
+{{define "claims"}}{{template "top"}}
+<h2>ID token claims</h2>
+<p>The issuer signed these claims about <strong>{{or .User.Email .User.Subject}}</strong>, and the app verified them at sign-in.</p>
+<pre>{{.User.Claims}}</pre>
+<p><a href="/">Home</a></p>
 {{template "bottom"}}{{end}}
 
 {{define "error"}}{{template "top"}}
