@@ -1,18 +1,21 @@
-// Package main is the Go example: a small web app that signs users in with
-// LiteLogin, using github.com/coreos/go-oidc/v3 and golang.org/x/oauth2. It
-// runs the authorization code flow with PKCE, state and nonce, keeps a
-// server-side session, shows the ID token's claims, and signs out with
-// RP-initiated logout.
+// Package main is a small web app that lets people sign in with LiteLogin.
+// It's meant to be read as much as run, so everything lives in this one
+// file, using github.com/coreos/go-oidc/v3 and golang.org/x/oauth2.
 //
-// It's configured with environment variables; README.md has the setup.
+// You'll find the authorization code flow with PKCE, state and nonce, a
+// session kept on the server, a page showing the ID token's claims, and a
+// logout that signs you out of LiteLogin too (RP-initiated logout).
+//
+// Everything is set with environment variables. README.md walks through
+// the setup.
 //
 //	ISSUER_URL     the login host, e.g. https://acme.login.example.com (required)
 //	CLIENT_ID      the client's ID (required)
-//	CLIENT_SECRET  the client's secret (leave unset for a public client)
+//	CLIENT_SECRET  the client's secret (leave it unset for a public client)
 //	REDIRECT_URL   a registered redirect URI (default http://localhost:3000/callback)
 //	POST_LOGOUT_REDIRECT_URL
 //	               a registered post-logout redirect URI, e.g. http://localhost:3000/
-//	               (optional: without it, logout ends on the issuer's sign-in page)
+//	               (optional: without it, logout ends on LiteLogin's sign-in page)
 //	LISTEN_ADDR    the address to listen on (default localhost:3000)
 package main
 
@@ -41,13 +44,15 @@ import (
 
 const (
 	sessionCookie = "example_session"
-	// loginTimeout is how long a sign-in may take, from /login to the callback.
+	// loginTimeout is how long we wait between sending someone off to sign
+	// in and seeing them come back. Ten minutes is plenty to type a
+	// password or find a passkey.
 	loginTimeout = 10 * time.Minute
-	// sessionLifetime is how long the app keeps a user signed in. It's the
-	// app's own session: it doesn't follow the ID token's expiry.
+	// sessionLifetime is how long someone stays signed in to this app. It's
+	// the app's own session, so it doesn't care when the ID token expires.
 	sessionLifetime = 8 * time.Hour
-	// maxPendingLogins limits the sign-ins one browser can have in progress,
-	// e.g. in several tabs.
+	// maxPendingLogins caps how many sign-ins one browser can have going at
+	// once, say from a few open tabs, so one session can't grow forever.
 	maxPendingLogins = 5
 )
 
@@ -70,6 +75,7 @@ func run() error {
 		return err
 	}
 	srv := &http.Server{Addr: cfg.addr, Handler: a.routes(), ReadHeaderTimeout: 10 * time.Second}
+	// On Ctrl+C, give requests that are in flight a few seconds to finish.
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -83,18 +89,20 @@ func run() error {
 	return nil
 }
 
-// config is the app's settings.
+// config holds the settings from the environment.
 type config struct {
 	issuer       string
 	clientID     string
 	clientSecret string
 	redirectURL  *url.URL
-	// postLogoutRedirectURL is where the issuer sends the browser after
-	// logout, or "".
+	// postLogoutRedirectURL is where LiteLogin should send the browser after
+	// logout. If it's empty, we don't ask for one.
 	postLogoutRedirectURL string
 	addr                  string
 }
 
+// loadConfig reads the settings. It takes getenv instead of calling
+// os.Getenv itself, so the tests can hand it whatever they like.
 func loadConfig(getenv func(string) string) (config, error) {
 	cfg := config{
 		issuer:       getenv("ISSUER_URL"),
@@ -113,7 +121,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" {
 		return cfg, fmt.Errorf("REDIRECT_URL %q isn't an absolute http(s) URL with a path", redirect)
 	}
-	// The app serves its callback on this path, beside its own pages.
+	// The callback is served on this path, right next to the app's own
+	// pages, so it can't take one of theirs. Braces would be read as a
+	// ServeMux wildcard, so those are out too.
 	switch u.Path {
 	case "/", "/login", "/claims", "/logout":
 		return cfg, fmt.Errorf("REDIRECT_URL's path %s is one of the app's pages: use another, such as /callback", u.Path)
@@ -134,30 +144,36 @@ func loadConfig(getenv func(string) string) (config, error) {
 	return cfg, nil
 }
 
-// app is the web app: its OpenID Connect client and its sessions.
+// app is the web app itself: the OpenID Connect client plus the sessions.
 type app struct {
 	cfg      config
 	http     *http.Client
 	oauth    *oauth2.Config
 	verifier *oidc.IDTokenVerifier
-	// endSession is the issuer's end_session_endpoint, or "".
+	// endSession is the issuer's logout endpoint, from discovery. It's
+	// empty if the issuer doesn't have one.
 	endSession string
-	// requireIss is whether the issuer sends iss with authorization
-	// responses (RFC 9207), so a response without it is rejected.
+	// requireIss is true when the issuer promises to send iss back with
+	// every authorization response (RFC 9207). Then a response without it
+	// is suspicious, so we turn it away.
 	requireIss bool
-	// secure is whether the app is served over https, so its cookie is
-	// marked Secure.
+	// secure is true when the app is served over https, which is when its
+	// cookie can be marked Secure.
 	secure   bool
 	sessions *sessionStore
 }
 
-// newApp discovers the issuer's endpoints and keys. client makes every
-// request to the issuer.
+// newApp reads the issuer's discovery document, which tells us its
+// endpoints and where its signing keys are. Every request to the issuer
+// goes through client, which is how the test points the app at a LiteLogin
+// running inside the test.
 func newApp(ctx context.Context, cfg config, client *http.Client) (*app, error) {
 	provider, err := oidc.NewProvider(oidc.ClientContext(ctx, client), cfg.issuer)
 	if err != nil {
 		return nil, fmt.Errorf("discovery: %w", err)
 	}
+	// go-oidc doesn't expose these two, so we read them from the
+	// discovery document ourselves.
 	var meta struct {
 		EndSession   string `json:"end_session_endpoint"`
 		IssParameter bool   `json:"authorization_response_iss_parameter_supported"`
@@ -183,11 +199,13 @@ func newApp(ctx context.Context, cfg config, client *http.Client) (*app, error) 
 	}, nil
 }
 
-// home is the app's home page, on the redirect URL's origin.
+// home is the URL of the app's home page. We build it from the redirect
+// URL, since that's the address people actually reach the app on.
 func (a *app) home() string {
 	return (&url.URL{Scheme: a.cfg.redirectURL.Scheme, Host: a.cfg.redirectURL.Host, Path: "/"}).String()
 }
 
+// routes wires up the pages. The callback goes wherever REDIRECT_URL says.
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", a.handleHome)
@@ -198,6 +216,7 @@ func (a *app) routes() http.Handler {
 	return securityHeaders(mux)
 }
 
+// handleHome shows who's signed in, or a link to sign in.
 func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
 	s := a.sessions.get(a.sessionID(r))
 	page := struct {
@@ -210,7 +229,8 @@ func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
 	render(w, http.StatusOK, "home", page)
 }
 
-// handleClaims shows the signed-in user's ID token claims.
+// handleClaims shows what's in the signed-in user's ID token. If nobody is
+// signed in there's nothing to show, so we send them home.
 func (a *app) handleClaims(w http.ResponseWriter, r *http.Request) {
 	s := a.sessions.get(a.sessionID(r))
 	if s == nil {
@@ -220,8 +240,9 @@ func (a *app) handleClaims(w http.ResponseWriter, r *http.Request) {
 	render(w, http.StatusOK, "claims", struct{ User *user }{s.user})
 }
 
-// handleLogin starts a sign-in: it sends the browser to the issuer with a
-// fresh state, nonce and PKCE verifier, which it keeps in the session.
+// handleLogin starts a sign-in. It makes a fresh state, nonce and PKCE
+// verifier, keeps them in this browser's session, and sends the browser
+// off to LiteLogin.
 func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 	p := pendingLogin{
 		state:    rand.Text(),
@@ -235,20 +256,22 @@ func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, authURL, http.StatusSeeOther)
 }
 
-// handleCallback finishes a sign-in: it checks the response against the
-// sign-in this browser started, exchanges the code, verifies the ID token
-// and its nonce, and signs the user in with a new session.
+// handleCallback is where LiteLogin sends the browser back. Before we trust
+// anything in the response, we make sure it belongs to a sign-in this
+// browser started. Then we trade the code for tokens, check the ID token
+// and its nonce, and sign the user in with a brand new session.
 func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	id := a.sessionID(r)
-	// The state must be one this browser's session issued. Taking it
-	// removes it, so each response is used once.
+	// First, the state has to match a sign-in this browser really started.
+	// takePending also removes it, so nobody can replay the same response.
 	p, ok := a.sessions.takePending(id, q.Get("state"))
 	if !ok {
 		a.fail(w, http.StatusBadRequest, "This sign-in response doesn't match a sign-in started in this browser, or it expired.")
 		return
 	}
-	// RFC 9207: the response must come from the issuer this app uses.
+	// RFC 9207: make sure the response came from our issuer, and not from
+	// some other one the browser was talking to.
 	if iss := q.Get("iss"); (a.requireIss || iss != "") && iss != a.cfg.issuer {
 		a.fail(w, http.StatusBadRequest, "This sign-in response came from another issuer.")
 		return
@@ -281,11 +304,14 @@ func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, http.StatusBadGateway, "The ID token isn't valid.")
 		return
 	}
-	// Verify doesn't check the nonce: it must be the one this sign-in sent.
+	// Verify leaves the nonce to us. It has to be the one we sent for this
+	// sign-in, or the ID token might be replayed from another one.
 	if subtle.ConstantTimeCompare([]byte(idToken.Nonce), []byte(p.nonce)) != 1 {
 		a.fail(w, http.StatusBadRequest, "The ID token is for another sign-in.")
 		return
 	}
+	// Keep the claims just as LiteLogin sent them (same order, same
+	// numbers) for the claims page, and pick out the email for the home page.
 	var raw json.RawMessage
 	if err := idToken.Claims(&raw); err != nil {
 		a.fail(w, http.StatusBadGateway, "The ID token's claims can't be read.")
@@ -300,18 +326,19 @@ func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A new session ID on sign-in, so one set before it (by anyone) can't
-	// be used to ride on this one.
+	// Start a brand new session instead of reusing the one from before
+	// sign-in. If someone planted a session ID in this browser beforehand,
+	// it's now worthless (that's session fixation).
 	newID := a.sessions.signIn(id, &user{Subject: idToken.Subject, Email: claims.Email, Claims: pretty.String(), RawIDToken: rawIDToken})
 	a.setSessionCookie(w, newID)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// handleLogout signs the user out of the app, then sends the browser to
-// the issuer's end_session_endpoint to end the issuer's session too
-// (OpenID Connect RP-Initiated Logout). id_token_hint says who is signing
-// out and from which client, and the issuer returns the browser to the
-// post-logout redirect URI, if one is configured.
+// handleLogout signs the user out of this app, then sends the browser on
+// to LiteLogin's end_session_endpoint so they're signed out there too
+// (OpenID Connect RP-Initiated Logout). id_token_hint tells LiteLogin who
+// is signing out and from which client. If there's a post-logout redirect
+// URI, LiteLogin sends the browser back there when it's done.
 func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	id := a.sessionID(r)
@@ -320,13 +347,16 @@ func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	// The form's token shows the request came from the app's own page.
+	// The token in the form shows the request came from our own page, and
+	// not from some other site posting here.
 	if subtle.ConstantTimeCompare([]byte(r.PostFormValue("csrf")), []byte(s.csrf)) != 1 {
 		a.fail(w, http.StatusForbidden, "The sign-out request didn't come from this app's page.")
 		return
 	}
 	a.sessions.delete(id)
 	a.clearSessionCookie(w)
+	// If the issuer has no logout endpoint, signing out of the app is all
+	// we can do.
 	if a.endSession == "" {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
@@ -346,7 +376,7 @@ func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, u.String(), http.StatusSeeOther)
 }
 
-// sessionID returns the session cookie's value, or "".
+// sessionID returns the session cookie's value, or "" if there isn't one.
 func (a *app) sessionID(r *http.Request) string {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		return c.Value
@@ -355,26 +385,29 @@ func (a *app) sessionID(r *http.Request) string {
 }
 
 func (a *app) setSessionCookie(w http.ResponseWriter, id string) {
-	// Secure whenever the app is served over https. Plain http is only for
-	// running on loopback, where LiteLogin allows http redirect URIs.
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure is set over https
+	// Secure is only set over https. Plain http is just for running on
+	// your own machine, the one place LiteLogin accepts http redirect URIs.
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure is set whenever we're on https
 		Name: sessionCookie, Value: id, Path: "/",
 		HttpOnly: true, Secure: a.secure, SameSite: http.SameSiteLaxMode,
 	})
 }
 
+// clearSessionCookie tells the browser to forget the session cookie.
 func (a *app) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // as in setSessionCookie
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // same reasoning as setSessionCookie
 		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: a.secure, SameSite: http.SameSiteLaxMode,
 	})
 }
 
+// fail shows an error page with a short explanation.
 func (a *app) fail(w http.ResponseWriter, status int, msg string) {
 	render(w, status, "error", struct{ Message string }{msg})
 }
 
-// securityHeaders keeps the pages out of caches and frames.
+// securityHeaders keeps the pages out of caches, since they show who's
+// signed in, and stops other sites from framing them.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -387,32 +420,35 @@ func securityHeaders(next http.Handler) http.Handler {
 
 // ---- Sessions ----
 
-// user is a signed-in user.
+// user is someone who has signed in.
 type user struct {
 	Subject string
 	Email   string
-	// Claims is the ID token's payload, as indented JSON.
+	// Claims is the ID token's payload, indented so it's easy to read.
 	Claims     string
 	RawIDToken string
 }
 
-// pendingLogin is a sign-in that has been sent to the issuer.
+// pendingLogin is a sign-in we've sent to the issuer and are waiting to
+// hear back about.
 type pendingLogin struct {
 	state, nonce, verifier string
 	expires                time.Time
 }
 
+// session is one browser's session. Until someone signs in, it holds the
+// sign-ins in progress. After that, it holds the signed-in user.
 type session struct {
 	expires time.Time
-	pending []pendingLogin // before sign-in
-	user    *user          // after sign-in
-	// csrf is the token the app's logout form carries, after sign-in.
+	pending []pendingLogin // sign-ins still in progress
+	user    *user          // set once someone has signed in
+	// csrf is the token the logout form carries. It's set at sign-in.
 	csrf string
 }
 
-// sessionStore keeps sessions in memory, by ID. A real app would use a
-// shared store, such as a database, so that sessions survive restarts and
-// work across instances.
+// sessionStore keeps sessions in memory, by ID. That's fine for an
+// example, but a real app would use a shared store such as a database, so
+// sessions survive a restart and work across several instances.
 type sessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -422,7 +458,8 @@ func newSessionStore() *sessionStore {
 	return &sessionStore{sessions: map[string]*session{}}
 }
 
-// get returns the signed-in session with this ID, or nil.
+// get returns the session with this ID if someone is signed in to it, or
+// nil.
 func (s *sessionStore) get(id string) *session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -433,8 +470,9 @@ func (s *sessionStore) get(id string) *session {
 	return sess
 }
 
-// addPending records a sign-in in the session with this ID, creating the
-// session if there's none, and returns the session's ID.
+// addPending adds a sign-in to the session with this ID, starting a new
+// session if there isn't one yet, and returns the session's ID. Sign-ins
+// that have expired get dropped along the way.
 func (s *sessionStore) addPending(id string, p pendingLogin) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -453,17 +491,18 @@ func (s *sessionStore) addPending(id string, p pendingLogin) string {
 		}
 	}
 	if len(kept) >= maxPendingLogins {
-		kept = kept[1:] // drop the oldest
+		kept = kept[1:] // too many at once, so let the oldest go
 	}
 	sess.pending = append(kept, p)
+	// Keep the session around at least as long as this sign-in.
 	if sess.expires.Before(p.expires) {
 		sess.expires = p.expires
 	}
 	return id
 }
 
-// takePending removes and returns the session's unexpired sign-in with
-// this state.
+// takePending finds the sign-in with this state, removes it and returns
+// it. It reports false if there's no such sign-in, or if it has expired.
 func (s *sessionStore) takePending(id, state string) (pendingLogin, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -480,8 +519,8 @@ func (s *sessionStore) takePending(id, state string) (pendingLogin, bool) {
 	return pendingLogin{}, false
 }
 
-// signIn replaces the session with this ID by a new, signed-in one, and
-// returns the new session's ID.
+// signIn throws away the session with oldID and starts a new, signed-in
+// one in its place. It returns the new session's ID.
 func (s *sessionStore) signIn(oldID string, u *user) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -492,14 +531,16 @@ func (s *sessionStore) signIn(oldID string, u *user) string {
 	return id
 }
 
-// delete deletes the session with this ID.
+// delete removes the session with this ID.
 func (s *sessionStore) delete(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.sessions, id)
 }
 
-// live returns the unexpired session with this ID, or nil. s.mu is held.
+// live returns the session with this ID if it hasn't expired, or nil.
+// Expired sessions are removed as we come across them. The caller holds
+// s.mu.
 func (s *sessionStore) live(id string) *session {
 	sess, ok := s.sessions[id]
 	if !ok {
@@ -512,7 +553,8 @@ func (s *sessionStore) live(id string) *session {
 	return sess
 }
 
-// sweep deletes expired sessions. s.mu is held.
+// sweep clears out every expired session. It runs whenever a session is
+// created, so the map doesn't keep growing. The caller holds s.mu.
 func (s *sessionStore) sweep() {
 	now := time.Now()
 	for id, sess := range s.sessions {
@@ -524,6 +566,7 @@ func (s *sessionStore) sweep() {
 
 // ---- Pages ----
 
+// pages holds the HTML. It's inline so the whole example stays in one file.
 var pages = template.Must(template.New("").Parse(`
 {{define "top"}}<!doctype html>
 <html lang="en">
@@ -572,6 +615,7 @@ var pages = template.Must(template.New("").Parse(`
 {{template "bottom"}}{{end}}
 `))
 
+// render writes one of the pages, with the given status.
 func render(w http.ResponseWriter, status int, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
