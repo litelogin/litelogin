@@ -59,7 +59,7 @@ To build a binary, `go build -o dist/go-example ./examples/go` (`dist/` is ignor
 | `ISSUER_URL` | | The login host's issuer, exactly as its discovery document gives it, with no trailing slash. Required. |
 | `CLIENT_ID` | | The client's ID. Required. |
 | `CLIENT_SECRET` | | The client's secret. Leave it unset for a public client (`init --type public`): PKCE protects the code exchange. |
-| `REDIRECT_URL` | `http://localhost:3000/callback` | A registered redirect URI. The app serves its callback on this URL's path. |
+| `REDIRECT_URL` | `http://localhost:3000/callback` | A registered redirect URI. The app serves its callback on this URL's path, which can't be one of its pages (`/`, `/login`, `/claims`, `/logout`). |
 | `POST_LOGOUT_REDIRECT_URL` | | A registered post-logout redirect URI. Without it, logout ends on LiteLogin's sign-in page. |
 | `LISTEN_ADDR` | `localhost:3000` | Where the app listens. |
 

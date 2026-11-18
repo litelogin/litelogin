@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -111,6 +112,14 @@ func loadConfig(getenv func(string) string) (config, error) {
 	u, err := url.Parse(redirect)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" {
 		return cfg, fmt.Errorf("REDIRECT_URL %q isn't an absolute http(s) URL with a path", redirect)
+	}
+	// The app serves its callback on this path, beside its own pages.
+	switch u.Path {
+	case "/", "/login", "/claims", "/logout":
+		return cfg, fmt.Errorf("REDIRECT_URL's path %s is one of the app's pages: use another, such as /callback", u.Path)
+	}
+	if strings.ContainsAny(u.Path, "{}") {
+		return cfg, fmt.Errorf("REDIRECT_URL's path %s has braces: use a plain path, such as /callback", u.Path)
 	}
 	cfg.redirectURL = u
 	if v := getenv("POST_LOGOUT_REDIRECT_URL"); v != "" {

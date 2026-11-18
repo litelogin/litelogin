@@ -185,6 +185,43 @@ func TestSignInAndOut(t *testing.T) {
 	}
 }
 
+func TestLoadConfig(t *testing.T) {
+	base := map[string]string{"ISSUER_URL": "https://acme.login.example.com", "CLIENT_ID": "c"}
+	load := func(extra map[string]string) (config, error) {
+		return loadConfig(func(k string) string {
+			if v, ok := extra[k]; ok {
+				return v
+			}
+			return base[k]
+		})
+	}
+
+	cfg, err := load(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.redirectURL.String() != "http://localhost:3000/callback" || cfg.addr != "localhost:3000" ||
+		cfg.postLogoutRedirectURL != "" || cfg.clientSecret != "" {
+		t.Errorf("defaults: %+v", cfg)
+	}
+
+	for name, extra := range map[string]map[string]string{
+		"no issuer":               {"ISSUER_URL": ""},
+		"no client ID":            {"CLIENT_ID": ""},
+		"relative redirect":       {"REDIRECT_URL": "/callback"},
+		"redirect without a path": {"REDIRECT_URL": "https://app.example.com"},
+		"redirect on a page":      {"REDIRECT_URL": "https://app.example.com/login"},
+		"redirect on home":        {"REDIRECT_URL": "https://app.example.com/"},
+		"redirect with braces":    {"REDIRECT_URL": "https://app.example.com/{x}"},
+		"other scheme":            {"REDIRECT_URL": "com.example.app:/callback"},
+		"relative logout":         {"POST_LOGOUT_REDIRECT_URL": "/"},
+	} {
+		if _, err := load(extra); err == nil {
+			t.Errorf("%s: no error", name)
+		}
+	}
+}
+
 func newStore(t *testing.T, endpoint string) *store.Store {
 	t.Helper()
 	db := dynamodb.New(dynamodb.Options{
