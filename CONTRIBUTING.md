@@ -84,6 +84,8 @@ infra/
 test/
   e2e/           Sign-in with real relying-party libraries
   load/          Load tests against a deployed environment
+examples/
+  go/            A Go web app that signs in with LiteLogin
 scripts/         deploy.sh, account bootstrap and the argon2 benchmark
 .claude/skills/  The litelogin Claude Code skill: deploying and operating with the scripts and the CLI
 ```
@@ -105,6 +107,7 @@ Architecture.md describes the runtime design, and Datamodel.md the tables and ev
 | Fuzz | Host and email normalization, password hash verification | Go native fuzzing |
 | Store integration | Every access pattern, including failures and races | `make test-integration`, against DynamoDB Local |
 | End to end | Sign-in with `coreos/go-oidc` and `golang.org/x/oauth2` as the relying party | `test/e2e`, in `make test-integration` |
+| Example | The Go example app signing in and out | `examples/go`, in `make test-integration` |
 | Browser | Adding a passkey and signing in with it, through the pages' script, in headless Chrome with a virtual WebAuthn authenticator | `internal/web/browser_test.go`, in `make test-integration` (CI requires Chrome) |
 | Load | Sign-ins and refreshes at a fixed rate | `test/load` (its README) |
 
