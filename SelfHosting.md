@@ -258,6 +258,29 @@ Within 30 seconds (the Auth Lambda caches configuration that long), users withou
 
 A user who lost both their authenticator app and their recovery codes needs an administrator: check it's really them, then run `dist/litelogin user reset-2fa USER`. That turns it off, signs them out everywhere and emails them (pass `--host` if the org's default host isn't on their pool).
 
+### Social sign-in
+
+Social sign-in is being built ([#37](https://github.com/litelogin/litelogin/issues/37)). Identity providers can be configured now, but the sign-in pages don't show them yet.
+
+Each org registers its own app with each provider, with the callback URL of every login host of the pool as a redirect URI: `https://HOST/federation/callback`.
+
+| Provider | Where to register | `--type` | What it needs |
+| -- | -- | -- | -- |
+| Google | Google Cloud console, OAuth client ID (web application) | `oidc`, `--issuer https://accounts.google.com` | client ID and secret |
+| Microsoft | Microsoft Entra admin center, App registrations | `oidc`, `--issuer https://login.microsoftonline.com/TENANT/v2.0` | client ID and secret |
+| GitHub | GitHub settings, Developer settings, OAuth Apps | `github` | client ID and secret |
+| Apple | Apple Developer, Identifiers (a Services ID) and Keys (Sign in with Apple) | `apple` | the Services ID, team ID, key ID and the key's `.p8` file |
+
+Then add the provider to the pool, and show it on a host:
+
+```sh
+dist/litelogin idp create --pool POOL --id google --type oidc --name Google \
+  --issuer https://accounts.google.com --client-id CLIENT_ID --client-secret-file secret.txt
+dist/litelogin host update login.acme.com --idps google
+```
+
+Secrets are read from a file, or from stdin with `-`, so they stay out of shell history. They're encrypted with a KMS key that only the Auth Lambda can decrypt with, and are never shown again: `idp update POOL IDP --client-secret-file ...` replaces one. `idp get POOL IDP` lists the callback URLs to register.
+
 ## Monitoring
 
 - **Dashboard:** `tofu output dashboard` links to the environment's CloudWatch dashboard (Full only, or `dashboard = true`). It shows sign-ins, token issuance, latency (from the log, with Logs Insights), security events (such as reused refresh tokens), failures and background work.

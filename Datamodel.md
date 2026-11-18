@@ -45,6 +45,7 @@ erDiagram
         object theme
         boolean registration_enabled
         boolean passkeys_enabled
+        array idps
         number session_ttl
         number session_idle_ttl
     }
@@ -116,6 +117,23 @@ erDiagram
         number expires_at
     }
 
+    IDP {
+        string id
+        string pool_id
+        string type
+        string name
+        string issuer
+        string client_id
+        string client_secret
+        string apple_team_id
+        string apple_key_id
+        string apple_private_key
+        array scopes
+        array mfa_amr
+        array mfa_acr
+        string status
+    }
+
     SIGNING_KEY {
         string kid
         string status
@@ -131,6 +149,8 @@ erDiagram
     CLIENT }o--|| POOL : uses
     CLIENT }|--|{ LOGIN_HOST : "is on"
     POOL ||--o{ USER : contains
+    POOL ||--o{ IDP : "signs in with"
+    LOGIN_HOST }o--o{ IDP : shows
     USER ||--o{ SESSION : has
     USER ||--o{ AUTH_CODE : "authorized by"
     USER ||--o{ REFRESH_FAMILY : "granted"
@@ -151,13 +171,14 @@ erDiagram
 | ORG#{org} | POOL#{pool} |  |
 | ORG#{org} | LOGIN_HOST#{login_host} |  |
 | POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, mfa_required (omitted when false), created_at, updated_at, version, (while deleting) GSI2PK=WORK, GSI2SK=pool_deletion#{pool}, work_attempts, work_updated_at |
+| POOL#{pool} | IDP#{idp} | org_id, type=oidc\|github\|apple, name=Google, issuer=https://accounts.google.com (oidc), client_id, client_secret (encrypted with the identity provider KMS key; oidc and github), apple_team_id, apple_key_id, apple_private_key (encrypted; apple), scopes=[openid, email], mfa_amr, mfa_acr, status=active\|disabled, created_at, updated_at, version |
 | USER#{user} | DETAILS | pool_id, email=example@example.com, password_hash="$argon2id$v=19$m=19456,t=2,p=1$...", email_verified=true, status=active\|disabled, auth_version=1, failed_login_count, locked_until, password_updated_at, mfa=true (only with two-factor sign-in), mfa_failed_count, mfa_locked_until, created_at, updated_at, version, GSI1PK=POOL#{pool}, GSI1SK=EMAIL#{email} |
 | POOL#{pool}#EMAIL#{email} | EMAIL | user_id |
 | USER#{user} | TOTP | secret (encrypted with the MFA KMS key), last_step, created_at |
 | USER#{user} | RECOVERY#{code_hash} | created_at |
 | USER#{user} | PASSKEY#{passkey_id} | credential_id, rp_id, public_key (COSE), attestation_type, transports, aaguid, attachment, sign_count, backup_eligible, backup_state, name, created_at, last_used_at |
 | CLIENT#{client} | DETAILS | org_id, name=LiteLogin, description, status=active\|disabled, client_type=public\|confidential, client_secret_hash, token_endpoint_auth_method=none\|client_secret_basic\|client_secret_post, grant_types=[authorization_code, refresh_token], redirect_uris=[https://login.microsoftonline.com/common/oauth2/nativeclient], post_logout_redirect_uris=[], allowed_origins=[https://app.acme.com], allowed_scopes=[openid, email, offline_access], user_pool_id={pool} (the pool of the host it was created on; fixed), pkce_optional (absent = PKCE required; only on confidential clients), access_token_ttl=900, id_token_ttl=900, refresh_token_ttl=2592000, refresh_family_ttl=7776000, host_count=1, created_at, updated_at, version |
-| LOGIN_HOST#{login_host} | DETAILS | org_id, pool_id, type=default\|custom, status=pending\|verified\|removing, theme={...}, registration_enabled=true, passkeys_enabled=false, session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version, (while pending or removing) GSI2PK=WORK, GSI2SK=custom_domain#{login_host}, work_attempts, work_updated_at, work_last_error |
+| LOGIN_HOST#{login_host} | DETAILS | org_id, pool_id, type=default\|custom, status=pending\|verified\|removing, theme={...}, registration_enabled=true, passkeys_enabled=false, idps=[google, github] (omitted when empty), session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version, (while pending or removing) GSI2PK=WORK, GSI2SK=custom_domain#{login_host}, work_attempts, work_updated_at, work_last_error |
 | LOGIN_HOST#{login_host} | CLIENT#{client} | client_id |
 | CLIENT#{client} | LOGIN_HOST#{login_host} |  |
 | KEYS | KID#{kid} | status=next\|active\|retired, alg=RS256, kms_key_arn, public_jwk, created_at, activated_at, retired_at |
@@ -166,9 +187,10 @@ erDiagram
 - **Client secrets:** a client secret is a 256-bit random value, so it's stored as a SHA-256 hash (a slow password hash isn't needed) and compared in constant time. Public clients have no secret and `token_endpoint_auth_method=none`.
 - **Passkeys:** a user's WebAuthn credentials. `{passkey_id}` is the hex SHA-256 of the credential ID, because credential IDs can be up to 1,023 bytes and a sort key at most 1,024. `rp_id` is the login host the passkey was registered on; it works only there. Only the public key is stored. A user can have up to 20. Passkey items have no GSI keys and no `version`: adding one doesn't change the user item.
 - **Two-factor sign-in:** a user with `mfa=true` has an authenticator app (`TOTP`) and recovery codes. The TOTP secret is the one credential LiteLogin must read back, so it can't be hashed: it's encrypted with a KMS key only the Auth Lambda may use, with the encryption context `purpose=totp`, `pool_id`, `user_id`, so a secret copied to another user doesn't decrypt. `last_step` is the time step of the last code accepted; a code is accepted only for a later step, so each works once. Recovery codes are 120 random bits, so, like tokens, they're stored as a SHA-256 hash (of the code without hyphens, lowercase), and used by deleting them. `mfa_failed_count` and `mfa_locked_until` count wrong codes across sign-ins.
+- **Identity providers:** a pool's providers for social sign-in, in its own partition. `{idp}` is chosen by the admin (1 to 32 lowercase letters, digits and hyphens, such as `google`) because it appears in URLs; a pool has at most 20. Secrets the Auth Lambda must send to the provider can't be hashed: they're encrypted with a KMS key that the Admin Lambda may only encrypt with and the Auth Lambda only decrypt, with the encryption context `purpose=idp_secret`, `pool_id`, `idp_id`. `mfa_amr` and `mfa_acr` are the values in the provider's ID token that count as evidence of two factors. A login host's `idps` lists which of its pool's providers its sign-in page shows, in order (at most 10).
 - **`version`:** used for optimistic locking. Every admin update increments it, with the condition `version = :expected`.
 - **Login hosts:** a host belongs to an org and serves one of its pools. Every org has a default host, `{label}.login.example.com`, created with the org (with the org's default pool) and never removed; further hosts are custom domains. A custom host is `verified` only when both its certificate has been issued and its DNS (CNAME) points to LiteLogin. Only `verified` hosts serve requests.
-- **Host settings:** the theme, `registration_enabled`, `passkeys_enabled` and session lifetimes are the host's, and apply to every client on it: a host's pages and sessions are shared by its clients.
+- **Host settings:** the theme, `registration_enabled`, `passkeys_enabled`, `idps` and session lifetimes are the host's, and apply to every client on it: a host's pages and sessions are shared by its clients.
 - **Memberships:** a client is on a host when `LOGIN_HOST#{host}` / `CLIENT#{client}` exists (with the reverse item `CLIENT#{client}` / `LOGIN_HOST#{host}` for listing a client's hosts). Only clients of the host's org and pool can join it. A client is created on one host and is always on at least one: `host_count` counts its memberships, and removing the last one is refused.
 - **`allowed_origins`:** the browser origins allowed to call `/token` and `/userinfo` cross-origin (CORS). It is configured separately from `redirect_uris`, and is empty for clients that never call these endpoints from a browser.
 - **Signing keys:** private keys never leave KMS. Tokens are signed with the KMS `Sign` API (`RSASSA_PKCS1_V1_5_SHA_256`), and the table holds only the public JWK and the rotation state. KMS returns RSA signatures as raw bytes, which go straight into the JWT. If ES256 is ever added, note that KMS returns ECDSA signatures DER-encoded; they must be converted to the 64-byte `R || S` form that JWTs require.
@@ -474,7 +496,17 @@ Admin invites use the same token: the user is created without a password, and a 
 | Get user | GetItem `USER#{user}` / `DETAILS` |
 | Disable user | UpdateItem `USER#{user}` / `DETAILS` SET `status=disabled`, ADD `auth_version 1`. The Worker then runs the revocation cleanup. |
 | Delete user | TransactWriteItems deleting `USER#{user}` / `DETAILS` and `POOL#{pool}#EMAIL#{email}` / `EMAIL`. The Worker then runs the revocation cleanup. Every credential fails validation as soon as the user item is gone. |
-| Delete pool | Reject if any client or login host in the org uses it (Query the org's clients and hosts, BatchGetItem, check `user_pool_id` / `pool_id`). So an org's default pool, served by its default host, can't be deleted. Otherwise UpdateItem `POOL#{pool}` SET `status=deleting` and the GSI2 work attributes. Because user and client creation check `status = active` in their transactions, nothing new can be added after this point. A background job then pages through config GSI1 `GSI1PK=POOL#{pool}` deleting each user (as above), and finally deletes `POOL#{pool}` / `DETAILS` and `ORG#{org}` / `POOL#{pool}` |
+| Delete pool | Reject if any client or login host in the org uses it (Query the org's clients and hosts, BatchGetItem, check `user_pool_id` / `pool_id`). So an org's default pool, served by its default host, can't be deleted. Otherwise UpdateItem `POOL#{pool}` SET `status=deleting` and the GSI2 work attributes. Because user and client creation check `status = active` in their transactions, nothing new can be added after this point. A background job then pages through config GSI1 `GSI1PK=POOL#{pool}` deleting each user (as above), and finally deletes `POOL#{pool}` / `DETAILS`, `ORG#{org}` / `POOL#{pool}` and the pool's `IDP#` items in one transaction |
+
+### Admin: identity providers
+
+| Pattern | Operation |
+| -- | -- |
+| Create identity provider | Query `PK=POOL#{pool}`, `begins_with(SK, "IDP#")` and reject if the pool has 20. Encrypt the secrets (Admin Lambda: `kms:Encrypt` only). TransactWriteItems: Put `POOL#{pool}` / `IDP#{idp}`, condition `attribute_not_exists(PK)`; ConditionCheck `POOL#{pool}` / `DETAILS` `status = active AND org_id = :org`. |
+| List a pool's identity providers | Query `PK=POOL#{pool}`, `begins_with(SK, "IDP#")` (strongly consistent; sorted by ID) |
+| Get identity provider | GetItem `POOL#{pool}` / `IDP#{idp}`. Responses never include secrets, only whether they're set. |
+| Update identity provider | TransactWriteItems: Put `POOL#{pool}` / `IDP#{idp}` (secrets kept unless replaced; `type` never changes), condition `version = :expected`; ConditionCheck the pool `status = active` |
+| Delete identity provider | Reject if a login host of the pool lists it (Query the org's hosts, BatchGetItem, check `idps`). Otherwise DeleteItem, condition `attribute_exists(PK)`. A host updated in the moment between the check and the delete isn't detected; the sign-in pages ignore providers that no longer exist. |
 
 ### Admin: login hosts
 
@@ -484,7 +516,7 @@ Admin invites use the same token: the user is created without a password, and a 
 | List a client's hosts | Query `PK=CLIENT#{client}`, `begins_with(SK, "LOGIN_HOST#")`, then BatchGetItem the hosts |
 | List a host's clients | Query `PK=LOGIN_HOST#{host}`, `begins_with(SK, "CLIENT#")` |
 | Add custom host | TransactWriteItems: Put `LOGIN_HOST#{host}` / `DETAILS` (`org_id`, `pool_id`, `type=custom`, `status=pending`, settings, GSI2 work attributes), condition `attribute_not_exists(PK)`; Put `ORG#{org}` / `LOGIN_HOST#{host}`; ConditionCheck `POOL#{pool}` / `DETAILS` `status = active AND org_id = :org`. Hosts under the default host domain can't be added. |
-| Update host settings | UpdateItem `LOGIN_HOST#{host}` / `DETAILS` SET `theme`, `registration_enabled`, `passkeys_enabled`, `session_ttl`, `session_idle_ttl`, condition `version = :expected` |
+| Update host settings | TransactWriteItems: Update `LOGIN_HOST#{host}` / `DETAILS` SET `theme`, `registration_enabled`, `passkeys_enabled`, `idps` (REMOVE when empty), `session_ttl`, `session_idle_ttl`, condition `version = :expected AND pool_id = :pool`; ConditionCheck `POOL#{pool}` / `IDP#{idp}` `attribute_exists(PK)` for each listed provider, so a host only shows providers of its own pool. Adding a custom host checks its `idps` the same way. |
 | Verify custom host | When the certificate has been issued and the host's CNAME points to LiteLogin, UpdateItem SET `status=verified` and REMOVE the GSI2 attributes, condition `status = pending` |
 | Remove custom host | Reject the org's default host, and a host that still has clients (take them off first, so no client is left without a host). Otherwise UpdateItem SET `status=removing` and the GSI2 work attributes. The host stops serving within the config cache's lifetime (30 seconds), because only `verified` hosts resolve, and no client can join it. Once its CloudFront tenant and managed certificate have been removed, the Worker deletes the host and its org index item. |
 | Add client to host | GetItem the host and the client; reject unless they have the same org and pool. TransactWriteItems: Put `LOGIN_HOST#{host}` / `CLIENT#{client}` (condition `attribute_not_exists(PK)`; if it fails, the client is already on the host and nothing changes), Put the reverse item, ConditionCheck the host (`status <> removing`, same org and pool), Update the client ADD `host_count 1` (condition same org and pool). |

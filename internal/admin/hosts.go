@@ -3,6 +3,7 @@ package admin
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -32,6 +33,7 @@ type Host struct {
 	Theme               map[string]string `json:"theme"`
 	RegistrationEnabled bool              `json:"registration_enabled"`
 	PasskeysEnabled     bool              `json:"passkeys_enabled"`
+	IDPs                []string          `json:"idps"`
 	SessionTTL          int64             `json:"session_ttl"`
 	SessionIdleTTL      int64             `json:"session_idle_ttl"`
 	CreatedAt           string            `json:"created_at"`
@@ -54,7 +56,11 @@ func (s *Server) hostJSON(h *store.LoginHost) Host {
 	if theme == nil {
 		theme = map[string]string{}
 	}
-	return Host{Host: h.Host, OrgID: h.OrgID, UserPoolID: h.PoolID, Type: h.Type, Status: h.Status, Issuer: "https://" + h.Host,
+	idps := h.IDPs
+	if idps == nil {
+		idps = []string{}
+	}
+	return Host{Host: h.Host, IDPs: idps, OrgID: h.OrgID, UserPoolID: h.PoolID, Type: h.Type, Status: h.Status, Issuer: "https://" + h.Host,
 		Theme: theme, RegistrationEnabled: h.RegistrationEnabled, PasskeysEnabled: h.PasskeysEnabled, SessionTTL: h.SessionTTL, SessionIdleTTL: h.SessionIdleTTL,
 		CreatedAt: timestamp(h.CreatedAt), UpdatedAt: timestamp(h.UpdatedAt), Version: h.Version,
 		WorkAttempts: h.WorkAttempts, WorkUpdatedAt: timestamp(h.WorkUpdatedAt), WorkLastError: h.WorkLastError,
@@ -75,8 +81,11 @@ type HostSettingsInput struct {
 	Theme               *map[string]string `json:"theme"`
 	RegistrationEnabled *bool              `json:"registration_enabled"`
 	PasskeysEnabled     *bool              `json:"passkeys_enabled"`
-	SessionTTL          *int64             `json:"session_ttl"`
-	SessionIdleTTL      *int64             `json:"session_idle_ttl"`
+	// IDPs are the pool's identity providers the sign-in page shows, in
+	// order.
+	IDPs           *[]string `json:"idps"`
+	SessionTTL     *int64    `json:"session_ttl"`
+	SessionIdleTTL *int64    `json:"session_idle_ttl"`
 }
 
 func defaultHostSettings() store.HostSettings {
@@ -96,6 +105,15 @@ func (in *HostSettingsInput) apply(h *store.HostSettings) error {
 	}
 	if in.PasskeysEnabled != nil {
 		h.PasskeysEnabled = *in.PasskeysEnabled
+	}
+	if in.IDPs != nil {
+		if err := validHostIDPs(*in.IDPs); err != nil {
+			return err
+		}
+		h.IDPs = nil
+		if len(*in.IDPs) > 0 {
+			h.IDPs = slices.Clone(*in.IDPs)
+		}
 	}
 	if in.SessionTTL != nil {
 		h.SessionTTL = *in.SessionTTL

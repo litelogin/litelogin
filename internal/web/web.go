@@ -118,7 +118,10 @@ type Server struct {
 	Verifier *jwt.Verifier
 	// Secrets encrypts TOTP secrets.
 	Secrets secretbox.Box
-	Log     *slog.Logger
+	// IDPSecrets opens identity providers' secrets, which the Admin API
+	// sealed (secretbox.IDPContext).
+	IDPSecrets secretbox.Box
+	Log        *slog.Logger
 	// Metrics records the service's metrics; nil records none.
 	Metrics metrics.Recorder
 	Now     func() time.Time

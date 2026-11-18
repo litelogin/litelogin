@@ -440,7 +440,8 @@ func (s *Store) DeletePoolUsers(ctx context.Context, poolID string, limit int32)
 	return deleted, nil
 }
 
-// DeletePool deletes a pool whose users have all been deleted. The pool
+// DeletePool deletes a pool whose users have all been deleted, and its
+// identity providers. The pool
 // must be in the deleting state, and no client may use it.
 func (s *Store) DeletePool(ctx context.Context, poolID string) error {
 	pool, err := s.GetPool(ctx, poolID)
@@ -454,11 +455,19 @@ func (s *Store) DeletePool(ctx context.Context, poolID string) error {
 	if inUse {
 		return ErrPoolInUse
 	}
-	err = s.transact(ctx, []types.TransactWriteItem{
+	idps, err := s.poolIDPKeys(ctx, poolID)
+	if err != nil {
+		return err
+	}
+	items := []types.TransactWriteItem{
 		del(s.config, key(pfxPool+poolID, skDetails), "#status = :deleting", names("status"),
 			map[string]types.AttributeValue{":deleting": avS(PoolDeleting)}),
 		del(s.config, key(pfxOrg+pool.OrgID, pfxPool+poolID), "", nil, nil),
-	})
+	}
+	for _, k := range idps { // at most MaxIDPsPerPool
+		items = append(items, del(s.config, k, "", nil, nil))
+	}
+	err = s.transact(ctx, items)
 	if asTxFailure(err) != nil {
 		return ErrConditionFailed
 	}

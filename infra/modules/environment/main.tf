@@ -244,6 +244,18 @@ data "aws_iam_policy_document" "auth" {
     }
   }
 
+  # Opening identity providers' secrets, which the Admin Lambda sealed. The
+  # Auth Lambda can't encrypt with this key.
+  statement {
+    actions   = ["kms:Decrypt"]
+    resources = [module.kms.idp_key_arn]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:purpose"
+      values   = ["idp_secret"]
+    }
+  }
+
   # Sending only from the environment's address. identity/* because in the
   # SES sandbox the recipient's identity is authorized too.
   statement {
@@ -283,6 +295,7 @@ module "auth" {
     LITELOGIN_EMAIL_FROM           = module.email.from_address
     LITELOGIN_SES_CONFIGURATION    = module.email.configuration_set_name
     LITELOGIN_MFA_KEY_ID           = module.kms.mfa_key_arn
+    LITELOGIN_IDP_KEY_ID           = module.kms.idp_key_arn
   }, local.reduced_metrics ? { LITELOGIN_METRICS = "reduced" } : {})
 }
 
@@ -315,6 +328,7 @@ module "admin" {
   session_table_name  = module.tables.session_table_name
   session_table_arn   = module.tables.session_table_arn
   table_kms_key_arn   = module.kms.tables_key_arn
+  idp_key_arn         = module.kms.idp_key_arn
   default_host_domain = var.default_host_domain
 
   email_from                 = module.email.from_address

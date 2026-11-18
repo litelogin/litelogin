@@ -53,6 +53,16 @@ var (
 	// ErrDefaultHost: an org's default login host can't be removed.
 	ErrDefaultHost = errors.New("store: the org's default login host")
 
+	// ErrIDPInUse: a login host still lists the identity provider.
+	ErrIDPInUse = errors.New("store: identity provider is listed by a login host")
+
+	// ErrIDPNotFound: a login host lists an identity provider its pool
+	// doesn't have.
+	ErrIDPNotFound = errors.New("store: identity provider not found in the host's pool")
+
+	// ErrTooMany: the parent already has as many of these items as it may.
+	ErrTooMany = errors.New("store: limit reached")
+
 	// ErrConditionFailed: the item is no longer in the state the operation
 	// requires. For credentials: the user was disabled, revoked or deleted,
 	// or the credential expired.

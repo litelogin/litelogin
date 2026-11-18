@@ -58,6 +58,11 @@ variable "table_kms_key_arn" {
   default     = null
 }
 
+variable "idp_key_arn" {
+  description = "KMS key that seals identity providers' secrets; the Admin Lambda may only encrypt with it."
+  type        = string
+}
+
 variable "default_host_domain" {
   description = "Parent domain of default login hosts: a client's default host is {label}.{domain}."
   type        = string
@@ -156,6 +161,18 @@ data "aws_iam_policy_document" "admin" {
     }
   }
 
+  # Sealing identity providers' secrets. Only the Auth Lambda can open
+  # them.
+  statement {
+    actions   = ["kms:Encrypt"]
+    resources = [var.idp_key_arn]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:purpose"
+      values   = ["idp_secret"]
+    }
+  }
+
   statement {
     actions   = ["kms:GenerateMac", "kms:VerifyMac"]
     resources = [aws_kms_key.cursor.arn]
@@ -185,6 +202,7 @@ module "admin" {
     LITELOGIN_CONFIG_TABLE        = var.config_table_name
     LITELOGIN_SESSION_TABLE       = var.session_table_name
     LITELOGIN_CURSOR_KMS_KEY      = aws_kms_key.cursor.arn
+    LITELOGIN_IDP_KEY_ID          = var.idp_key_arn
     LITELOGIN_DEFAULT_HOST_DOMAIN = var.default_host_domain
     LITELOGIN_ROUTING_ENDPOINT    = var.custom_host_target
     LITELOGIN_EMAIL_FROM          = var.email_from
