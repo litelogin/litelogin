@@ -1,5 +1,5 @@
 // Package configcache caches configuration items (login hosts and their
-// clients, orgs, clients, pools) in the Lambda's memory, per the configuration caching
+// clients, orgs, clients, pools, identity providers) in the Lambda's memory, per the configuration caching
 // policy in Architecture.md: a change takes effect within the TTL.
 //
 // It is a performance optimization with a bounded delay, not a security
@@ -28,6 +28,7 @@ type Store interface {
 	GetPool(ctx context.Context, poolID string) (*store.Pool, error)
 	GetHostClient(ctx context.Context, host, clientID string) (*store.HostClient, error)
 	ListHostClients(ctx context.Context, host string) ([]string, error)
+	GetIDP(ctx context.Context, poolID, idpID string) (*store.IDP, error)
 }
 
 // Cache caches the config items in Store.
@@ -42,6 +43,7 @@ type Cache struct {
 	pools   table[store.Pool]
 	members table[store.HostClient]
 	lists   table[memberList]
+	idps    table[store.IDP]
 }
 
 type memberList struct{ ids []string }
@@ -78,6 +80,11 @@ func (c *Cache) Client(ctx context.Context, id string) (*store.Client, error) {
 // Pool returns a pool.
 func (c *Cache) Pool(ctx context.Context, id string) (*store.Pool, error) {
 	return c.pools.get(c, id, func() (*store.Pool, error) { return c.store.GetPool(ctx, id) })
+}
+
+// IDP returns an identity provider of a pool.
+func (c *Cache) IDP(ctx context.Context, poolID, idpID string) (*store.IDP, error) {
+	return c.idps.get(c, poolID+" "+idpID, func() (*store.IDP, error) { return c.store.GetIDP(ctx, poolID, idpID) })
 }
 
 // HostClient returns a client's membership of a login host, or

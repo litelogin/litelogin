@@ -13,5 +13,8 @@
 <button type="button" id="passkey-login-button" class="secondary">Sign in with a passkey</button>
 <p class="msg error" id="passkey-error" role="alert" hidden></p>
 </div>{{end}}
+{{if .IDPs}}<div class="or">or</div>
+{{range .IDPs}}<a class="idp" href="{{.Href}}">Continue with {{.Name}}</a>
+{{end}}{{end}}
 <div class="links"><a href="/password/forgot">Forgot your password?</a>{{if .Registration}}<a href="/register">Create an account</a>{{end}}</div>
 {{end}}

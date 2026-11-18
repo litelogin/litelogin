@@ -21,6 +21,7 @@ import (
 	"github.com/litelogin/litelogin/internal/configcache"
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/email"
+	"github.com/litelogin/litelogin/internal/federation"
 	"github.com/litelogin/litelogin/internal/httpx"
 	"github.com/litelogin/litelogin/internal/jwt"
 	"github.com/litelogin/litelogin/internal/logctx"
@@ -85,6 +86,12 @@ type Store interface {
 	RecordPendingMFAAttempt(ctx context.Context, hash string, maxAttempts int64) error
 	ConsumePendingMFA(ctx context.Context, hash string) error
 	DeletePendingMFA(ctx context.Context, hash string) error
+
+	CreateUserWithIdentity(ctx context.Context, u *store.User, id *store.Identity) error
+	GetUserByIdentity(ctx context.Context, poolID, idpID, sub string) (*store.User, *store.Identity, error)
+	RecordIdentityUse(ctx context.Context, userID, idpID string) error
+	CreateFederationState(ctx context.Context, f *store.FederationState, lifetime time.Duration) error
+	ConsumeFederationState(ctx context.Context, hash, purpose, host string) (*store.FederationState, error)
 }
 
 var _ Store = (*store.Store)(nil)
@@ -121,6 +128,9 @@ type Server struct {
 	// IDPSecrets opens identity providers' secrets, which the Admin API
 	// sealed (secretbox.IDPContext).
 	IDPSecrets secretbox.Box
+	// Federation talks to identity providers; nil turns social sign-in
+	// off.
+	Federation *federation.Client
 	Log        *slog.Logger
 	// Metrics records the service's metrics; nil records none.
 	Metrics metrics.Recorder
@@ -201,6 +211,8 @@ func (s *Server) Handler() http.Handler {
 	page("POST /account/2fa/disable", s.disableMFA)
 	page("POST /account/2fa/recovery-codes", s.replaceRecoveryCodes)
 	page("POST /account/verify", s.confirmIdentity)
+	page("GET /federation/start", s.federationStart)
+	page("GET "+FederationCallbackPath, s.federationCallback)
 	// Passkey ceremonies, called by the pages' script. They answer JSON.
 	page("POST /passkey/login/options", s.passkeyLoginOptions)
 	page("POST /passkey/login", s.passkeyLogin)
@@ -436,6 +448,9 @@ type pageData struct {
 	MinPassword  int
 	// PasskeysEnabled: the host allows passkeys.
 	PasskeysEnabled bool
+	// IDPs are the identity providers to sign in with, on the sign-in
+	// and registration pages.
+	IDPs []idpButton
 	// Script is the page's script: the passkey script on the login and
 	// account pages, if the host allows passkeys.
 	Script template.JS
@@ -458,6 +473,9 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, t *tenant, statu
 		d.Theme, d.Brand, d.Registration = t.Theme, t.Theme.Brand, t.Login.RegistrationEnabled
 		d.PasskeysEnabled = t.Login.PasskeysEnabled
 		d.CSRF = s.ensureCSRF(w, r)
+		if name == "login" || name == "register" {
+			d.IDPs = s.idpButtons(r.Context(), t, d.Authz)
+		}
 	} else {
 		d.Theme, d.Brand = DefaultTheme(), "LiteLogin"
 	}

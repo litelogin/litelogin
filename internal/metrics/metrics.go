@@ -43,6 +43,7 @@ const (
 	MFAEnabled            = "MFAEnabled"
 	MFAFailed             = "MFAFailed" // Reason: wrong_code, reused_code, locked, expired
 	MFALockout            = "MFALockout"
+	FederatedLoginFailed  = "FederatedLoginFailed" // Reason: discovery, exchange, id_token, denied, expired, other_browser, no_account, email_taken, no_email, inactive, unverified_email
 )
 
 // logOnly are the records written as plain log fields, not metrics: each

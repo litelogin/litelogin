@@ -44,6 +44,32 @@ func (s *countingStore) GetHostClient(_ context.Context, host, clientID string) 
 	}
 	return nil, store.ErrNotFound
 }
+func (s *countingStore) GetIDP(_ context.Context, poolID, idpID string) (*store.IDP, error) {
+	s.reads++
+	if poolID == "p" && idpID == "google" {
+		return &store.IDP{ID: idpID, PoolID: poolID, Name: "Google"}, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func TestIDP(t *testing.T) {
+	ctx := context.Background()
+	s := &countingStore{}
+	c := New(s, time.Minute)
+	for range 3 {
+		p, err := c.IDP(ctx, "p", "google")
+		if err != nil || p.Name != "Google" {
+			t.Fatalf("IDP = %+v, %v", p, err)
+		}
+		if _, err := c.IDP(ctx, "p", "github"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("IDP of an unknown provider: %v", err)
+		}
+	}
+	if s.reads != 2 {
+		t.Fatalf("%d reads, want 2", s.reads)
+	}
+}
+
 func (s *countingStore) ListHostClients(_ context.Context, host string) ([]string, error) {
 	s.reads++
 	if host == "h" {

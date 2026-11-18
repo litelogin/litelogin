@@ -143,7 +143,7 @@ func (a *App) orgCommand() *cobra.Command {
 	create.Flags().StringVar(&name, "name", "", "name (required)")
 	create.Flags().StringVar(&desc, "description", "", "description")
 	create.Flags().StringVar(&label, "host-label", "", "default login host label (default: from the name)")
-	hs.register(create)
+	hs.register(create, false)
 	_ = create.MarkFlagRequired("name")
 	idempotencyFlag(create, &key)
 
@@ -389,12 +389,16 @@ type hostSettingsFlags struct {
 	sessionTTL, idleTTL int64
 }
 
-func (f *hostSettingsFlags) register(cmd *cobra.Command) {
+// register adds the flags to cmd. A new org's pool has no identity
+// providers yet, so org create leaves out --idps (withIDPs false).
+func (f *hostSettingsFlags) register(cmd *cobra.Command, withIDPs bool) {
 	fl := cmd.Flags()
 	fl.StringToStringVar(&f.theme, "theme", nil, "theme, as key=value pairs (brand_name, primary_color, background_color, logo_url; replaces the theme)")
 	fl.BoolVar(&f.registration, "registration", true, "allow users to register on the login pages")
 	fl.BoolVar(&f.passkeys, "passkeys", false, "let users add passkeys and sign in with them")
-	fl.StringSliceVar(&f.idps, "idps", nil, `identity providers of the pool to show on the sign-in page, in order (replaces the list; "" for none)`)
+	if withIDPs {
+		fl.StringSliceVar(&f.idps, "idps", nil, `identity providers of the pool to show on the sign-in page, in order (replaces the list; "" for none)`)
+	}
 	fl.Int64Var(&f.sessionTTL, "session-ttl", 0, "login session lifetime in seconds")
 	fl.Int64Var(&f.idleTTL, "session-idle-ttl", 0, "login session idle timeout in seconds")
 }
@@ -414,7 +418,7 @@ func (f *hostSettingsFlags) body(cmd *cobra.Command) map[string]any {
 	if cmd.Flags().Changed("theme") {
 		body["theme"] = f.theme
 	}
-	if cmd.Flags().Changed("idps") {
+	if fl := cmd.Flags().Lookup("idps"); fl != nil && fl.Changed {
 		body["idps"] = append([]string{}, f.idps...) // [] clears the list
 	}
 	return body
@@ -558,7 +562,7 @@ clients to it with "litelogin host add-client".`,
 	}
 	add.Flags().StringVar(&org, "org", "", "org ID (required)")
 	add.Flags().StringVar(&pool, "pool", "", "user pool the host serves (default: the pool of the org's default host)")
-	addSettings.register(add)
+	addSettings.register(add, true)
 	_ = add.MarkFlagRequired("org")
 
 	get := &cobra.Command{
@@ -575,7 +579,7 @@ clients to it with "litelogin host add-client".`,
 			return update[admin.Host](a, cmd, hostPath(args[0]), updSettings.body(cmd))
 		},
 	}
-	updSettings.register(upd)
+	updSettings.register(upd, true)
 
 	remove := &cobra.Command{
 		Use: "remove HOST", Short: "Stop serving a custom login host and remove it (it must have no clients)", Args: cobra.ExactArgs(1),

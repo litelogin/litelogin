@@ -8,5 +8,8 @@
 <p class="hint">At least {{.MinPassword}} characters.</p>
 <button type="submit">Create account</button>
 </form>
+{{if .IDPs}}<div class="or">or</div>
+{{range .IDPs}}<a class="idp" href="{{.Href}}">Continue with {{.Name}}</a>
+{{end}}{{end}}
 <div class="links"><a href="/login">Already have an account? Sign in</a></div>
 {{end}}

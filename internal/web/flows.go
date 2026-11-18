@@ -23,6 +23,7 @@ var notices = map[string]string{
 	"signed_out_everywhere": "You're signed out everywhere: on every device and in every app.",
 	"email_changed":         "Your email address was changed. Sign in to continue.",
 	"mfa_expired":           "Signing in took too long, or too many codes were wrong. Sign in again.",
+	"fed_expired":           "Signing in took too long, or was started in another browser. Sign in again.",
 }
 
 const msgBadLogin = "Incorrect email or password."
@@ -153,11 +154,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request, t *tenant) {
 
 	if u.MFA {
 		// The password is right: the second step decides.
-		s.startSecondStep(w, r, t, u, authz)
+		s.startSecondStep(w, r, t, u, authz, nil)
 		return
 	}
 	if t.Pool.MFARequired {
-		s.startEnrollment(w, r, t, u, authz)
+		s.startEnrollment(w, r, t, u, authz, nil)
 		return
 	}
 	if err := s.startSession(w, r, t, u, amrPassword, 0); err != nil {
@@ -246,7 +247,7 @@ func (s *Server) registerForm(w http.ResponseWriter, r *http.Request, t *tenant)
 		s.fail(w, r, t, errUnavailable)
 		return
 	}
-	s.render(w, r, t, http.StatusOK, "register", pageData{Title: "Create an account"})
+	s.render(w, r, t, http.StatusOK, "register", pageData{Title: "Create an account", Authz: r.URL.Query().Get("authz")})
 }
 
 // register implements "Register with email and password" (Datamodel.md).

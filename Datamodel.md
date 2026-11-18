@@ -70,6 +70,14 @@ erDiagram
         number failed_login_count
         number locked_until
         number password_updated_at
+        number identity_count
+    }
+
+    IDENTITY {
+        string user_id
+        string idp_id
+        string sub
+        string email
     }
 
     SESSION {
@@ -151,6 +159,8 @@ erDiagram
     POOL ||--o{ USER : contains
     POOL ||--o{ IDP : "signs in with"
     LOGIN_HOST }o--o{ IDP : shows
+    USER ||--o{ IDENTITY : "signs in as"
+    IDP ||--o{ IDENTITY : vouches
     USER ||--o{ SESSION : has
     USER ||--o{ AUTH_CODE : "authorized by"
     USER ||--o{ REFRESH_FAMILY : "granted"
@@ -172,10 +182,12 @@ erDiagram
 | ORG#{org} | LOGIN_HOST#{login_host} |  |
 | POOL#{pool} | DETAILS | org_id, name=Default, description="My User Pool Description", status=active\|deleting, require_email_verified=false, mfa_required (omitted when false), created_at, updated_at, version, (while deleting) GSI2PK=WORK, GSI2SK=pool_deletion#{pool}, work_attempts, work_updated_at |
 | POOL#{pool} | IDP#{idp} | org_id, type=oidc\|github\|apple, name=Google, issuer=https://accounts.google.com (oidc), client_id, client_secret (encrypted with the identity provider KMS key; oidc and github), apple_team_id, apple_key_id, apple_private_key (encrypted; apple), scopes=[openid, email], mfa_amr, mfa_acr, status=active\|disabled, created_at, updated_at, version |
-| USER#{user} | DETAILS | pool_id, email=example@example.com, password_hash="$argon2id$v=19$m=19456,t=2,p=1$...", email_verified=true, status=active\|disabled, auth_version=1, failed_login_count, locked_until, password_updated_at, mfa=true (only with two-factor sign-in), mfa_failed_count, mfa_locked_until, created_at, updated_at, version, GSI1PK=POOL#{pool}, GSI1SK=EMAIL#{email} |
+| USER#{user} | DETAILS | pool_id, email=example@example.com, password_hash="$argon2id$v=19$m=19456,t=2,p=1$..." (absent for users who signed up through an identity provider), email_verified=true, status=active\|disabled, auth_version=1, failed_login_count, locked_until, password_updated_at, mfa=true (only with two-factor sign-in), mfa_failed_count, mfa_locked_until, identity_count (identities linked; omitted when none), created_at, updated_at, version, GSI1PK=POOL#{pool}, GSI1SK=EMAIL#{email} |
 | POOL#{pool}#EMAIL#{email} | EMAIL | user_id |
 | USER#{user} | TOTP | secret (encrypted with the MFA KMS key), last_step, created_at |
 | USER#{user} | RECOVERY#{code_hash} | created_at |
+| USER#{user} | IDENTITY#{idp} | pool_id, sub (the provider's identifier for the account), email (from the provider when linked; never synced), created_at, last_used_at |
+| POOL#{pool}#IDP#{idp}#SUB#{sub} | IDENTITY | user_id: a provider account's uniqueness in the pool, and how sign-in finds its user |
 | USER#{user} | PASSKEY#{passkey_id} | credential_id, rp_id, public_key (COSE), attestation_type, transports, aaguid, attachment, sign_count, backup_eligible, backup_state, name, created_at, last_used_at |
 | CLIENT#{client} | DETAILS | org_id, name=LiteLogin, description, status=active\|disabled, client_type=public\|confidential, client_secret_hash, token_endpoint_auth_method=none\|client_secret_basic\|client_secret_post, grant_types=[authorization_code, refresh_token], redirect_uris=[https://login.microsoftonline.com/common/oauth2/nativeclient], post_logout_redirect_uris=[], allowed_origins=[https://app.acme.com], allowed_scopes=[openid, email, offline_access], user_pool_id={pool} (the pool of the host it was created on; fixed), pkce_optional (absent = PKCE required; only on confidential clients), access_token_ttl=900, id_token_ttl=900, refresh_token_ttl=2592000, refresh_family_ttl=7776000, host_count=1, created_at, updated_at, version |
 | LOGIN_HOST#{login_host} | DETAILS | org_id, pool_id, type=default\|custom, status=pending\|verified\|removing, theme={...}, registration_enabled=true, passkeys_enabled=false, idps=[google, github] (omitted when empty), session_ttl=604800, session_idle_ttl=86400, created_at, updated_at, version, (while pending or removing) GSI2PK=WORK, GSI2SK=custom_domain#{login_host}, work_attempts, work_updated_at, work_last_error |
@@ -234,7 +246,8 @@ Holds short-lived authentication state: browser sessions, authorization codes, r
 | REFRESH_FAMILY#{family} | DETAILS | iss, client_id, pool_id, user_id, scope, auth_version, auth_time, amr (copied from the code), created_at, expires_at (absolute lifetime), GSI1PK=USER#{user}, GSI1SK=REFRESH_FAMILY#{created_at} |
 | REFRESH#{token_hash} | DETAILS | family_id, client_id, used_at, expires_at |
 | OTT#{token_hash} | DETAILS | purpose=verify_email\|reset_password\|change_email, pool_id, user_id, email, new_email, expires_at |
-| MFA#{pending_hash} | DETAILS | purpose=mfa_verify\|mfa_enroll\|mfa_setup, host, pool_id, user_id, auth_version, session_hash (setup only), authz (the pending /authorize request), secret (the new TOTP secret, encrypted; enroll and setup only), attempts, expires_at (now + 5 min) |
+| MFA#{pending_hash} | DETAILS | purpose=mfa_verify\|mfa_enroll\|mfa_setup, host, pool_id, user_id, auth_version, session_hash (setup only), authz (the pending /authorize request), secret (the new TOTP secret, encrypted; enroll and setup only), first_factor (["fed"] after an identity provider; absent after a password), attempts, expires_at (now + 5 min) |
+| FED#{state_hash} | DETAILS | purpose=fed_signin, host, pool_id, idp_id, nonce, verifier (PKCE), browser_hash (of the `__Host-litelogin_fed` cookie), authz (the pending /authorize request), expires_at (now + 10 min) |
 | WEBAUTHN#{challenge_hash} | DETAILS | purpose=passkey_register\|passkey_login, host, user_id and session_hash (registration only), data (the ceremony's WebAuthn session data), expires_at (now + 5 min) |
 | IDEMPOTENCY#{caller_hash}#{key} | DETAILS | request_hash, status=in_progress\|completed, response_status, response_body, expires_at (now + 24h) |
 
@@ -458,7 +471,16 @@ Admin invites use the same token: the user is created without a password, and a 
 | Sign in with a passkey | The assertion's `userHandle` is the user ID: GetItem `USER#{user}` / `DETAILS`, then GetItem `USER#{user}` / `PASSKEY#{passkey_id}`. After verifying, UpdateItem the passkey SET `sign_count`, `backup_state`, `last_used_at`, condition `attribute_exists(PK)` |
 | List a user's passkeys | Query `PK=USER#{user}`, `begins_with(SK, "PASSKEY#")` (strongly consistent) |
 | Rename or remove a passkey | UpdateItem SET `name`, or DeleteItem, `USER#{user}` / `PASSKEY#{passkey_id}`, condition `attribute_exists(PK)`. Removing one then revokes the user's credentials (see "Revoke everything for a user"); on the account page, the browser gets a new session. |
-| Delete a user | The Worker's revocation cleanup, once the user's sessions and refresh families are gone, queries the remaining items under `USER#{user}` (`PASSKEY#`, `TOTP`, `RECOVERY#`) and deletes them, but only if the user item no longer exists. Revoking sessions never removes them. |
+| Delete a user | The Worker's revocation cleanup, once the user's sessions and refresh families are gone, queries the remaining items under `USER#{user}` (`PASSKEY#`, `TOTP`, `RECOVERY#`, and any `IDENTITY#` left over) and deletes them, but only if the user item no longer exists. Revoking sessions never removes them. |
+
+### Social sign-in
+
+| Operation | DynamoDB |
+| -- | -- |
+| Start sign-in through an identity provider | GetItem `POOL#{pool}` / `IDP#{idp}` (through the config cache; it must be listed by the host and active). Put `FED#{state_hash}` / `DETAILS`, condition `attribute_not_exists(PK)` |
+| Finish sign-in through an identity provider | DeleteItem `FED#{state_hash}` / `DETAILS`, condition `purpose = :purpose AND host = :host AND expires_at > :now`, ReturnValues `ALL_OLD`: exactly one concurrent callback gets the state, so each works once. The cookie must hash to `browser_hash`. |
+| Find the user of a provider account | GetItem `POOL#{pool}#IDP#{idp}#SUB#{sub}` / `IDENTITY` → `user_id`; GetItem `USER#{user}` / `DETAILS` and `USER#{user}` / `IDENTITY#{idp}` (both strongly consistent). Then UpdateItem the identity SET `last_used_at`, condition `attribute_exists(PK)` |
+| Sign up through an identity provider | TransactWriteItems: Put `POOL#{pool}#IDP#{idp}#SUB#{sub}` / `IDENTITY` and `POOL#{pool}#EMAIL#{email}` / `EMAIL` (each `attribute_not_exists(PK)`), Put `USER#{user}` / `DETAILS` (no `password_hash`, `identity_count=1`, `email_verified` as the provider says) and `USER#{user}` / `IDENTITY#{idp}`; ConditionCheck `POOL#{pool}` / `DETAILS` `status = active` and `POOL#{pool}` / `IDP#{idp}` `status = active`. Of concurrent first sign-ins with one provider account, exactly one creates a user; the others fail on the link item and sign in as that user. An email that's taken fails the transaction: it's never linked automatically. |
 
 ### Two-factor sign-in
 
@@ -495,7 +517,7 @@ Admin invites use the same token: the user is created without a password, and a 
 | Create user | Same transaction as registration: Put `USER#{user}`, Put `POOL#{pool}#EMAIL#{email}`, ConditionCheck `POOL#{pool}` `status = active`. With an initial password, store its hash. Without one, Put an `OTT` item (`purpose=reset_password`) and email a password-set link. |
 | Get user | GetItem `USER#{user}` / `DETAILS` |
 | Disable user | UpdateItem `USER#{user}` / `DETAILS` SET `status=disabled`, ADD `auth_version 1`. The Worker then runs the revocation cleanup. |
-| Delete user | TransactWriteItems deleting `USER#{user}` / `DETAILS` and `POOL#{pool}#EMAIL#{email}` / `EMAIL`. The Worker then runs the revocation cleanup. Every credential fails validation as soon as the user item is gone. |
+| Delete user | Query `PK=USER#{user}`, `begins_with(SK, "IDENTITY#")`, then TransactWriteItems deleting `USER#{user}` / `DETAILS` (condition `identity_count` equals the number found, so none was linked meanwhile), `POOL#{pool}#EMAIL#{email}` / `EMAIL`, and each identity with its `POOL#{pool}#IDP#{idp}#SUB#{sub}` / `IDENTITY` link (condition `user_id = :user`). The Worker then runs the revocation cleanup. Every credential fails validation as soon as the user item is gone, and the email and provider accounts are free again at once. |
 | Delete pool | Reject if any client or login host in the org uses it (Query the org's clients and hosts, BatchGetItem, check `user_pool_id` / `pool_id`). So an org's default pool, served by its default host, can't be deleted. Otherwise UpdateItem `POOL#{pool}` SET `status=deleting` and the GSI2 work attributes. Because user and client creation check `status = active` in their transactions, nothing new can be added after this point. A background job then pages through config GSI1 `GSI1PK=POOL#{pool}` deleting each user (as above), and finally deletes `POOL#{pool}` / `DETAILS`, `ORG#{org}` / `POOL#{pool}` and the pool's `IDP#` items in one transaction |
 
 ### Admin: identity providers

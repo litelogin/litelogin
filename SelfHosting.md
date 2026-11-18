@@ -260,7 +260,7 @@ A user who lost both their authenticator app and their recovery codes needs an a
 
 ### Social sign-in
 
-Social sign-in is being built ([#37](https://github.com/litelogin/litelogin/issues/37)). Identity providers can be configured now, but the sign-in pages don't show them yet.
+Social sign-in is being built ([#37](https://github.com/litelogin/litelogin/issues/37)). OpenID Connect providers (Google, Microsoft and others) work: the sign-in and registration pages show a "Continue with" link for each provider a host lists, and a first sign-in creates the account when the host allows registration. GitHub and Apple providers can be configured but aren't shown yet, and existing accounts can't be linked to a provider yet: a provider account whose email is already registered can't sign in.
 
 Each org registers its own app with each provider, with the callback URL of every login host of the pool as a redirect URI: `https://HOST/federation/callback`.
 
@@ -280,6 +280,8 @@ dist/litelogin host update login.acme.com --idps google
 ```
 
 Secrets are read from a file, or from stdin with `-`, so they stay out of shell history. They're encrypted with a KMS key that only the Auth Lambda can decrypt with, and are never shown again: `idp update POOL IDP --client-secret-file ...` replaces one. `idp get POOL IDP` lists the callback URLs to register.
+
+A sign-in through a provider counts as two factors only if the provider says so: `mfa` in its ID token's `amr`, or a value you list with `--mfa-amr` or `--mfa-acr`. Otherwise the pool's rules apply as for a password: users with an authenticator app give a code, and in a pool with `mfa_required` users set one up. Tokens say how the user signed in (`amr` `fed`, `acr` `urn:litelogin:acr:fed`), so apps that need a strong sign-in can check.
 
 ## Monitoring
 

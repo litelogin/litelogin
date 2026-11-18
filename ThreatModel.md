@@ -32,7 +32,7 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 
 | Threat | Control | Status |
 | -- | -- | -- |
-| Password guessing and credential stuffing | WAF rate limit per IP on `/login`, `/register`, `/password/*`, `/passkey/*`, `/token` (infra/modules/edge), not on CloudFront's Free plan (`cloudfront_plan = "free"`, Lean's default), which leaves only the limit for every path; account lockout after 5 failures for 15 minutes (internal/web/web.go) | verified |
+| Password guessing and credential stuffing | WAF rate limit per IP on `/login`, `/register`, `/password/*`, `/passkey/*`, `/federation/*`, `/token` (infra/modules/edge), not on CloudFront's Free plan (`cloudfront_plan = "free"`, Lean's default), which leaves only the limit for every path; account lockout after 5 failures for 15 minutes (internal/web/web.go) | verified |
 | Account enumeration through sign-in | One message for unknown, locked and inactive accounts; a dummy argon2id verification so timing matches (internal/web/flows.go, internal/crypto/password.go) | verified |
 | Enumeration through registration and password reset | Same response either way; the existing owner is emailed instead (internal/web/flows.go, `register`, `forgot`) | verified |
 | Enumeration through email change (signed in) | The request gets the same response either way; only the confirmation link, sent to the new address, says if another account already uses it, so only that address's owner can learn it (internal/web/account.go) | verified |
@@ -79,6 +79,11 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 | Choosing another tenant with a forged host header | The CloudFront Function overwrites `x-litelogin-host` from `Host` on every behavior (infra/modules/edge/host.js) | verified |
 | A removed custom host's CNAME still pointing at LiteLogin | Hosts are only added by operators; CloudFront refuses a domain another distribution has | accepted (F4) |
 | Large request bodies | 16 KiB limit on form and token endpoints; reserved concurrency available per function | verified |
+| Login CSRF through social sign-in (the victim's browser finishing the attacker's sign-in) | The callback's state works once, on the host that started it, and only with the `__Host-litelogin_fed` cookie that started it, whose hash the state holds (internal/web/federation.go, `TestFederationStateBinding`) | verified |
+| Forged, replayed or misdirected ID tokens | Code exchanged with PKCE and the org's client secret; the ID token's RS256/ES256 signature checked against the provider's keys, and `iss`, `aud`, `azp`, `exp`, `iat` and the nonce of this sign-in (internal/federation, `TestVerifyIDToken`, `TestFederationRejectsInvalidIDToken`) | verified |
+| Account takeover by linking a provider account to an existing user with the same email | Never linked automatically: sign-up through a provider fails if the email is registered, with the same page as when registration is off, so it doesn't reveal which emails exist (internal/web/federation.go, `TestFederatedSignUpDoesNotLinkExistingEmail`) | verified |
+| A compromised account at a provider, or a provider that vouches for an email wrongly | The provider is trusted for its own accounts: whoever controls one signs in as its linked user, and a new user's `email_verified` is the provider's word. Clients that need more check `acr`/`amr` (`fed`), and pools can require two factors | accepted |
+| A provider sign-in counted as two factors without one | Only `mfa` in the ID token's `amr`, or the `amr`/`acr` values the org configured for that provider, count; otherwise the pool's rules ask for an app code (internal/web/federation.go, `TestFederatedSignInRequiresSecondFactor`) | verified |
 
 ### Operators and data
 
@@ -88,7 +93,7 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 | Secrets in logs | No log line records passwords, tokens, codes, cookies, client secrets or URLs | verified |
 | Identity providers' secrets read from the tables or backups | Encrypted with their own KMS key, bound to the pool and provider by the encryption context. The Admin Lambda may only encrypt with it and the Auth Lambda only decrypt, so the Admin API never returns them, and the plan role can't use the key (internal/secretbox, internal/admin/idps.go, infra/modules/kms) | verified |
 | Identity providers' secrets in Admin API responses | Write-only: responses say only whether one is set, including stored idempotent replays (internal/admin/idps.go; internal/cli/idps_test.go) | verified |
-| An admin-supplied issuer URL reaching internal addresses (SSRF) | Issuers must be https. The Auth Lambda doesn't call providers yet; when it does, its HTTP client will refuse private, loopback and link-local addresses ([#37](https://github.com/litelogin/litelogin/issues/37)) | verified (no outbound calls yet) |
+| An admin-supplied issuer URL reaching internal addresses (SSRF) | Issuers must be https. Calls to providers allow only HTTPS, follow no redirects and time out; the dialer connects only to public addresses, checked on the address actually dialed after DNS resolution, so private, loopback, link-local (the instance metadata service), NAT64 and other special-purpose ranges are refused (internal/federation/httpclient.go, `TestPublicAddr`, `TestHTTPClientRefuses`) | verified |
 | Secrets in request samples | WAF sampled requests show URIs, which for reset links include the token | accepted (F6) |
 | Data at rest | Tables encrypted at rest: with a customer managed KMS key in Full (`table_encryption = "customer-managed"`), whose deletion makes the tables and their backups unreadable; with DynamoDB's AWS owned key in Lean, where access is controlled by IAM alone. Point-in-time recovery on the Config table (the Session table holds only short-lived data) | verified |
 
