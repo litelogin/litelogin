@@ -1,8 +1,10 @@
 package main
 
-// This test signs in to the example through LiteLogin's Auth handler,
-// running in-process over TLS on DynamoDB Local, as test/e2e does. Set
-// LITELOGIN_DYNAMODB_ENDPOINT to run it (make test-integration does).
+// These tests run the example against the real thing: LiteLogin's Auth
+// handler, started inside the test over TLS and backed by DynamoDB Local,
+// the same way test/e2e does it. The sign-in test needs
+// LITELOGIN_DYNAMODB_ENDPOINT set, which make test-integration takes care
+// of. Without it, the test skips itself.
 
 import (
 	"context"
@@ -36,13 +38,17 @@ import (
 	"github.com/litelogin/litelogin/internal/web"
 )
 
-// loginHost is a name httptest's certificate is valid for.
+// loginHost has to be a name httptest's certificate is valid for, or TLS
+// won't trust it.
 const (
 	loginHost    = "example.com"
 	userEmail    = "ada@example.org"
 	userPassword = "correct horse battery"
 )
 
+// TestSignInAndOut goes through what a person would do: sign in, look at
+// the claims, and sign out again. Along the way it pokes at the checks
+// that are supposed to stop misuse.
 func TestSignInAndOut(t *testing.T) {
 	endpoint := os.Getenv(platform.EnvDynamoDBEndpoint)
 	if endpoint == "" {
@@ -51,7 +57,8 @@ func TestSignInAndOut(t *testing.T) {
 	ctx := context.Background()
 	st := newStore(t, endpoint)
 
-	// LiteLogin: an org with its default host, a user, and a signing key.
+	// Set up LiteLogin with an org and its default host, a user to sign in
+	// as, and a signing key.
 	org := &store.Org{ID: crypto.NewID(), Name: "Example"}
 	pool := &store.Pool{ID: crypto.NewID(), Name: "Default"}
 	host := &store.LoginHost{Host: loginHost, HostSettings: store.HostSettings{SessionTTL: 3600, SessionIdleTTL: 600}}
@@ -80,8 +87,8 @@ func TestSignInAndOut(t *testing.T) {
 	ws.LinkPort = port
 	issuer := "https://" + loginHost + ":" + port
 
-	// One transport for the app and the browser: loginHost reaches the
-	// issuer, anything else is dialed normally.
+	// The app and the browser share one transport. It sends anything for
+	// loginHost to the issuer and dials everything else as usual.
 	transport := idp.Client().Transport.(*http.Transport).Clone()
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if h, _, _ := net.SplitHostPort(addr); h == loginHost {
@@ -91,7 +98,8 @@ func TestSignInAndOut(t *testing.T) {
 	}
 	transport.TLSClientConfig = &tls.Config{RootCAs: transport.TLSClientConfig.RootCAs, MinVersion: tls.VersionTLS12}
 
-	// The example, with a client registered for it.
+	// Now the example itself. Its address has to be known before it
+	// starts, because the client's redirect URIs point at it.
 	appSrv := httptest.NewUnstartedServer(nil)
 	t.Cleanup(appSrv.Close)
 	appURL := "http://" + appSrv.Listener.Addr().String()
@@ -121,7 +129,8 @@ func TestSignInAndOut(t *testing.T) {
 	appSrv.Config.Handler = a.routes()
 	appSrv.Start()
 
-	// The browser follows redirects, and remembers the callback it was sent to.
+	// A stand-in for the browser. It follows redirects like a real one and
+	// remembers the callback URL, so we can try replaying it later.
 	jar, _ := cookiejar.New(nil)
 	var callback string
 	b := &http.Client{Transport: transport, Jar: jar, Timeout: 10 * time.Second,
@@ -135,6 +144,7 @@ func TestSignInAndOut(t *testing.T) {
 	if p := get(t, b, appURL+"/"); !strings.Contains(p.body, "not signed in") {
 		t.Fatalf("home before sign-in: %d\n%s", p.status, p.body)
 	}
+	// signIn goes through LiteLogin's login page as the test user.
 	signIn := func() page {
 		t.Helper()
 		p := get(t, b, appURL+"/login")
@@ -151,7 +161,7 @@ func TestSignInAndOut(t *testing.T) {
 		t.Fatalf("after sign-in: %d at %s\n%s", home.status, home.url, home.body)
 	}
 
-	// The ID token's claims, as LiteLogin issued them.
+	// The claims page should show what LiteLogin put in the ID token.
 	claims := html.UnescapeString(get(t, b, appURL+"/claims").body)
 	for _, want := range []string{`"iss": "` + issuer + `"`, `"sub": "` + u.ID + `"`, `"aud": "` + client.ID + `"`, `"email": "` + userEmail + `"`} {
 		if !strings.Contains(claims, want) {
@@ -159,18 +169,18 @@ func TestSignInAndOut(t *testing.T) {
 		}
 	}
 
-	// A callback works once.
+	// Replaying the callback mustn't work: its state was used up.
 	if p := get(t, b, callback); p.status != http.StatusBadRequest {
 		t.Errorf("replayed callback: %d\n%s", p.status, p.body)
 	}
 
-	// Logout needs the form's token.
+	// Logging out without the form's token should be refused.
 	csrf := hiddenFields(home.body).Get("csrf")
 	if p := post(t, b, appURL+"/logout", url.Values{"csrf": {"wrong"}}); p.status != http.StatusForbidden {
 		t.Errorf("logout with the wrong token: %d\n%s", p.status, p.body)
 	}
-	// Logout ends the app's session, then LiteLogin's (after the user
-	// confirms), and comes back to the app.
+	// A real logout ends the app's session first, then LiteLogin's (once
+	// the user confirms), and lands back on the app.
 	p := post(t, b, appURL+"/logout", url.Values{"csrf": {csrf}})
 	if !strings.Contains(p.body, `action="/logout"`) {
 		t.Fatalf("expected LiteLogin's logout confirmation, got %d at %s:\n%s", p.status, p.url, p.body)
@@ -179,12 +189,15 @@ func TestSignInAndOut(t *testing.T) {
 	if p.url != appURL+"/" || !strings.Contains(p.body, "not signed in") {
 		t.Fatalf("after logout: %d at %s\n%s", p.status, p.url, p.body)
 	}
-	// LiteLogin's session is gone too, so signing in asks for the password.
+	// If LiteLogin's session really ended, signing in again has to ask
+	// for the password. signIn fails if it doesn't.
 	if home := signIn(); !strings.Contains(home.body, "Signed in as") {
 		t.Fatalf("signing in again: %d at %s\n%s", home.status, home.url, home.body)
 	}
 }
 
+// TestLoadConfig checks the defaults, and that settings the app can't work
+// with are refused at startup instead of causing trouble later.
 func TestLoadConfig(t *testing.T) {
 	base := map[string]string{"ISSUER_URL": "https://acme.login.example.com", "CLIENT_ID": "c"}
 	load := func(extra map[string]string) (config, error) {
@@ -222,6 +235,8 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
+// newStore makes a fresh pair of tables with random names, so tests never
+// see each other's data, and deletes them when the test is done.
 func newStore(t *testing.T, endpoint string) *store.Store {
 	t.Helper()
 	db := dynamodb.New(dynamodb.Options{
@@ -242,7 +257,8 @@ func newStore(t *testing.T, endpoint string) *store.Store {
 	return store.New(db, configTable, sessionTable)
 }
 
-// page is where the browser ended up, after redirects.
+// page is where the browser ended up after following redirects, and what
+// it found there.
 type page struct {
 	status int
 	url    string
@@ -259,6 +275,7 @@ func post(t *testing.T, c *http.Client, u string, form url.Values) page {
 	return do(t, c, http.MethodPost, u, form)
 }
 
+// do sends one request, as a browser would, and reads the whole response.
 func do(t *testing.T, c *http.Client, method, u string, form url.Values) page {
 	t.Helper()
 	var body io.Reader
@@ -283,6 +300,8 @@ func do(t *testing.T, c *http.Client, method, u string, form url.Values) page {
 
 var hiddenRE = regexp.MustCompile(`<input type="hidden" name="([^"]+)" value="([^"]*)">`)
 
+// hiddenFields picks the hidden inputs out of a page's form, such as a
+// CSRF token, so we can post the form back like a browser would.
 func hiddenFields(body string) url.Values {
 	v := url.Values{}
 	for _, m := range hiddenRE.FindAllStringSubmatch(body, -1) {
