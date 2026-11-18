@@ -11,6 +11,7 @@ import (
 
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/email"
+	"github.com/litelogin/litelogin/internal/secretbox"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -27,6 +28,12 @@ type Store interface {
 	ListPools(ctx context.Context, orgID string) ([]store.Pool, error)
 	UpdatePool(ctx context.Context, pool *store.Pool) error
 	MarkPoolDeleting(ctx context.Context, poolID string) error
+
+	CreateIDP(ctx context.Context, p *store.IDP) error
+	GetIDP(ctx context.Context, poolID, idpID string) (*store.IDP, error)
+	ListIDPs(ctx context.Context, poolID string) ([]store.IDP, error)
+	UpdateIDP(ctx context.Context, p *store.IDP) error
+	DeleteIDP(ctx context.Context, poolID, idpID string) error
 
 	CreateClient(ctx context.Context, c *store.Client, host string) error
 	GetClient(ctx context.Context, clientID string) (*store.Client, error)
@@ -91,6 +98,9 @@ type Server struct {
 	Now              func() time.Time
 	// Email sends user invites. Without it, invites return 501.
 	Email email.Sender
+	// Secrets seals identity providers' secrets (secretbox.IDPContext).
+	// Without it, setting a secret returns 501.
+	Secrets secretbox.Box
 	// LinkScheme and LinkPort shape invite links: https and no port,
 	// except for the local development server.
 	LinkScheme, LinkPort string
@@ -118,6 +128,11 @@ func (s *Server) Handler() http.Handler {
 	route("GET /v1/pools/{pool}", s.getPool)
 	route("PATCH /v1/pools/{pool}", s.updatePool)
 	route("DELETE /v1/pools/{pool}", s.deletePool)
+	route("POST /v1/pools/{pool}/idps", s.createIDP)
+	route("GET /v1/pools/{pool}/idps", s.listIDPs)
+	route("GET /v1/pools/{pool}/idps/{idp}", s.getIDP)
+	route("PATCH /v1/pools/{pool}/idps/{idp}", s.updateIDP)
+	route("DELETE /v1/pools/{pool}/idps/{idp}", s.deleteIDP)
 
 	route("POST /v1/orgs/{org}/clients", s.createClient)
 	route("GET /v1/orgs/{org}/clients", s.listClients)

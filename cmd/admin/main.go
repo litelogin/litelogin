@@ -31,6 +31,7 @@ import (
 	"github.com/litelogin/litelogin/internal/logctx"
 	"github.com/litelogin/litelogin/internal/metrics"
 	"github.com/litelogin/litelogin/internal/platform"
+	"github.com/litelogin/litelogin/internal/secretbox"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -39,6 +40,7 @@ const (
 	envCursorKey         = "LITELOGIN_CURSOR_KMS_KEY"      // Lambda: KMS HMAC key that signs pagination cursors
 	envDefaultHostDomain = "LITELOGIN_DEFAULT_HOST_DOMAIN" // parent domain of default login hosts
 	envRoutingEndpoint   = "LITELOGIN_ROUTING_ENDPOINT"    // where custom hosts' CNAMEs point (unset: no custom hosts)
+	envIDPKeyID          = "LITELOGIN_IDP_KEY_ID"          // Lambda: KMS key that seals identity providers' secrets (encrypt only)
 )
 
 const (
@@ -77,13 +79,24 @@ func run(logger *slog.Logger) error {
 	}
 
 	var cursor admin.Cursors
+	var secrets secretbox.Box
 	if inLambda {
 		keyID := os.Getenv(envCursorKey)
 		if keyID == "" {
 			return fmt.Errorf("%s is not set", envCursorKey)
 		}
-		cursor = &admin.KMSCursors{KMS: kms.NewFromConfig(cfg), KeyID: keyID}
+		idpKey := os.Getenv(envIDPKeyID)
+		if idpKey == "" {
+			return fmt.Errorf("%s is not set", envIDPKeyID)
+		}
+		kmsClient := kms.NewFromConfig(cfg)
+		cursor = &admin.KMSCursors{KMS: kmsClient, KeyID: keyID}
+		secrets = &secretbox.KMS{Client: kmsClient, KeyID: idpKey}
 	} else {
+		// The local auth server (make run-auth) opens what this seals.
+		if secrets, err = secretbox.NewLocal(secretbox.LocalDevKey[:]); err != nil {
+			return err
+		}
 		// Local cursors only need to survive this process.
 		key := make([]byte, 32)
 		_, _ = rand.Read(key)
@@ -102,6 +115,7 @@ func run(logger *slog.Logger) error {
 		Cursor:            cursor,
 		DefaultHostDomain: domain,
 		CustomHostTarget:  os.Getenv(envRoutingEndpoint),
+		Secrets:           secrets,
 		Caller:            admin.FunctionURLCaller,
 		Log:               logger,
 	}

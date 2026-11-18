@@ -1,10 +1,13 @@
 // Package secretbox encrypts the few secrets LiteLogin must be able to read
-// back, unlike passwords and tokens, which are stored hashed: TOTP secrets.
+// back, unlike passwords and tokens, which are stored hashed: TOTP secrets,
+// and the secrets of identity providers' app registrations.
 //
-// In Lambda, secrets are encrypted with a KMS key that only the Auth Lambda
-// may use. Every secret is bound to an encryption context (whose it is), so a
-// ciphertext copied to another user's item doesn't decrypt. The local
-// development server and tests use AES-GCM with a key in memory instead.
+// In Lambda, each kind has its own KMS key. Only the Auth Lambda may use the
+// TOTP key; the Admin Lambda may only encrypt with the identity provider
+// key, and the Auth Lambda only decrypt. Every secret is bound to an
+// encryption context (whose it is), so a ciphertext copied to another
+// user's or provider's item doesn't decrypt. The local development servers
+// and tests use AES-GCM with a key in memory instead.
 package secretbox
 
 import (
@@ -12,6 +15,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"slices"
@@ -26,6 +30,22 @@ import (
 type Box interface {
 	Seal(ctx context.Context, plaintext []byte, ec map[string]string) ([]byte, error)
 	Open(ctx context.Context, ciphertext []byte, ec map[string]string) ([]byte, error)
+}
+
+// LocalDevKey is the key the local development servers (make run-auth and
+// make run-admin) seal secrets with. It's fixed, so secrets survive restarts
+// while DynamoDB Local keeps the data, and the admin server seals what the
+// auth server opens; it protects nothing.
+var LocalDevKey = sha256.Sum256([]byte("litelogin local development only"))
+
+// PurposeIDPSecret is the encryption context's purpose for identity provider
+// secrets. The KMS key policies allow the key's use only with it.
+const PurposeIDPSecret = "idp_secret"
+
+// IDPContext is the encryption context of an identity provider's secrets:
+// they open only for the provider and pool they were sealed for.
+func IDPContext(poolID, idpID string) map[string]string {
+	return map[string]string{"purpose": PurposeIDPSecret, "pool_id": poolID, "idp_id": idpID}
 }
 
 // ErrOpen is returned when a ciphertext doesn't decrypt: it's damaged, or

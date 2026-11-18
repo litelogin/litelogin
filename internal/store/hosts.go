@@ -20,6 +20,9 @@ type HostSettings struct {
 	PasskeysEnabled bool  `dynamodbav:"passkeys_enabled"`
 	SessionTTL      int64 `dynamodbav:"session_ttl"`
 	SessionIdleTTL  int64 `dynamodbav:"session_idle_ttl"`
+	// IDPs are the IDs of the pool's identity providers the host's sign-in
+	// page shows, in order.
+	IDPs []string `dynamodbav:"idps,omitempty"`
 }
 
 // LoginHost is a host that serves login pages: LOGIN_HOST#{host} / DETAILS.
@@ -140,6 +143,9 @@ func (s *Store) CreateHost(ctx context.Context, host *LoginHost) error {
 	if err != nil {
 		return err
 	}
+	if err := checkHostIDPs(host.IDPs); err != nil {
+		return err
+	}
 	now := s.unix()
 	host.Host, host.CreatedAt, host.UpdatedAt, host.Version = h, now, now, 1
 	it := hostItem{keys: keys{pfxLoginHost + h, skDetails}}
@@ -162,15 +168,18 @@ func (s *Store) CreateHost(ctx context.Context, host *LoginHost) error {
 	if err != nil {
 		return err
 	}
-	err = s.transact(ctx, []types.TransactWriteItem{
+	err = s.transact(ctx, append([]types.TransactWriteItem{
 		put(s.config, item, "attribute_not_exists(PK)", nil, nil),
 		put(s.config, index, "", nil, nil),
 		check(s.config, key(pfxPool+host.PoolID, skDetails), "#status = :active AND #org_id = :org", names("status", "org_id"),
 			map[string]types.AttributeValue{":active": avS(PoolActive), ":org": avS(host.OrgID)}),
-	})
+	}, s.idpChecks(host.PoolID, host.IDPs)...))
 	if f := asTxFailure(err); f != nil {
-		if f.failed(2) {
+		switch {
+		case f.failed(2):
 			return ErrPoolNotActive
+		case errIDPFailure(f, 3, len(host.IDPs)):
+			return ErrIDPNotFound
 		}
 		return ErrHostTaken
 	}
@@ -192,8 +201,16 @@ func (s *Store) GetLoginHost(ctx context.Context, host string) (*LoginHost, erro
 }
 
 // UpdateHostSettings saves a host's settings, if its version is still
-// h.Version. On success, h holds the saved host.
+// h.Version. Every identity provider it lists must exist in its pool
+// (ErrIDPNotFound). On success, h holds the saved host.
 func (s *Store) UpdateHostSettings(ctx context.Context, h *LoginHost) error {
+	if err := checkHostIDPs(h.IDPs); err != nil {
+		return err
+	}
+	old, err := s.GetLoginHost(ctx, h.Host)
+	if err != nil {
+		return err
+	}
 	theme := h.Theme
 	if theme == nil {
 		theme = map[string]string{}
@@ -202,18 +219,40 @@ func (s *Store) UpdateHostSettings(ctx context.Context, h *LoginHost) error {
 	if err != nil {
 		return err
 	}
-	var it hostItem
-	err = s.updateVersioned(ctx, key(pfxLoginHost+h.Host, skDetails), h.Version, map[string]types.AttributeValue{
-		"theme":                themeAV,
-		"registration_enabled": avB(h.RegistrationEnabled),
-		"passkeys_enabled":     avB(h.PasskeysEnabled),
-		"session_ttl":          avN(h.SessionTTL),
-		"session_idle_ttl":     avN(h.SessionIdleTTL),
-	}, &it)
+	set := "SET #theme = :theme, #registration_enabled = :reg, #passkeys_enabled = :passkeys, " +
+		"#session_ttl = :ttl, #session_idle_ttl = :idle, #updated_at = :now, #version = #version + :one"
+	nm := names("theme", "registration_enabled", "passkeys_enabled", "session_ttl", "session_idle_ttl", "updated_at", "version", "idps", "pool_id")
+	vals := map[string]types.AttributeValue{
+		":theme": themeAV, ":reg": avB(h.RegistrationEnabled), ":passkeys": avB(h.PasskeysEnabled),
+		":ttl": avN(h.SessionTTL), ":idle": avN(h.SessionIdleTTL), ":now": avN(s.unix()), ":one": avN(1),
+		":expected": avN(h.Version), ":pool": avS(old.PoolID),
+	}
+	upd := set + " REMOVE #idps"
+	if len(h.IDPs) > 0 {
+		idps, err := attributevalue.Marshal(h.IDPs)
+		if err != nil {
+			return err
+		}
+		vals[":idps"] = idps
+		upd = set + ", #idps = :idps"
+	}
+	err = s.transact(ctx, append([]types.TransactWriteItem{
+		update(s.config, key(pfxLoginHost+old.Host, skDetails), upd, "#version = :expected AND #pool_id = :pool", nm, vals),
+	}, s.idpChecks(old.PoolID, h.IDPs)...))
+	if f := asTxFailure(err); f != nil {
+		if f.failed(0) {
+			return ErrVersionMismatch
+		}
+		return ErrIDPNotFound
+	}
 	if err != nil {
 		return err
 	}
-	*h = *it.host()
+	saved, err := s.GetLoginHost(ctx, old.Host)
+	if err != nil {
+		return err
+	}
+	*h = *saved
 	return nil
 }
 

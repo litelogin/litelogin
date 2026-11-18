@@ -9,7 +9,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"log/slog"
 	"net"
@@ -53,12 +52,10 @@ const (
 	EnvSESConfiguration = "LITELOGIN_SES_CONFIGURATION"
 	// EnvMFAKeyID is the KMS key that encrypts TOTP secrets.
 	EnvMFAKeyID = "LITELOGIN_MFA_KEY_ID"
+	// EnvIDPKeyID is the KMS key that identity providers' secrets are
+	// sealed with; the Auth Lambda may only decrypt with it.
+	EnvIDPKeyID = "LITELOGIN_IDP_KEY_ID"
 )
-
-// localSecretsKey encrypts TOTP secrets on the local development server.
-// It's fixed, so secrets survive restarts of the server while DynamoDB
-// Local keeps the data; it protects nothing.
-var localSecretsKey = sha256.Sum256([]byte("litelogin local development only"))
 
 func main() {
 	logger := slog.New(logctx.NewHandler(slog.NewJSONHandler(os.Stdout, nil)))
@@ -112,9 +109,14 @@ func run(logger *slog.Logger) error {
 		if mfaKey == "" {
 			return errors.New(EnvMFAKeyID + " is not set")
 		}
+		idpKey := os.Getenv(EnvIDPKeyID)
+		if idpKey == "" {
+			return errors.New(EnvIDPKeyID + " is not set")
+		}
 		kmsClient := kms.NewFromConfig(cfg)
 		pages.Signer = jwt.NewSigner(jwt.MeteredKMS(kmsClient, rec), keys)
 		pages.Secrets = &secretbox.KMS{Client: kmsClient, KeyID: mfaKey}
+		pages.IDPSecrets = &secretbox.KMS{Client: kmsClient, KeyID: idpKey}
 		pages.Email = email.Metered(&email.SES{
 			Client: sesv2.NewFromConfig(cfg), From: from, ConfigurationSet: os.Getenv(EnvSESConfiguration),
 		}, rec)
@@ -140,9 +142,10 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	pages.Signer = signer
-	if pages.Secrets, err = secretbox.NewLocal(localSecretsKey[:]); err != nil {
+	if pages.Secrets, err = secretbox.NewLocal(secretbox.LocalDevKey[:]); err != nil {
 		return err
 	}
+	pages.IDPSecrets = pages.Secrets // the contexts keep them apart
 	pages.Email = &email.Printer{W: os.Stderr}
 	pages.Scheme, pages.LinkPort = "http", port
 	return serveLocal(logger, addr, httpx.SetLoginHostFromHost(httpx.SecurityHeaders(mux)))

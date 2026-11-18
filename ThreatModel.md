@@ -11,6 +11,7 @@ What LiteLogin protects, from whom, and how, with each control checked against t
 | Sessions, authorization codes, refresh tokens | Each is a way into an account. |
 | One-time email links (verification, reset, email change) | A reset link is a password. |
 | TOTP secrets and recovery codes | Either is a second factor; the secret can't be stored hashed. |
+| Identity providers' secrets (client secrets, Apple signing keys) | They let anyone act as the org's app at the provider; they must be read back, so they can't be stored hashed. |
 | Tenant configuration (orgs, pools, hosts, clients) | Changing a redirect URI or a client sends tokens elsewhere. |
 | The code that runs | Changing it bypasses every other control. |
 
@@ -85,6 +86,9 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 | -- | -- | -- |
 | Unauthorized configuration changes | Admin API requires SigV4 (IAM auth on the function URL) | verified; scope is all orgs (F3) |
 | Secrets in logs | No log line records passwords, tokens, codes, cookies, client secrets or URLs | verified |
+| Identity providers' secrets read from the tables or backups | Encrypted with their own KMS key, bound to the pool and provider by the encryption context. The Admin Lambda may only encrypt with it and the Auth Lambda only decrypt, so the Admin API never returns them, and the plan role can't use the key (internal/secretbox, internal/admin/idps.go, infra/modules/kms) | verified |
+| Identity providers' secrets in Admin API responses | Write-only: responses say only whether one is set, including stored idempotent replays (internal/admin/idps.go; internal/cli/idps_test.go) | verified |
+| An admin-supplied issuer URL reaching internal addresses (SSRF) | Issuers must be https. The Auth Lambda doesn't call providers yet; when it does, its HTTP client will refuse private, loopback and link-local addresses ([#37](https://github.com/litelogin/litelogin/issues/37)) | verified (no outbound calls yet) |
 | Secrets in request samples | WAF sampled requests show URIs, which for reset links include the token | accepted (F6) |
 | Data at rest | Tables encrypted at rest: with a customer managed KMS key in Full (`table_encryption = "customer-managed"`), whose deletion makes the tables and their backups unreadable; with DynamoDB's AWS owned key in Lean, where access is controlled by IAM alone. Point-in-time recovery on the Config table (the Session table holds only short-lived data) | verified |
 

@@ -385,6 +385,7 @@ type hostSettingsFlags struct {
 	theme               map[string]string
 	registration        bool
 	passkeys            bool
+	idps                []string
 	sessionTTL, idleTTL int64
 }
 
@@ -393,6 +394,7 @@ func (f *hostSettingsFlags) register(cmd *cobra.Command) {
 	fl.StringToStringVar(&f.theme, "theme", nil, "theme, as key=value pairs (brand_name, primary_color, background_color, logo_url; replaces the theme)")
 	fl.BoolVar(&f.registration, "registration", true, "allow users to register on the login pages")
 	fl.BoolVar(&f.passkeys, "passkeys", false, "let users add passkeys and sign in with them")
+	fl.StringSliceVar(&f.idps, "idps", nil, `identity providers of the pool to show on the sign-in page, in order (replaces the list; "" for none)`)
 	fl.Int64Var(&f.sessionTTL, "session-ttl", 0, "login session lifetime in seconds")
 	fl.Int64Var(&f.idleTTL, "session-idle-ttl", 0, "login session idle timeout in seconds")
 }
@@ -411,6 +413,9 @@ func (f *hostSettingsFlags) body(cmd *cobra.Command) map[string]any {
 	}
 	if cmd.Flags().Changed("theme") {
 		body["theme"] = f.theme
+	}
+	if cmd.Flags().Changed("idps") {
+		body["idps"] = append([]string{}, f.idps...) // [] clears the list
 	}
 	return body
 }
@@ -505,7 +510,7 @@ func (a *App) clientCommand() *cobra.Command {
 
 // ---- host ----
 
-var hostColumns = []string{"host", "type", "status", "user_pool_id", "registration_enabled", "passkeys_enabled", "version"}
+var hostColumns = []string{"host", "type", "status", "user_pool_id", "registration_enabled", "passkeys_enabled", "idps", "version"}
 
 func (a *App) hostCommand() *cobra.Command {
 	var org, client, pool string

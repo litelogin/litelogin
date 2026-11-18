@@ -69,6 +69,12 @@ func toAPIError(err error) *apiError {
 		return errConflict("last_host", "this is the client's only login host; every client is on at least one")
 	case errors.Is(err, store.ErrDefaultHost):
 		return errConflict("default_host", "an org's default login host can't be removed")
+	case errors.Is(err, store.ErrIDPInUse):
+		return errConflict("idp_in_use", "a login host still shows this identity provider: remove it from the host's idps first")
+	case errors.Is(err, store.ErrIDPNotFound):
+		return errInvalid("idps: every identity provider must exist in the host's user pool")
+	case errors.Is(err, store.ErrTooMany):
+		return errConflict("limit_reached", "the limit for this resource has been reached")
 	case errors.Is(err, store.ErrConditionFailed):
 		return errConflict("conflict", "the resource isn't in a state that allows this; get it again and retry")
 	case errors.Is(err, store.ErrInvalidEmail):

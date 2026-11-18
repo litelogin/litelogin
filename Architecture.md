@@ -181,6 +181,16 @@ Users can turn on two-factor sign-in with an authenticator app (TOTP, RFC 6238).
 - **Turning the requirement on** takes effect within 30 seconds (the Auth Lambda's configuration cache), and is checked lazily: a session or refresh token from a password-only sign-in stops counting at its next use (the session is ignored, so `/authorize` asks for a sign-in and `prompt=none` returns `login_required`; the refresh token returns `invalid_grant`). Nothing has to be revoked in bulk.
 - **An administrator reset** (`DELETE /v1/users/{user}/mfa`, `litelogin user reset-2fa`) is for a user who lost both their app and recovery codes. It turns two-factor sign-in off, ends every session and refresh token, and emails the user, through the org's default host or `?host=`. Anyone who can call the Admin API can do it, like everything else there (see ThreatModel.md); it's in the audit log.
 
+### Social sign-in
+
+Social sign-in lets users sign in and register with an identity provider: any OpenID Connect provider found by discovery (Google, Microsoft Entra, GitLab, Okta…), GitHub, or Apple. It's being built in phases ([issue #37](https://github.com/litelogin/litelogin/issues/37) has the design). So far, providers can be configured; the sign-in pages don't show them yet.
+
+- **Each org registers its own app** with each provider, so the provider's consent screen shows the org's name. There's no shared app.
+- **Providers belong to a pool** (`/v1/pools/{pool}/idps`), because the identities they vouch for are the pool's users. Each login host lists which of its pool's providers its sign-in page shows (`idps`, at most 10). A provider can't be deleted while a host lists it.
+- **Callback URLs:** the provider redirects to `https://{host}/federation/callback` on the host the sign-in started on, since sessions are host-only. Every host's URL must be registered with the provider; the Admin API lists them in `callback_urls`.
+- **Secrets** (OIDC and GitHub client secrets, Apple's signing key) must be read back, so they're encrypted with their own KMS key, bound by the encryption context (`purpose=idp_secret`, the pool and the provider). The Admin API may only encrypt with the key, and the Auth Lambda only decrypt, so the API that takes secrets can never show them again. The local development servers use AES-GCM with a fixed key.
+- **Evidence of two factors:** a provider's `mfa_amr` and `mfa_acr` list the `amr` and `acr` values in its ID token that count as two factors (`mfa` in `amr` always does). Without such evidence, a social sign-in will be one factor, and the pool's two-factor rules apply as they do to passwords.
+
 ## Protocol
 
 LiteLogin implements the OAuth 2.1 authorization code flow and OpenID Connect Core. The rules below are enforced by the access patterns in [Datamodel.md](Datamodel.md).
@@ -263,12 +273,14 @@ The admin API is for deployment operators.
 | `/v1/orgs/{org}` | Get, update, suspend, reactivate |
 | `/v1/orgs/{org}/pools` | Create, list |
 | `/v1/pools/{pool}` | Get, update, delete (asynchronous; returns `202`) |
+| `/v1/pools/{pool}/idps` | Create an identity provider for social sign-in, list |
+| `/v1/pools/{pool}/idps/{idp}` | Get (with the callback URLs to register with the provider), update, delete (not while a host shows it) |
 | `/v1/orgs/{org}/clients` | Create on an existing login host of the org (returns the client secret once), list |
 | `/v1/clients/{client}` | Get, update, disable, enable, delete |
 | `/v1/clients/{client}/secret` | Rotate (returns the new secret once) |
 | `/v1/clients/{client}/hosts` | List the client's login hosts |
 | `/v1/orgs/{org}/hosts` | List, add a custom host |
-| `/v1/hosts/{host}` | Get (including verification status), update settings (theme, registration, passkeys, session lifetimes), remove (a custom host with no clients) |
+| `/v1/hosts/{host}` | Get (including verification status), update settings (theme, registration, passkeys, identity providers, session lifetimes), remove (a custom host with no clients) |
 | `/v1/hosts/{host}/clients` | List the host's clients |
 | `/v1/hosts/{host}/clients/{client}` | Add (`PUT`, idempotent) or remove (`DELETE`; not the client's last host) |
 | `/v1/pools/{pool}/users` | Create (with an initial password, or by emailing a password-set link), list, search by `email_prefix` |
@@ -286,7 +298,7 @@ The admin API is for deployment operators.
 - **Idempotency:** create requests and other important changes accept an `Idempotency-Key` header. A retry with the same key and body returns the original response, so a lost response can't create a duplicate. Keys are scoped per caller and kept for 24 hours. The CLI sends one on every create. Client secrets aren't stored with the response: a replayed "create client" response has no secret, and the caller rotates it if the original response was lost.
 - **Errors:** JSON `{ "error": "<code>", "message": "<text>" }` with standard HTTP status codes. A missing `If-Match` is `428`, a stale one `412`, and unknown request fields are rejected with `400`, so a misspelled field fails instead of being ignored.
 - **Actions:** suspend, reactivate, disable, enable and rotate-secret are `POST` to a sub-path (e.g. `POST /v1/clients/{client}/disable`). They accept `If-Match` but don't require it. Revoking a user's sessions is `DELETE /v1/users/{user}/sessions`.
-- **Secrets are returned only once.** Client secrets appear only in create and rotate responses, and are stored only as hashes. Password hashes are never returned.
+- **Secrets are returned only once.** Client secrets appear only in create and rotate responses, and are stored only as hashes. Password hashes are never returned. Identity providers' secrets are write-only: responses say only whether one is set (`client_secret_set`, `apple_private_key_set`).
 
 ## CLI
 
@@ -304,6 +316,8 @@ litelogin host update acme.login.example.com --theme brand_name=Acme --registrat
 litelogin host add --org {org} login.acme.com
 litelogin host status login.acme.com
 litelogin host add-client login.acme.com {client}
+litelogin idp create --pool {pool} --id google --type oidc --name Google --issuer https://accounts.google.com --client-id {id} --client-secret-file secret.txt
+litelogin host update acme.login.example.com --idps google
 litelogin user create --pool {pool} --email admin@acme.com --invite
 litelogin user revoke-sessions {user}
 ```
@@ -332,8 +346,8 @@ The admin API is the contract between LiteLogin and every management tool, inclu
 
   | Function | DynamoDB | KMS | Other |
   | -- | -- | -- | -- |
-  | Auth | Read/write both tables | `Sign` on signing keys | `ses:SendEmail` |
-  | Admin | Read/write Config table; on the Session table, query GSI1 and read/write `OTT` and `IDEMPOTENCY` items | `GenerateMac`/`VerifyMac` on its cursor key | `ses:SendEmail` |
+  | Auth | Read/write both tables | `Sign` on signing keys; `Encrypt`/`Decrypt` on the two-factor key; `Decrypt` on the identity provider key | `ses:SendEmail` |
+  | Admin | Read/write Config table; on the Session table, query GSI1 and read/write `OTT` and `IDEMPOTENCY` items | `GenerateMac`/`VerifyMac` on its cursor key; `Encrypt` on the identity provider key | `ses:SendEmail` |
   | Worker | Read/write both tables, including Config GSI2; read the Config table stream | None | `sqs:SendMessage`/`ReceiveMessage`/`DeleteMessage` on its continuation queue; CloudFront tenant management |
   | Key rotation | Read/write `KEYS` items | `CreateKey` (`RSA_2048` and `SIGN_VERIFY` only, with this environment's tags), `GetPublicKey`, `ScheduleKeyDeletion` | None |
 
@@ -501,4 +515,4 @@ SelfHosting.md says which to raise before deploying, and test/load/README.md wha
 
 - **Custom domain scale.** Custom hosts are tenants of one CloudFront multi-tenant distribution (CloudFront SaaS Manager), within its quotas for tenants and certificates. Beyond them, the fallback would be more distributions.
 - **One Region.** An environment runs in us-east-1 only; there's no multi-Region failover.
-- **Passwords and passkeys.** There's no separate multi-factor authentication or social sign-in yet, and an account always has a password. A passkey works only on the login host it was made on.
+- **Passwords and passkeys.** Social sign-in is being built: identity providers can be configured, but the sign-in pages don't use them yet, and an account always has a password. A passkey works only on the login host it was made on.

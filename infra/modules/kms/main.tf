@@ -53,6 +53,23 @@ resource "aws_kms_alias" "mfa" {
   target_key_id = aws_kms_key.mfa.key_id
 }
 
+# Identity providers' secrets (an org's client secrets and Apple keys for
+# social sign-in) must be read back, so they're encrypted with this key,
+# bound to their pool and provider by the encryption context. The Admin
+# Lambda may only encrypt with it and the Auth Lambda only decrypt.
+# Deleting the key makes every provider's secrets unusable: they'd have to
+# be set again.
+resource "aws_kms_key" "idp" {
+  description             = "${var.name_prefix} identity provider secrets (social sign-in)"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+}
+
+resource "aws_kms_alias" "idp" {
+  name          = "alias/${var.name_prefix}-idp"
+  target_key_id = aws_kms_key.idp.key_id
+}
+
 # Before table_encryption, the key always existed.
 moved {
   from = aws_kms_key.tables
@@ -72,4 +89,9 @@ output "tables_key_arn" {
 output "mfa_key_arn" {
   description = "The ARN of the key that encrypts TOTP secrets."
   value       = aws_kms_key.mfa.arn
+}
+
+output "idp_key_arn" {
+  description = "The ARN of the key that encrypts identity providers' secrets."
+  value       = aws_kms_key.idp.arn
 }

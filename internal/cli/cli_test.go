@@ -73,6 +73,7 @@ func newEnv(t *testing.T) *env {
 		Caller:            func(*http.Request) (string, bool) { return "local", true },
 		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Email:             &email.Recorder{},
+		Secrets:           testSecrets,
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

@@ -30,7 +30,7 @@ Lean's limit is the Free plan's 1 million requests a month: a sign-in and its 10
 | 100,000 | over the plan | **$47.66** |
 | 1,000,000 | over the plan | **$231.01** |
 
-Full's fixed part is $21.74 a month, almost half of it the WAF ($10); Lean's is $5.44, because the Free plan includes the WAF and the zone, it has less monitoring, and its tables use DynamoDB's own key. At low traffic the fixed part dominates. Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins. Full's totals include X-Ray tracing; `tracing = "off"` saves up to $0.000005 a request.
+Full's fixed part is $22.74 a month, almost half of it the WAF ($10); Lean's is $6.44, because the Free plan includes the WAF and the zone, it has less monitoring, and its tables use DynamoDB's own key. At low traffic the fixed part dominates. Past about 100,000 sign-ins a month, the requests dominate, and refreshes cost more than sign-ins. Full's totals include X-Ray tracing; `tracing = "off"` saves up to $0.000005 a request.
 
 The totals are list prices. They don't count AWS's free tier, which is shared by everything in the account (see [Free tier](#free-tier)), or taxes.
 
@@ -147,17 +147,17 @@ What a Full deployment costs with no sign-ins at all:
 | Service | What | Calculation | Cost |
 | -- | -- | -- | --: |
 | WAF | One web ACL with 5 rules (two rate limits, two AWS managed rule groups, one loopback redirect rule). The AWS managed groups used have no charge of their own. | $5 + 5 × $1 | $10.00 |
-| KMS | Four customer managed keys: the token signing key (RSA), table encryption (with `table_encryption = "customer-managed"`), the Admin API's cursor key (HMAC) and the key for two-factor sign-in secrets. Around each 90-day rotation a second signing key exists for about 3 days; keys pending deletion aren't charged. | 4 × $1 + (3 days ÷ 90 days) × $1 | $4.03 |
+| KMS | Five customer managed keys: the token signing key (RSA), table encryption (with `table_encryption = "customer-managed"`), the Admin API's cursor key (HMAC), the key for two-factor sign-in secrets and the key for identity providers' secrets (social sign-in). Around each 90-day rotation a second signing key exists for about 3 days; keys pending deletion aren't charged. | 5 × $1 + (3 days ÷ 90 days) × $1 | $5.03 |
 | Route 53 | One hosted zone. The login hosts are alias records to CloudFront, whose queries are free. | $0.50 | $0.50 |
 | CloudWatch alarms | 15 alarms: 12 on one metric, 3 on a sum of two | (12 + 3 × 2) × $0.10 | $1.80 |
 | CloudWatch metrics | 8 custom metrics (metric name and dimensions) the Auth and Worker Lambdas publish, counted as if each were published all month. Custom metrics are prorated by the hour and charged only while published, so ones that record rare events (`EmailSendFailed`, `PasskeyLoginFailed`, and the two-factor metrics `MFAEnabled`, `MFAFailed` and `MFALockout`) cost much less. Latencies are log fields, not metrics. | 8 × $0.30 | $2.40 |
 | CloudWatch dashboard | One dashboard ($0 if the account has 3 or fewer) | $3.00 | $3.00 |
 | Background jobs | The reconcile job every 5 minutes (8,640 Worker runs, 0.3 s at 256 MB) and the daily key rotation | 8,640 × (0.3 s × 0.25 GB × $0.0000133334 + $0.0000002) | $0.01 |
-| **Total** | | | **$21.74** |
+| **Total** | | | **$22.74** |
 
 Not counted, because they are a few cents or less: SQS (the work queues and dead-letter queues are empty unless work is outstanding), EventBridge Scheduler (about 8,700 invocations a month), DynamoDB Streams reads (only when configuration changes), the code-signing bucket, and log storage (Lambda logs are kept 30 days, so about one month's logs are stored at a time: at 1 million sign-ins, 15 million requests × 1,131 bytes is 15.8 GB, at most $0.47 a month stored, before compression).
 
-**Lean** has no WAF or zone charge (the Free plan includes them), reduced monitoring and no table key: $3.03 (KMS: the signing, cursor and two-factor keys) + 15 × $0.10 (alarms: 9 on one metric, 3 on two) + 3 × $0.30 (metrics) + $0.01 (background jobs) = **$5.44**.
+**Lean** has no WAF or zone charge (the Free plan includes them), reduced monitoring and no table key: $4.03 (KMS: the signing, cursor, two-factor and identity provider keys) + 15 × $0.10 (alarms: 9 on one metric, 3 on two) + 3 × $0.30 (metrics) + $0.01 (background jobs) = **$6.44**.
 
 **Storage** depends on users, not sign-ins. DynamoDB storage is free up to 25 GB, and point-in-time recovery on the Config table costs $0.20 per GB-month of that table. At about 1 KB a user, 100,000 users are 0.1 GB: $0.02 a month.
 
@@ -171,9 +171,9 @@ With **R = 10 refreshes per sign-in** (an app whose users stay signed in for abo
 
 | N | Sign-ins | Refreshes | Email | Requests total | Fixed | **Total** |
 | --: | --: | --: | --: | --: | --: | --: |
-| 1,000 | $0.03 | $0.13 | $0.01 | $0.16 | $5.44 | **$5.60** |
-| 10,000 | $0.27 | $1.30 | $0.05 | $1.61 | $5.44 | **$7.05** |
-| 50,000 | $1.33 | $6.48 | $0.25 | $8.06 | $5.44 | **$13.50** |
+| 1,000 | $0.03 | $0.13 | $0.01 | $0.16 | $6.44 | **$6.60** |
+| 10,000 | $0.27 | $1.30 | $0.05 | $1.61 | $6.44 | **$8.05** |
+| 50,000 | $1.33 | $6.48 | $0.25 | $8.06 | $6.44 | **$14.50** |
 
 50,000 sign-ins are 750,000 requests, within the plan's 1 million.
 
@@ -187,11 +187,11 @@ With **R = 10 refreshes per sign-in** (an app whose users stay signed in for abo
 
 | N | Sign-ins | Refreshes | Email | X-Ray | Requests total | Fixed | **Total** |
 | --: | --: | --: | --: | --: | --: | --: | --: |
-| 1,000 | $0.04 | $0.15 | $0.01 | $0.08 (15,000 traces) | $0.28 | $21.74 | **$22.02** |
-| 10,000 | $0.38 | $1.51 | $0.05 | $0.75 (150,000 traces) | $2.69 | $21.74 | **$24.43** |
-| 50,000 | $1.89 | $7.57 | $0.25 | $3.75 (750,000 traces) | $13.46 | $21.74 | **$35.20** |
-| 100,000 | $3.78 | $15.14 | $0.50 | $7.50 (1,500,000 traces) | $26.92 | $21.74 | **$48.66** |
-| 1,000,000 | $37.84 | $151.37 | $5.00 | $16.06 (3,212,400 traces) | $210.27 | $21.74 | **$232.01** |
+| 1,000 | $0.04 | $0.15 | $0.01 | $0.08 (15,000 traces) | $0.28 | $22.74 | **$23.02** |
+| 10,000 | $0.38 | $1.51 | $0.05 | $0.75 (150,000 traces) | $2.69 | $22.74 | **$25.43** |
+| 50,000 | $1.89 | $7.57 | $0.25 | $3.75 (750,000 traces) | $13.46 | $22.74 | **$36.20** |
+| 100,000 | $3.78 | $15.14 | $0.50 | $7.50 (1,500,000 traces) | $26.92 | $22.74 | **$49.66** |
+| 1,000,000 | $37.84 | $151.37 | $5.00 | $16.06 (3,212,400 traces) | $210.27 | $22.74 | **$233.01** |
 
 Without tracing (`tracing = "off"`), subtract the X-Ray column. X-Ray traces are requests = N × (5 + 10). At 1 million sign-ins, 15 million requests is 5.8 a second on average, so it traces 2,592,000 + 5% × (15,000,000 − 2,592,000) = 3,212,400.
 
@@ -238,7 +238,7 @@ Spikes on 2026-11-12 subscribed copies of LiteLogin's main distribution and web 
 
 So on the Free plan, LiteLogin would lose its stricter rate limit on the sign-in endpoints (300 requests per 5 minutes per IP, against 3,000 for everything), and the four Common rule set rules that `loopback-redirects` blocks outside sign-in and logout would have to count everywhere. Per-account lockout would still protect passwords, but per-IP credential stuffing would meet a limit ten times higher. That isn't worth $10.50 a month for most deployments, so LiteLogin uses pay-as-you-go pricing by default.
 
-Lean uses it (`cloudfront_plan = "free"`), which needs `custom_hosts = false` and no `rate_limit_exempt_cidrs`. It subscribes the default hosts' distribution, its web ACL and the Route 53 zone to the Free plan, drops `auth-endpoints-rate` and `loopback-redirects`, switches the distribution to every edge location, and uses AWS managed policies: `Managed-AllViewerExceptHostHeader` forwards everything the Auth Lambda needs, and `Managed-CachingDisabled` caches nothing, so discovery and JWKS requests reach the Lambda too (a request each, at the refresh's Lambda cost without KMS). A Full deployment with only this changed has a fixed part of $21.74 − $10.50 = **$11.24** a month. Above the plan's 1 million requests a month, about 65,000 sign-ins, CloudFront may slow delivery; it doesn't charge more. Turning it off cancels the plan, waits 3 minutes for the cancellation to settle (CloudFront and WAF refuse the rules and policies until it has), and puts them back, in one apply.
+Lean uses it (`cloudfront_plan = "free"`), which needs `custom_hosts = false` and no `rate_limit_exempt_cidrs`. It subscribes the default hosts' distribution, its web ACL and the Route 53 zone to the Free plan, drops `auth-endpoints-rate` and `loopback-redirects`, switches the distribution to every edge location, and uses AWS managed policies: `Managed-AllViewerExceptHostHeader` forwards everything the Auth Lambda needs, and `Managed-CachingDisabled` caches nothing, so discovery and JWKS requests reach the Lambda too (a request each, at the refresh's Lambda cost without KMS). A Full deployment with only this changed has a fixed part of $22.74 − $10.50 = **$12.24** a month. Above the plan's 1 million requests a month, about 65,000 sign-ins, CloudFront may slow delivery; it doesn't charge more. Turning it off cancels the plan, waits 3 minutes for the cancellation to settle (CloudFront and WAF refuse the rules and policies until it has), and puts them back, in one apply.
 
 Not tested:
 
@@ -253,4 +253,4 @@ AWS's free tier is per account, shared with anything else in it, so the totals a
 - CloudFront: 10 million requests, 1 TB of data and 2 million function runs a month. Up to about 660,000 sign-ins a month with 10 refreshes each, CloudFront's request part is free.
 - DynamoDB: 25 GB of storage and 2.5 million stream read units a month.
 
-Lambda, X-Ray, KMS and CloudWatch have free tiers too; see each service's pricing page. CloudWatch's always-free 10 custom metrics and 10 alarm metrics matter most to Lean: in an account of its own, they leave about $3.54 of its fixed part ($3.03 of KMS and $0.50 of alarms).
+Lambda, X-Ray, KMS and CloudWatch have free tiers too; see each service's pricing page. CloudWatch's always-free 10 custom metrics and 10 alarm metrics matter most to Lean: in an account of its own, they leave about $4.54 of its fixed part ($4.03 of KMS and $0.50 of alarms).

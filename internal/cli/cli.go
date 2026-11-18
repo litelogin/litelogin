@@ -99,6 +99,7 @@ API endpoint comes from --endpoint, $LITELOGIN_ENDPOINT, --environment
 		app.poolCommand(),
 		app.clientCommand(),
 		app.hostCommand(),
+		app.idpCommand(),
 		app.userCommand(),
 		app.keysCommand(),
 		app.statusCommand(),
