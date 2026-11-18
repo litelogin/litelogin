@@ -370,7 +370,7 @@ variable "rate_limit_exempt_cidrs" {
 
 locals {
   rate_exempt      = length(var.rate_limit_exempt_cidrs) > 0
-  auth_rate_prefix = ["/login", "/register", "/password/", "/passkey/", "/token"]
+  auth_rate_prefix = ["/login", "/register", "/password/", "/passkey/", "/federation/", "/token"]
 }
 
 resource "aws_wafv2_ip_set" "rate_exempt" {

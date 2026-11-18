@@ -20,7 +20,9 @@ import (
 	"golang.org/x/net/websocket"
 
 	"github.com/litelogin/litelogin/internal/crypto"
+	"github.com/litelogin/litelogin/internal/federation/fedtest"
 	"github.com/litelogin/litelogin/internal/httpx"
+	"github.com/litelogin/litelogin/internal/secretbox"
 	"github.com/litelogin/litelogin/internal/store"
 )
 
@@ -500,4 +502,39 @@ func mustPool(t *testing.T, e *env) string {
 func jsString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// TestFederatedSignInInChrome signs up through an identity provider in
+// Chrome: the sign-in page's link, the provider, the callback (which needs
+// the browser's cookie) and the account page.
+func TestFederatedSignInInChrome(t *testing.T) {
+	p := fedtest.New(t)
+	e := newEnvWith(t, false, envOptions{provider: p})
+	c := startChrome(t)
+	base := e.serveOnLocalhost()
+
+	ctx := context.Background()
+	h, err := e.st.GetLoginHost(ctx, browserHost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := e.ws.IDPSecrets.Seal(ctx, []byte(p.ClientSecret), secretbox.IDPContext(h.PoolID, "fake"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.CreateIDP(ctx, &store.IDP{ID: "fake", PoolID: h.PoolID, OrgID: h.OrgID, Type: store.IDPTypeOIDC,
+		Name: "Fake", Issuer: p.Issuer, ClientID: p.ClientID, ClientSecret: sealed}); err != nil {
+		t.Fatal(err)
+	}
+	h.IDPs = []string{"fake"}
+	if err := e.st.UpdateHostSettings(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	p.SetUser(fedtest.User{Subject: "chrome-user", Email: "chrome@example.com", EmailVerified: true})
+
+	// The fake provider's certificate is self-signed.
+	c.call("Security.setIgnoreCertificateErrors", map[string]any{"ignore": true}, nil)
+	c.navigate(base + "/login")
+	c.eval(`document.querySelector('a.idp').click()`)
+	c.waitFor(`location.pathname === '/account' && document.body.textContent.includes('chrome@example.com')`)
 }

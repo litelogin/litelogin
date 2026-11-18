@@ -141,6 +141,8 @@ All of these are served by the Auth Lambda on every login host.
 | `/account/*` | GET, POST | Signed-in user: change password, change email (confirmed by a link to the new address), list sessions, sign one out, sign out everywhere; list, rename and remove passkeys |
 | `/passkey/login/options`, `/passkey/login` | POST | Sign in with a passkey (if the host's `passkeys_enabled`) |
 | `/passkey/register/options`, `/passkey/register` | POST | Signed-in user: add a passkey |
+| `/federation/start?idp=…` | GET | Start signing in through one of the host's identity providers: redirect to the provider |
+| `/federation/callback` | GET | Return from the provider: exchange the code, then sign the user in or up |
 
 **CORS:**
 - `/.well-known/*` is public and allows any origin.
@@ -183,13 +185,21 @@ Users can turn on two-factor sign-in with an authenticator app (TOTP, RFC 6238).
 
 ### Social sign-in
 
-Social sign-in lets users sign in and register with an identity provider: any OpenID Connect provider found by discovery (Google, Microsoft Entra, GitLab, Okta…), GitHub, or Apple. It's being built in phases ([issue #37](https://github.com/litelogin/litelogin/issues/37) has the design). So far, providers can be configured; the sign-in pages don't show them yet.
+Social sign-in lets users sign in and register with an identity provider: any OpenID Connect provider found by discovery (Google, Microsoft Entra, GitLab, Okta…), and later GitHub and Apple. It's being built in phases ([issue #37](https://github.com/litelogin/litelogin/issues/37) has the design). OpenID Connect providers work; GitHub and Apple providers can be configured but aren't shown yet, and linking a provider to an existing account (from the account page) comes next.
 
 - **Each org registers its own app** with each provider, so the provider's consent screen shows the org's name. There's no shared app.
 - **Providers belong to a pool** (`/v1/pools/{pool}/idps`), because the identities they vouch for are the pool's users. Each login host lists which of its pool's providers its sign-in page shows (`idps`, at most 10). A provider can't be deleted while a host lists it.
 - **Callback URLs:** the provider redirects to `https://{host}/federation/callback` on the host the sign-in started on, since sessions are host-only. Every host's URL must be registered with the provider; the Admin API lists them in `callback_urls`.
 - **Secrets** (OIDC and GitHub client secrets, Apple's signing key) must be read back, so they're encrypted with their own KMS key, bound by the encryption context (`purpose=idp_secret`, the pool and the provider). The Admin API may only encrypt with the key, and the Auth Lambda only decrypt, so the API that takes secrets can never show them again. The local development servers use AES-GCM with a fixed key.
-- **Evidence of two factors:** a provider's `mfa_amr` and `mfa_acr` list the `amr` and `acr` values in its ID token that count as two factors (`mfa` in `amr` always does). Without such evidence, a social sign-in will be one factor, and the pool's two-factor rules apply as they do to passwords.
+- **The sign-in page** shows a plain link per provider (`/federation/start?idp=…`, carrying the pending `/authorize` request), so it needs no script and no change to the CSP.
+- **Starting** stores a federation state (`FED#`, 10 minutes, works once): the provider, a nonce, the PKCE verifier and the pending request. The `state` sent to the provider is a random token, stored hashed. A second random token goes in a `__Host-litelogin_fed` cookie (`SameSite=Lax`), stored hashed in the state too: the callback must come from the browser that started the sign-in, so an attacker can't get a victim signed in to the attacker's account (login CSRF).
+- **The callback** uses up the state (on the same host), checks the cookie, exchanges the code with PKCE and the org's client secret, and verifies the ID token: an RS256 or ES256 signature by one of the provider's keys, `iss`, `aud` (and `azp`), `exp`, `iat` and the nonce.
+- **Calls to providers** go through an HTTP client that allows only HTTPS, follows no redirects, times out after 10 seconds, reads at most 1 MiB, and connects only to public addresses: the dialer checks the address it actually connects to, after DNS resolution, and refuses private, loopback, link-local (the instance metadata service) and other special-purpose ranges. Issuer URLs come from org admins, so this keeps them from reaching anything inside AWS. Discovery documents and keys are cached for an hour; an unknown key ID refetches the keys at most once a minute.
+- **Finding the user:** the provider's `sub` identifies the account at the provider, and an identity item links it to one user of the pool. The first sign-in creates the user, if the host's `registration_enabled` allows it, with the email from the ID token and no password. `email_verified` is the provider's say-so; if it doesn't vouch for the address, LiteLogin sends its own verification email, and pools that require a verified email (or two factors) wait for it, as for passwords. The email is never synced afterwards.
+- **Never linked automatically:** if the email already belongs to a user, the provider account isn't linked to them, and the page says only that no account is linked and to sign in another way, whether or not the email exists. Otherwise whoever controls the email at any provider an org configures could take over the account. Linking an existing account to a provider will be on the account page.
+- **Evidence of two factors:** a provider's `mfa_amr` and `mfa_acr` list the `amr` and `acr` values in its ID token that count as two factors (`mfa` in `amr` always does). With evidence, the sign-in counts as two factors. Without it, the pool's two-factor rules apply as they do to passwords: a user with an authenticator app gives a code (`/login/2fa`), and in a pool with `mfa_required` a user without one sets it up first.
+- **`amr` and `acr`:** a social sign-in is `["fed"]` and `urn:litelogin:acr:fed`; with the provider's evidence of two factors `["fed", "mfa"]`, and with an app code `["fed", "otp", "mfa"]` (a recovery code `["fed", "mfa"]`), all three `urn:litelogin:acr:mfa`. Clients that need a strong sign-in should check `acr` or `amr`: a provider account is only as strong as the provider's own sign-in.
+- **Users without a password** can't sign in with one, and the account page can't confirm it's them by password; a recent social sign-in works instead. They can set one through "Forgot your password?", which proves they control the email.
 
 ## Protocol
 
@@ -226,7 +236,7 @@ Authorization codes are bound to the client, the redirect URI, the PKCE challeng
 | Validated by | The relying party, locally with the JWKS | The relying party, locally with the JWKS | LiteLogin only |
 
 - **Minimal claims:** access tokens carry no email or profile data. Relying parties that need it call `/userinfo` or read the ID token.
-- **How the user signed in:** `acr` is one value a client can check without interpreting `amr`: `phr` for a passkey, `urn:litelogin:acr:pwd` for a password. Discovery lists them in `acr_values_supported`. Access tokens carry `acr` and `auth_time` too (RFC 9068 §2.2.1), so a resource server can ask for a stronger or more recent sign-in (RFC 9470). `acr_values` in an authorization request isn't acted on yet.
+- **How the user signed in:** `acr` is one value a client can check without interpreting `amr`: `phr` for a passkey, `urn:litelogin:acr:mfa` for two factors, `urn:litelogin:acr:pwd` for a password, `urn:litelogin:acr:fed` for an identity provider. Discovery lists them in `acr_values_supported`. Access tokens carry `acr` and `auth_time` too (RFC 9068 §2.2.1), so a resource server can ask for a stronger or more recent sign-in (RFC 9470). `acr_values` in an authorization request isn't acted on yet.
 - **Audience:** `aud` is the client ID for both token types until resource indicators (RFC 8707) are supported.
 - **No `auth_version` claim:** relying parties can't check it, so it isn't included.
 
@@ -428,7 +438,7 @@ If a deployment needs instant client or org disablement, shorten the cache time 
 ## Security
 
 - **Edge:**
-  - WAF rate-based rules per IP on `/login`, `/register`, `/password/*`, `/passkey/*` and `/token`, plus AWS managed rule groups.
+  - WAF rate-based rules per IP on `/login`, `/register`, `/password/*`, `/passkey/*`, `/federation/*` and `/token`, plus AWS managed rule groups.
   - TLS 1.2 minimum.
   - HSTS on every host.
 - **Cookies:**
@@ -515,4 +525,4 @@ SelfHosting.md says which to raise before deploying, and test/load/README.md wha
 
 - **Custom domain scale.** Custom hosts are tenants of one CloudFront multi-tenant distribution (CloudFront SaaS Manager), within its quotas for tenants and certificates. Beyond them, the fallback would be more distributions.
 - **One Region.** An environment runs in us-east-1 only; there's no multi-Region failover.
-- **Passwords and passkeys.** Social sign-in is being built: identity providers can be configured, but the sign-in pages don't use them yet, and an account always has a password. A passkey works only on the login host it was made on.
+- **Passwords, social sign-in and passkeys.** Social sign-in is being built: OpenID Connect providers work, but GitHub and Apple don't yet, and an existing account can't be linked to a provider yet. A passkey works only on the login host it was made on.

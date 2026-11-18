@@ -281,9 +281,12 @@ type PendingMFA struct {
 	// Authz is the pending /authorize request, if any.
 	Authz string `dynamodbav:"authz,omitempty"`
 	// Secret is the new TOTP secret, encrypted (MFAEnroll, MFASetup).
-	Secret    []byte `dynamodbav:"secret,omitempty"`
-	Attempts  int64  `dynamodbav:"attempts"`
-	ExpiresAt int64  `dynamodbav:"expires_at"`
+	Secret []byte `dynamodbav:"secret,omitempty"`
+	// FirstFactor is the amr of the sign-in's first step (MFAVerify,
+	// MFAEnroll): empty for a password, ["fed"] for an identity provider.
+	FirstFactor []string `dynamodbav:"first_factor,omitempty"`
+	Attempts    int64    `dynamodbav:"attempts"`
+	ExpiresAt   int64    `dynamodbav:"expires_at"`
 }
 
 type pendingMFAItem struct {
@@ -386,7 +389,8 @@ func (s *Store) DeletePendingMFA(ctx context.Context, hash string) error {
 }
 
 // isUserItem reports whether a sort key under USER#{user} is one of the
-// user's own items (passkeys, TOTP, recovery codes) rather than DETAILS.
+// user's own items (passkeys, TOTP, recovery codes, identities) rather
+// than DETAILS.
 func isUserItem(sk string) bool {
-	return sk == skTOTP || strings.HasPrefix(sk, pfxRecovery) || strings.HasPrefix(sk, pfxPasskey)
+	return sk == skTOTP || strings.HasPrefix(sk, pfxRecovery) || strings.HasPrefix(sk, pfxPasskey) || strings.HasPrefix(sk, pfxIdentity)
 }

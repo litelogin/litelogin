@@ -133,7 +133,26 @@ func withSecondFactor(amr []string) []string {
 	if amr = signInMethods(amr); slices.Contains(amr, "mfa") {
 		return amr
 	}
-	return amrTOTP
+	return twoFactorAMR(firstFactor(amr), amrTOTP)
+}
+
+// firstFactor is the first step of a sign-in with these methods, for a
+// second step on top of it: amrFed for an identity provider, nil (a
+// password) otherwise.
+func firstFactor(amr []string) []string {
+	if slices.Contains(amr, "fed") {
+		return amrFed
+	}
+	return nil
+}
+
+// twoFactorAMR is the amr of a sign-in whose first step was first (nil
+// for a password) and whose second was second (amrTOTP or amrRecovery).
+func twoFactorAMR(first, second []string) []string {
+	if len(first) == 0 {
+		return second
+	}
+	return append(slices.Clone(first), second[1:]...)
 }
 
 // notify sends a security notice to the user, logging a failure: the
@@ -183,11 +202,12 @@ func poolSatisfied(t *tenant, amr []string) bool {
 	return !t.Pool.MFARequired || slices.Contains(signInMethods(amr), "mfa")
 }
 
-// startEnrollment is a password sign-in, in a pool that requires
-// two-factor sign-in, by a user without it: instead of a session, they set
-// up an authenticator app first. The user has shown their password and,
-// before this, verified their email.
-func (s *Server) startEnrollment(w http.ResponseWriter, r *http.Request, t *tenant, u *store.User, authz string) {
+// startEnrollment is a sign-in, in a pool that requires two-factor
+// sign-in, by a user without it: instead of a session, they set up an
+// authenticator app first. The user has shown their password (first is
+// nil) or signed in through an identity provider (amrFed) and, before
+// this, verified their email.
+func (s *Server) startEnrollment(w http.ResponseWriter, r *http.Request, t *tenant, u *store.User, authz string, first []string) {
 	sealed, err := s.Secrets.Seal(r.Context(), crypto.NewTOTPSecret(), totpContext(u))
 	if err != nil {
 		s.fail(w, r, t, err)
@@ -195,7 +215,7 @@ func (s *Server) startEnrollment(w http.ResponseWriter, r *http.Request, t *tena
 	}
 	p := &store.PendingMFA{
 		Purpose: store.MFAEnroll, Host: t.Host, PoolID: t.Pool.ID, UserID: u.ID, AuthVersion: u.AuthVersion,
-		Authz: authz, Secret: sealed,
+		Authz: authz, Secret: sealed, FirstFactor: first,
 	}
 	if err := s.newPendingMFA(w, r, p); err != nil {
 		s.fail(w, r, t, err)
@@ -288,7 +308,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request, t *tenant) {
 		return
 	}
 	u.AuthVersion, u.MFA = v, true
-	if err := s.startSession(w, r, t, u, amrTOTP, 0); err != nil {
+	if err := s.startSession(w, r, t, u, twoFactorAMR(p.FirstFactor, amrTOTP), 0); err != nil {
 		s.fail(w, r, t, err)
 		return
 	}
@@ -420,17 +440,18 @@ func (s *Server) confirmMFASetup(w http.ResponseWriter, r *http.Request, t *tena
 
 // ---- Sign in: the second step ----
 
-// startSecondStep is a password sign-in by a user with two-factor sign-in:
-// instead of a session, a pending sign-in, and the page that asks for the
-// code. While too many wrong codes have paused the second step, the
-// password alone gets no further.
-func (s *Server) startSecondStep(w http.ResponseWriter, r *http.Request, t *tenant, u *store.User, authz string) {
+// startSecondStep is a sign-in by a user with two-factor sign-in, after a
+// password (first is nil) or an identity provider (amrFed): instead of a
+// session, a pending sign-in, and the page that asks for the code. While
+// too many wrong codes have paused the second step, the first step alone
+// gets no further.
+func (s *Server) startSecondStep(w http.ResponseWriter, r *http.Request, t *tenant, u *store.User, authz string, first []string) {
 	if u.MFALockedUntil > s.now().Unix() {
 		metrics.Count(s.Metrics, metrics.MFAFailed, 1, metrics.Reason("locked"))
 		s.render(w, r, t, http.StatusTooManyRequests, "login", pageData{Title: "Sign in", Email: u.Email, Error: msgMFALocked, Authz: authz, Script: pageScript(t)})
 		return
 	}
-	p := &store.PendingMFA{Purpose: store.MFAVerify, Host: t.Host, PoolID: t.Pool.ID, UserID: u.ID, AuthVersion: u.AuthVersion, Authz: authz}
+	p := &store.PendingMFA{Purpose: store.MFAVerify, Host: t.Host, PoolID: t.Pool.ID, UserID: u.ID, AuthVersion: u.AuthVersion, Authz: authz, FirstFactor: first}
 	if err := s.newPendingMFA(w, r, p); err != nil {
 		s.fail(w, r, t, err)
 		return
@@ -527,7 +548,7 @@ func (s *Server) secondStep(w http.ResponseWriter, r *http.Request, t *tenant) {
 			s.log().WarnContext(ctx, "reset failed codes", "error", err)
 		}
 	}
-	if err := s.startSession(w, r, t, u, amr, 0); err != nil {
+	if err := s.startSession(w, r, t, u, twoFactorAMR(p.FirstFactor, amr), 0); err != nil {
 		s.fail(w, r, t, err)
 		return
 	}
@@ -692,7 +713,7 @@ func (s *Server) confirmIdentity(w http.ResponseWriter, r *http.Request, t *tena
 		s.notify(ctx, t, u, email.RecoveryCodeUsed, email.Data{Count: left})
 	}
 	// A new session (and cookie) for the stronger sign-in.
-	if err := s.startSession(w, r, t, u, amr, 0); err != nil {
+	if err := s.startSession(w, r, t, u, twoFactorAMR(firstFactor(sess.AMR), amr), 0); err != nil {
 		s.fail(w, r, t, err)
 		return
 	}

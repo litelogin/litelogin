@@ -41,9 +41,12 @@ type User struct {
 	MFA            bool  `dynamodbav:"mfa,omitempty"`
 	MFAFailedCount int64 `dynamodbav:"mfa_failed_count,omitempty"`
 	MFALockedUntil int64 `dynamodbav:"mfa_locked_until,omitempty"`
-	CreatedAt      int64 `dynamodbav:"created_at"`
-	UpdatedAt      int64 `dynamodbav:"updated_at"`
-	Version        int64 `dynamodbav:"version"`
+	// IdentityCount is how many identity providers the user is linked to
+	// (Identity items).
+	IdentityCount int64 `dynamodbav:"identity_count,omitempty"`
+	CreatedAt     int64 `dynamodbav:"created_at"`
+	UpdatedAt     int64 `dynamodbav:"updated_at"`
+	Version       int64 `dynamodbav:"version"`
 }
 
 type userItem struct {
@@ -326,21 +329,36 @@ func (s *Store) updateUser(ctx context.Context, userID, upd, cond string, nm map
 	return nil
 }
 
-// DeleteUser deletes a user and its email item. Every credential fails
-// validation as soon as the user item is gone; the Worker deletes the
-// user's sessions and refresh families afterwards (Datamodel.md, "Revoke
-// everything for a user").
+// DeleteUser deletes a user, its email item and its identities with their
+// link items, in one transaction. Every credential fails validation as
+// soon as the user item is gone; the Worker deletes the user's sessions and
+// refresh families afterwards (Datamodel.md, "Revoke everything for a
+// user").
 func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 	u, err := s.GetUser(ctx, userID)
 	if err != nil {
 		return err
 	}
-	err = s.transact(ctx, []types.TransactWriteItem{
-		del(s.config, userKey(userID), "#email = :email", names("email"), map[string]types.AttributeValue{":email": avS(u.Email)}),
+	ids, err := s.ListIdentities(ctx, userID)
+	if err != nil {
+		return err
+	}
+	// The identities listed must be all of them.
+	cond, vals := "#email = :email AND attribute_not_exists(#identity_count)", map[string]types.AttributeValue{":email": avS(u.Email)}
+	if u.IdentityCount != 0 {
+		cond = "#email = :email AND #identity_count = :ids"
+		vals[":ids"] = avN(u.IdentityCount)
+	}
+	if int64(len(ids)) != u.IdentityCount {
+		return ErrConditionFailed // an identity is being linked or unlinked
+	}
+	items := []types.TransactWriteItem{
+		del(s.config, userKey(userID), cond, names("email", "identity_count"), vals),
 		del(s.config, emailKey(u.PoolID, u.Email), "#user_id = :user", names("user_id"), map[string]types.AttributeValue{":user": avS(userID)}),
-	})
+	}
+	err = s.transact(ctx, append(items, s.identityDeletes(ids, userID)...))
 	if asTxFailure(err) != nil {
-		return ErrConditionFailed // the email changed or the user was deleted concurrently
+		return ErrConditionFailed // the email or identities changed, or the user was deleted concurrently
 	}
 	return err
 }

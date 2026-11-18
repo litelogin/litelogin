@@ -26,6 +26,7 @@ import (
 	"github.com/litelogin/litelogin/internal/configcache"
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/email"
+	"github.com/litelogin/litelogin/internal/federation"
 	"github.com/litelogin/litelogin/internal/health"
 	"github.com/litelogin/litelogin/internal/httpx"
 	"github.com/litelogin/litelogin/internal/jwt"
@@ -94,6 +95,8 @@ func run(logger *slog.Logger) error {
 		Verifier: jwt.NewVerifier(keys, nil),
 		Log:      logger,
 		Metrics:  rec,
+		// Calls to identity providers go only to public addresses.
+		Federation: &federation.Client{HTTP: federation.NewHTTPClient()},
 	}
 
 	mux := http.NewServeMux()

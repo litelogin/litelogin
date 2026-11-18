@@ -22,6 +22,8 @@ import (
 	"github.com/litelogin/litelogin/internal/configcache"
 	"github.com/litelogin/litelogin/internal/crypto"
 	"github.com/litelogin/litelogin/internal/email"
+	"github.com/litelogin/litelogin/internal/federation"
+	"github.com/litelogin/litelogin/internal/federation/fedtest"
 	"github.com/litelogin/litelogin/internal/httpx"
 	"github.com/litelogin/litelogin/internal/jwt"
 	"github.com/litelogin/litelogin/internal/keyrotation"
@@ -60,6 +62,8 @@ type envOptions struct {
 	// configTTL is the config cache's lifetime: effectively none by
 	// default, so tests see their own config changes at once.
 	configTTL time.Duration
+	// provider, if set, is the identity provider the server can reach.
+	provider *fedtest.Provider
 }
 
 func newEnv(t *testing.T, requireVerified bool) *env {
@@ -121,10 +125,11 @@ func newEnvWith(t *testing.T, requireVerified bool, opts envOptions) *env {
 		t.Fatal(err)
 	}
 	ws := &web.Server{
-		Secrets: secrets,
-		Metrics: e.metrics,
-		Now:     func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) },
-		Store:   st,
+		Secrets:    secrets,
+		IDPSecrets: secrets,
+		Metrics:    e.metrics,
+		Now:        func() time.Time { return time.Now().Add(time.Duration(e.skew.Load())) },
+		Store:      st,
 		// Effectively uncached by default, so tests see their own config
 		// changes.
 		Config:   configcache.New(st, max(opts.configTTL, time.Nanosecond)),
@@ -133,6 +138,9 @@ func newEnvWith(t *testing.T, requireVerified bool, opts envOptions) *env {
 		Keys:     keys,
 		Signer:   jwt.NewSigner(fake, keys),
 		Verifier: jwt.NewVerifier(keys, nil),
+	}
+	if opts.provider != nil {
+		ws.Federation = &federation.Client{HTTP: opts.provider.Server.Client()}
 	}
 	h := ws.Handler()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
