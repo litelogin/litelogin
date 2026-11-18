@@ -12,8 +12,9 @@
 #   - litelogin-deploy: assumed by GitHub Actions jobs that run in the
 #     matching GitHub environment; AdministratorAccess
 #   - litelogin-plan: assumed by pull request jobs; ReadOnlyAccess plus the
-#     state lock files, with reading table items, logs, queue messages and
-#     WAF samples, and using KMS keys, denied
+#     state lock files and CloudFront pricing plan subscriptions, with
+#     reading table items, logs, queue messages and WAF samples, and using
+#     KMS keys, denied
 #
 # With --github, also configures the GitHub repository (requires `gh auth login`):
 #   - a GitHub environment named after the LiteLogin environment, limited to
@@ -318,6 +319,22 @@ ensure_roles() {
       "secretsmanager:GetSecretValue", "ssm:GetParameter", "ssm:GetParameters",
       "ssm:GetParametersByPath"
     ],
+    "Resource": "*"
+  }]
+}
+EOF
+)"
+  # ReadOnlyAccess doesn't cover Pricing Plan Manager, and a plan reads the
+  # CloudFront flat-rate plan subscription of an environment that uses one
+  # (cloudfront_plan = "free"). Subscriptions are configuration, not user
+  # data.
+  aws iam put-role-policy --role-name "$PLAN_ROLE" --policy-name read-pricing-plans --policy-document "$(cat <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Sid": "ReadPricingPlanSubscriptions",
+    "Effect": "Allow",
+    "Action": ["pricingplanmanager:Get*", "pricingplanmanager:List*"],
     "Resource": "*"
   }]
 }
