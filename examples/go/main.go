@@ -1,7 +1,8 @@
 // Package main is the Go example: a small web app that signs users in with
 // LiteLogin, using github.com/coreos/go-oidc/v3 and golang.org/x/oauth2. It
-// runs the authorization code flow with PKCE, state and nonce, and keeps a
-// server-side session.
+// runs the authorization code flow with PKCE, state and nonce, keeps a
+// server-side session, shows the ID token's claims, and signs out with
+// RP-initiated logout.
 //
 // It's configured with environment variables; README.md has the setup.
 //
@@ -9,6 +10,9 @@
 //	CLIENT_ID      the client's ID (required)
 //	CLIENT_SECRET  the client's secret (leave unset for a public client)
 //	REDIRECT_URL   a registered redirect URI (default http://localhost:3000/callback)
+//	POST_LOGOUT_REDIRECT_URL
+//	               a registered post-logout redirect URI, e.g. http://localhost:3000/
+//	               (optional: without it, logout ends on the issuer's sign-in page)
 //	LISTEN_ADDR    the address to listen on (default localhost:3000)
 package main
 
@@ -84,7 +88,10 @@ type config struct {
 	clientID     string
 	clientSecret string
 	redirectURL  *url.URL
-	addr         string
+	// postLogoutRedirectURL is where the issuer sends the browser after
+	// logout, or "".
+	postLogoutRedirectURL string
+	addr                  string
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -106,6 +113,12 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return cfg, fmt.Errorf("REDIRECT_URL %q isn't an absolute http(s) URL with a path", redirect)
 	}
 	cfg.redirectURL = u
+	if v := getenv("POST_LOGOUT_REDIRECT_URL"); v != "" {
+		if u, err := url.Parse(v); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return cfg, fmt.Errorf("POST_LOGOUT_REDIRECT_URL %q isn't an absolute http(s) URL", v)
+		}
+		cfg.postLogoutRedirectURL = v
+	}
 	if cfg.addr == "" {
 		cfg.addr = "localhost:3000"
 	}
@@ -118,6 +131,8 @@ type app struct {
 	http     *http.Client
 	oauth    *oauth2.Config
 	verifier *oidc.IDTokenVerifier
+	// endSession is the issuer's end_session_endpoint, or "".
+	endSession string
 	// requireIss is whether the issuer sends iss with authorization
 	// responses (RFC 9207), so a response without it is rejected.
 	requireIss bool
@@ -135,7 +150,8 @@ func newApp(ctx context.Context, cfg config, client *http.Client) (*app, error) 
 		return nil, fmt.Errorf("discovery: %w", err)
 	}
 	var meta struct {
-		IssParameter bool `json:"authorization_response_iss_parameter_supported"`
+		EndSession   string `json:"end_session_endpoint"`
+		IssParameter bool   `json:"authorization_response_iss_parameter_supported"`
 	}
 	if err := provider.Claims(&meta); err != nil {
 		return nil, fmt.Errorf("discovery: %w", err)
@@ -151,6 +167,7 @@ func newApp(ctx context.Context, cfg config, client *http.Client) (*app, error) 
 			Scopes:       []string{oidc.ScopeOpenID, "email"},
 		},
 		verifier:   provider.Verifier(&oidc.Config{ClientID: cfg.clientID}),
+		endSession: meta.EndSession,
 		requireIss: meta.IssParameter,
 		secure:     cfg.redirectURL.Scheme == "https",
 		sessions:   newSessionStore(),
@@ -168,14 +185,18 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /login", a.handleLogin)
 	mux.HandleFunc("GET "+a.cfg.redirectURL.Path, a.handleCallback)
 	mux.HandleFunc("GET /claims", a.handleClaims)
+	mux.HandleFunc("POST /logout", a.handleLogout)
 	return securityHeaders(mux)
 }
 
 func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
 	s := a.sessions.get(a.sessionID(r))
-	page := struct{ User *user }{}
+	page := struct {
+		User *user
+		CSRF string
+	}{}
 	if s != nil {
-		page.User = s.user
+		page.User, page.CSRF = s.user, s.csrf
 	}
 	render(w, http.StatusOK, "home", page)
 }
@@ -277,6 +298,45 @@ func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+// handleLogout signs the user out of the app, then sends the browser to
+// the issuer's end_session_endpoint to end the issuer's session too
+// (OpenID Connect RP-Initiated Logout). id_token_hint says who is signing
+// out and from which client, and the issuer returns the browser to the
+// post-logout redirect URI, if one is configured.
+func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	id := a.sessionID(r)
+	s := a.sessions.get(id)
+	if s == nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	// The form's token shows the request came from the app's own page.
+	if subtle.ConstantTimeCompare([]byte(r.PostFormValue("csrf")), []byte(s.csrf)) != 1 {
+		a.fail(w, http.StatusForbidden, "The sign-out request didn't come from this app's page.")
+		return
+	}
+	a.sessions.delete(id)
+	a.clearSessionCookie(w)
+	if a.endSession == "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	u, err := url.Parse(a.endSession)
+	if err != nil {
+		a.fail(w, http.StatusBadGateway, "The issuer's end_session_endpoint isn't a URL.")
+		return
+	}
+	q := u.Query()
+	q.Set("id_token_hint", s.user.RawIDToken)
+	q.Set("client_id", a.cfg.clientID)
+	if a.cfg.postLogoutRedirectURL != "" {
+		q.Set("post_logout_redirect_uri", a.cfg.postLogoutRedirectURL)
+	}
+	u.RawQuery = q.Encode()
+	http.Redirect(w, r, u.String(), http.StatusSeeOther)
+}
+
 // sessionID returns the session cookie's value, or "".
 func (a *app) sessionID(r *http.Request) string {
 	if c, err := r.Cookie(sessionCookie); err == nil {
@@ -290,6 +350,13 @@ func (a *app) setSessionCookie(w http.ResponseWriter, id string) {
 	// running on loopback, where LiteLogin allows http redirect URIs.
 	http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure is set over https
 		Name: sessionCookie, Value: id, Path: "/",
+		HttpOnly: true, Secure: a.secure, SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (a *app) clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // as in setSessionCookie
+		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: a.secure, SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -330,6 +397,8 @@ type session struct {
 	expires time.Time
 	pending []pendingLogin // before sign-in
 	user    *user          // after sign-in
+	// csrf is the token the app's logout form carries, after sign-in.
+	csrf string
 }
 
 // sessionStore keeps sessions in memory, by ID. A real app would use a
@@ -410,8 +479,15 @@ func (s *sessionStore) signIn(oldID string, u *user) string {
 	delete(s.sessions, oldID)
 	s.sweep()
 	id := rand.Text()
-	s.sessions[id] = &session{expires: time.Now().Add(sessionLifetime), user: u}
+	s.sessions[id] = &session{expires: time.Now().Add(sessionLifetime), user: u, csrf: rand.Text()}
 	return id
+}
+
+// delete deletes the session with this ID.
+func (s *sessionStore) delete(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.sessions, id)
 }
 
 // live returns the unexpired session with this ID, or nil. s.mu is held.
@@ -464,6 +540,10 @@ var pages = template.Must(template.New("").Parse(`
 {{if .User}}
 <p>Signed in as <strong>{{or .User.Email .User.Subject}}</strong>.</p>
 <p><a href="/claims">Your ID token's claims</a></p>
+<form method="post" action="/logout">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<button type="submit">Sign out</button>
+</form>
 {{else}}
 <p>You're not signed in.</p>
 <p><a href="/login">Sign in</a></p>
