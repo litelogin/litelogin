@@ -342,7 +342,11 @@ func (s *Server) startMFASetup(w http.ResponseWriter, r *http.Request, t *tenant
 			return
 		}
 		if !ok {
-			s.renderAccount(w, r, t, http.StatusUnauthorized, sess, u, pageData{Error: "Your current password is incorrect."})
+			msg := "Your current password is incorrect."
+			if u.PasswordHash == "" {
+				msg = msgConfirmWithProvider
+			}
+			s.renderAccount(w, r, t, http.StatusUnauthorized, sess, u, pageData{Error: msg})
 			return
 		}
 	}

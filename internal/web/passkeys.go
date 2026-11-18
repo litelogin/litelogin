@@ -346,6 +346,10 @@ func (s *Server) passkeyRegisterOptions(w http.ResponseWriter, r *http.Request, 
 			s.failJSON(w, r, err)
 			return
 		}
+		if !ok && u.PasswordHash == "" {
+			jsonError(w, http.StatusUnauthorized, msgConfirmWithProvider)
+			return
+		}
 		if !ok {
 			msg := "Enter your password to add a passkey."
 			if r.PostFormValue("password") != "" {

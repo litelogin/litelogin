@@ -28,7 +28,11 @@ var accountNotices = map[string]string{
 	"passkey_removed":  "The passkey was removed. You're still signed in here; every other session was signed out.",
 	"mfa_enabled":      "Two-factor sign-in is on. You're still signed in here; every other session was signed out.",
 	"mfa_disabled":     "Two-factor sign-in is off. You're still signed in here; every other session was signed out.",
-	"confirmed":        "Thanks. For the next 10 minutes you can change your password, email, passkeys and two-factor sign-in.",
+	"confirmed":        "Thanks. For the next 10 minutes you can change your password, email, passkeys, linked accounts and two-factor sign-in.",
+	"idp_linked":       "Your account was linked. You can use it to sign in here.",
+	"idp_unlinked":     "The account was unlinked. You're still signed in here; every other session was signed out.",
+	"password_set":     "Your password was set. You're still signed in here; every other session was signed out.",
+	"fed_cancelled":    "Nothing changed: signing in with the other account was cancelled.",
 }
 
 // sessionView is one of the user's sessions on the account page.
@@ -106,9 +110,16 @@ func (s *Server) renderAccount(w http.ResponseWriter, r *http.Request, t *tenant
 			return
 		}
 	}
-	d.MFAPassword, d.StepUp, d.MFARequired = !s.recentSignIn(sess), !s.mfaFresh(sess, u), t.Pool.MFARequired
+	if err := s.fillIdentities(r.Context(), t, u, &d); err != nil {
+		s.fail(w, r, t, err)
+		return
+	}
+	recent := s.recentSignIn(sess)
+	d.NoPassword = u.PasswordHash == ""
+	d.FedConfirm = d.NoPassword && !recent
+	d.MFAPassword, d.StepUp, d.MFARequired = !recent && !d.NoPassword, !s.mfaFresh(sess, u), t.Pool.MFARequired
 	d.Title, d.Account, d.Sessions = "Your account", u, views
-	d.Passkeys, d.PasskeyPassword, d.MaxPasskeys = passkeyViews(passkeys), !u.MFA && !s.recentSignIn(sess), store.MaxPasskeysPerUser
+	d.Passkeys, d.PasskeyPassword, d.MaxPasskeys = passkeyViews(passkeys), !u.MFA && !recent && !d.NoPassword, store.MaxPasskeysPerUser
 	d.Script = pageScript(t)
 	s.render(w, r, t, status, "account", d)
 }
@@ -268,13 +279,23 @@ func (s *Server) changeEmail(w http.ResponseWriter, r *http.Request, t *tenant) 
 		again("That's already your email address.")
 		return
 	}
-	ok, err := s.checkCurrentPassword(r, u, r.PostFormValue("password"))
+	var ok bool
+	if u.PasswordHash == "" {
+		// No password to ask for: a recent sign-in shows it's them.
+		ok = s.recentSignIn(sess)
+	} else {
+		ok, err = s.checkCurrentPassword(r, u, r.PostFormValue("password"))
+	}
 	if err != nil {
 		s.fail(w, r, t, err)
 		return
 	}
 	if !ok {
-		again(msgBadCurrentPassword)
+		msg := msgBadCurrentPassword
+		if u.PasswordHash == "" {
+			msg = msgConfirmWithProvider
+		}
+		again(msg)
 		return
 	}
 	token := crypto.NewToken()

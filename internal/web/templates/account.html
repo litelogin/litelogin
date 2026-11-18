@@ -17,6 +17,17 @@
 </form>
 </section>
 {{end}}
+{{if .FedConfirm}}
+<section>
+<h2>Confirm it's you</h2>
+<p class="hint">To set a password or change your email, passkeys, linked accounts or two-factor sign-in, sign in again with your linked account.</p>
+{{range .Identities}}{{if .Usable}}<form method="post" action="/account/identities/confirm">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="idp" value="{{.IDPID}}">
+<button type="submit">Continue with {{.Name}}</button>
+</form>{{end}}{{end}}
+</section>
+{{end}}
 
 <section>
 <h2>Where you're signed in</h2>
@@ -59,7 +70,7 @@
 </li>{{end}}
 </ul>
 <p class="hint">Removing a passkey signs you out everywhere else.</p>{{end}}
-{{if and .PasskeysEnabled (lt (len .Passkeys) .MaxPasskeys) (not .StepUp)}}<form id="passkey-add" hidden>
+{{if and .PasskeysEnabled (lt (len .Passkeys) .MaxPasskeys) (not .StepUp) (not .FedConfirm)}}<form id="passkey-add" hidden>
 <label for="passkey_name">Name (optional)</label>
 <input id="passkey_name" name="name" type="text" maxlength="64" placeholder="Work laptop">
 <div id="passkey-password-field"{{if not .PasskeyPassword}} hidden{{end}}>
@@ -84,16 +95,50 @@
 <p class="hint">Turning it off signs you out everywhere else.</p>
 <button type="submit" class="secondary">Turn off two-factor sign-in</button>
 </form>{{end}}{{end}}
-{{else}}<p class="hint">Signing in with your password will also take a code from an authenticator app on your phone, such as Google Authenticator, Microsoft Authenticator or 1Password. A stolen password is then not enough.</p>
-<form method="post" action="/account/2fa/setup">
+{{else}}<p class="hint">Signing in will also take a code from an authenticator app on your phone, such as Google Authenticator, Microsoft Authenticator or 1Password. A stolen password is then not enough.</p>
+{{if .FedConfirm}}<p class="hint">Confirm it's you above first.</p>{{else}}<form method="post" action="/account/2fa/setup">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 {{if .MFAPassword}}<label for="mfa_password">Current password</label>
 <input id="mfa_password" name="password" type="password" autocomplete="current-password" required>
 {{end}}<button type="submit">Set up two-factor sign-in</button>
-</form>{{end}}
+</form>{{end}}{{end}}
 </section>
 
-<section>
+{{if or .Identities .Linkable}}<section>
+<h2>Linked accounts</h2>
+<p class="hint">{{if .NoPassword}}The accounts you sign in with.{{else}}Sign in with another account instead of your password.{{end}}</p>
+{{if .Identities}}<ul class="sessions">
+{{range .Identities}}<li>
+<div><strong>{{.Name}}</strong>{{if .Email}} · {{.Email}}{{end}}</div>
+<div class="hint">Linked {{.Linked}}{{if .LastUsed}}, last used {{.LastUsed}}{{end}}</div>
+{{if not (or $.StepUp $.FedConfirm)}}<form method="post" action="/account/identities/remove">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="idp" value="{{.IDPID}}">
+<button type="submit" class="secondary">Unlink {{.Name}}</button>
+</form>{{end}}
+</li>{{end}}
+</ul>
+<p class="hint">Unlinking an account signs you out everywhere else.</p>{{end}}
+{{if .Linkable}}{{if or .StepUp .FedConfirm}}<p class="hint">Confirm it's you above to link another account.</p>{{else}}{{range .Linkable}}<form method="post" action="/account/identities/link">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="idp" value="{{.IDPID}}">
+{{if $.MFAPassword}}<label for="link_password_{{.IDPID}}">Current password</label>
+<input id="link_password_{{.IDPID}}" name="password" type="password" autocomplete="current-password" required>
+{{end}}<button type="submit">Link {{.Name}}</button>
+</form>{{end}}{{end}}{{end}}
+</section>{{end}}
+
+{{if .NoPassword}}<section>
+<h2>Set a password</h2>
+<p class="hint">You sign in with a linked account. With a password, you can also sign in with your email.</p>
+{{if or .StepUp .FedConfirm}}<p class="hint">Confirm it's you above first.</p>{{else}}<form method="post" action="/account/password/set">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label for="new_password">New password</label>
+<input id="new_password" name="new_password" type="password" autocomplete="new-password" minlength="{{.MinPassword}}" required>
+<p class="hint">At least {{.MinPassword}} characters. This signs you out everywhere else.</p>
+<button type="submit">Set password</button>
+</form>{{end}}
+</section>{{else}}<section>
 <h2>Change password</h2>
 {{if .StepUp}}<p class="hint">Confirm it's you above first.</p>{{else}}<form method="post" action="/account/password">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -104,17 +149,17 @@
 <p class="hint">At least {{.MinPassword}} characters. This signs you out everywhere else.</p>
 <button type="submit">Change password</button>
 </form>{{end}}
-</section>
+</section>{{end}}
 
 <section>
 <h2>Change email</h2>
-{{if .StepUp}}<p class="hint">Confirm it's you above first.</p>{{else}}<form method="post" action="/account/email">
+{{if or .StepUp .FedConfirm}}<p class="hint">Confirm it's you above first.</p>{{else}}<form method="post" action="/account/email">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <label for="new_email">New email</label>
 <input id="new_email" name="new_email" type="email" autocomplete="email" value="{{.Email}}" required>
-<label for="email_password">Current password</label>
+{{if not .NoPassword}}<label for="email_password">Current password</label>
 <input id="email_password" name="password" type="password" autocomplete="current-password" required>
-<p class="hint">We'll send a link to the new address. Your email changes once you open it.</p>
+{{end}}<p class="hint">We'll send a link to the new address. Your email changes once you open it.</p>
 <button type="submit">Send confirmation link</button>
 </form>{{end}}
 </section>
