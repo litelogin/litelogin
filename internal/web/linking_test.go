@@ -174,6 +174,19 @@ func TestPasswordlessConfirmThroughProvider(t *testing.T) {
 	expect(t, confirm(), http.StatusUnauthorized, "the Fake account linked to yours")
 
 	p.SetUser(fedtest.User{Subject: "bob-at-fake", Email: "bob@example.com", EmailVerified: true})
+	// The provider must sign the user in again, and say so.
+	toProvider := b.post("/account", "/account/identities/confirm", url.Values{"idp": {"fake"}})
+	if q, _ := url.Parse(toProvider.location); q == nil || q.Query().Get("prompt") != "login" || q.Query().Get("max_age") != "0" {
+		t.Fatalf("confirmation doesn't ask for a fresh sign-in: %q", toProvider.location)
+	}
+	for _, change := range []func(map[string]any){
+		func(c map[string]any) { delete(c, "auth_time") },
+		func(c map[string]any) { c["auth_time"] = time.Now().Add(-time.Hour).Unix() },
+	} {
+		p.Modify = change
+		expect(t, confirm(), http.StatusUnauthorized, "signed in again just now")
+	}
+	p.Modify = nil
 	expectRedirect(t, confirm(), "/account?n=confirmed")
 	expectRedirect(t, b.post("/account", "/account/password/set", url.Values{"new_password": {"bob's first password"}}), "/account?n=password_set")
 }

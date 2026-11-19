@@ -96,10 +96,13 @@ func (s *Store) CreatePasskey(ctx context.Context, p *Passkey, authVersion int64
 	if err != nil {
 		return err
 	}
+	// passkey_count is set from the passkeys found, if unchanged since.
 	err = s.transact(ctx, []types.TransactWriteItem{
 		put(s.config, item, "attribute_not_exists(PK)", nil, nil),
-		check(s.config, userKey(p.UserID), "#status = :active AND #auth_version = :v", names("status", "auth_version"),
-			map[string]types.AttributeValue{":active": avS(UserActive), ":v": avN(authVersion)}),
+		update(s.config, userKey(p.UserID), "SET #passkey_count = :next",
+			"#status = :active AND #auth_version = :v AND (attribute_not_exists(#passkey_count) OR #passkey_count = :n)",
+			names("status", "auth_version", "passkey_count"),
+			map[string]types.AttributeValue{":active": avS(UserActive), ":v": avN(authVersion), ":n": avN(int64(n)), ":next": avN(int64(n + 1))}),
 	})
 	if f := asTxFailure(err); f != nil {
 		if f.failed(0) {
@@ -199,14 +202,40 @@ func (s *Store) updatePasskey(ctx context.Context, userID, id, upd string, nm ma
 
 // DeletePasskey removes one of a user's passkeys. It returns ErrNotFound if
 // the user has no such passkey.
-func (s *Store) DeletePasskey(ctx context.Context, userID, id string) error {
-	_, err := s.db.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName:           aws.String(s.config),
-		Key:                 passkeyKey(userID, id),
-		ConditionExpression: aws.String("attribute_exists(PK)"),
+//
+// Unless force is set (an administrator), it refuses with
+// ErrLastSignInMethod to delete the user's last way to sign in: the last
+// passkey of a user without a password or a linked identity, checked on
+// the user item at write time. It returns ErrConditionFailed if the
+// user's passkeys changed meanwhile.
+func (s *Store) DeletePasskey(ctx context.Context, userID, id string, force bool) error {
+	n, err := s.countPasskeys(ctx, userID)
+	if err != nil {
+		return err
+	}
+	cond := "attribute_exists(PK) AND (attribute_not_exists(#passkey_count) OR #passkey_count = :n)"
+	nm := names("passkey_count")
+	vals := map[string]types.AttributeValue{":n": avN(int64(n)), ":left": avN(int64(max(n-1, 0)))}
+	guarded := !force && n <= 1
+	if guarded {
+		cond += " AND (attribute_exists(#password_hash) OR #identity_count > :zero)"
+		nm["#password_hash"], nm["#identity_count"] = "password_hash", "identity_count"
+		vals[":zero"] = avN(0)
+	}
+	err = s.transact(ctx, []types.TransactWriteItem{
+		del(s.config, passkeyKey(userID, id), "attribute_exists(PK)", nil, nil),
+		update(s.config, userKey(userID), "SET #passkey_count = :left", cond, nm, vals),
 	})
-	if ok, _ := conditionFailed(err); ok {
-		return ErrNotFound
+	if f := asTxFailure(err); f != nil {
+		if f.failed(0) {
+			return ErrNotFound
+		}
+		if guarded {
+			if u, err := s.GetUser(ctx, userID); err == nil && u.PasswordHash == "" && u.IdentityCount == 0 {
+				return ErrLastSignInMethod
+			}
+		}
+		return ErrConditionFailed
 	}
 	if err != nil {
 		return fmt.Errorf("store: delete passkey: %w", err)

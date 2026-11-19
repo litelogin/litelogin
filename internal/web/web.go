@@ -64,7 +64,7 @@ type Store interface {
 	GetPasskey(ctx context.Context, userID string, credentialID []byte) (*store.Passkey, error)
 	RecordPasskeyUse(ctx context.Context, userID, id string, signCount uint32, backupState bool) error
 	RenamePasskey(ctx context.Context, userID, id, name string) error
-	DeletePasskey(ctx context.Context, userID, id string) error
+	DeletePasskey(ctx context.Context, userID, id string, force bool) error
 	CreateWebAuthnChallenge(ctx context.Context, c *store.WebAuthnChallenge, lifetime time.Duration) error
 	ConsumeWebAuthnChallenge(ctx context.Context, hash, purpose, host string) (*store.WebAuthnChallenge, error)
 	GetOneTimeToken(ctx context.Context, hash, purpose string) (*store.OneTimeToken, error)

@@ -54,6 +54,9 @@ type grant struct {
 	redirectURI string
 	nonce       string
 	challenge   string
+	// fresh: the request asked for a new sign-in (max_age), so the ID
+	// token says when it happened (auth_time).
+	fresh bool
 }
 
 // New starts a provider over TLS, with one client registered. The caller's
@@ -148,7 +151,8 @@ func (p *Provider) authorize(w http.ResponseWriter, r *http.Request) {
 		v.Set("error", "access_denied")
 	} else {
 		code := b64(randomBytes())
-		p.codes[code] = grant{user: user, clientID: p.ClientID, redirectURI: q.Get("redirect_uri"), nonce: q.Get("nonce"), challenge: q.Get("code_challenge")}
+		p.codes[code] = grant{user: user, clientID: p.ClientID, redirectURI: q.Get("redirect_uri"), nonce: q.Get("nonce"), challenge: q.Get("code_challenge"),
+			fresh: q.Has("max_age") || q.Get("prompt") == "login"}
 		v.Set("code", code)
 	}
 	p.mu.Unlock()
@@ -188,6 +192,9 @@ func (p *Provider) token(w http.ResponseWriter, r *http.Request) {
 	}
 	if g.user.Email != "" {
 		claims["email"], claims["email_verified"] = g.user.Email, g.user.EmailVerified
+	}
+	if g.fresh {
+		claims["auth_time"] = now.Unix()
 	}
 	if g.user.AMR != nil {
 		claims["amr"] = g.user.AMR

@@ -28,8 +28,9 @@ const MaxSubjectLength = 255
 // to a user of the pool.
 var ErrIdentityTaken = errors.New("store: identity already linked to a user")
 
-// ErrLastSignInMethod is returned when unlinking an identity would leave
-// the user with no way to sign in: no password and no other identity.
+// ErrLastSignInMethod is returned when unlinking an identity or deleting a
+// passkey would leave the user with no way to sign in: no password, no
+// other identity and no passkey.
 var ErrLastSignInMethod = errors.New("store: the user's last way to sign in")
 
 // Identity links a user to their account at one of the pool's identity
@@ -44,9 +45,13 @@ type Identity struct {
 	Subject string `dynamodbav:"sub"`
 	// Email is the address the provider gave when the identity was
 	// linked. It isn't kept in sync.
-	Email      string `dynamodbav:"email,omitempty"`
-	CreatedAt  int64  `dynamodbav:"created_at"`
-	LastUsedAt int64  `dynamodbav:"last_used_at"`
+	Email string `dynamodbav:"email,omitempty"`
+	// Unproven: the identity created its user with an email no one had
+	// verified, so whoever controls the provider account may not own the
+	// email. A password reset, which proves the email, removes it.
+	Unproven   bool  `dynamodbav:"unproven,omitempty"`
+	CreatedAt  int64 `dynamodbav:"created_at"`
+	LastUsedAt int64 `dynamodbav:"last_used_at"`
 }
 
 type identityItem struct {
@@ -283,16 +288,18 @@ func (s *Store) UnlinkIdentity(ctx context.Context, userID, idpID string, force 
 		return 0, err
 	}
 	cond, nm := "#identity_count >= :one", names("identity_count", "auth_version", "version", "updated_at")
+	vals := map[string]types.AttributeValue{":one": avN(1), ":minus": avN(-1), ":now": avN(s.unix())}
 	if !force {
-		cond += " AND (attribute_exists(#password_hash) OR #identity_count > :one)"
-		nm["#password_hash"] = "password_hash"
+		// A password, another identity or a passkey must remain.
+		cond += " AND (attribute_exists(#password_hash) OR #identity_count > :one OR #passkey_count > :zero)"
+		nm["#password_hash"], nm["#passkey_count"] = "password_hash", "passkey_count"
+		vals[":zero"] = avN(0)
 	}
 	err := s.transact(ctx, []types.TransactWriteItem{
 		del(s.config, identityKey(userID, idpID), "attribute_exists(PK)", nil, nil),
 		del(s.config, identityLinkKey(it.PoolID, idpID, it.Subject), "#user_id = :user", names("user_id"),
 			map[string]types.AttributeValue{":user": avS(userID)}),
-		update(s.config, userKey(userID), "ADD #identity_count :minus, #auth_version :one, #version :one SET #updated_at = :now", cond, nm,
-			map[string]types.AttributeValue{":one": avN(1), ":minus": avN(-1), ":now": avN(s.unix())}),
+		update(s.config, userKey(userID), "ADD #identity_count :minus, #auth_version :one, #version :one SET #updated_at = :now", cond, nm, vals),
 	})
 	if f := asTxFailure(err); f != nil {
 		if f.failed(2) {

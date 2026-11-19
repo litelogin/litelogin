@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/litelogin/litelogin/internal/federation"
 	"github.com/litelogin/litelogin/internal/federation/fedtest"
 	"github.com/litelogin/litelogin/internal/secretbox"
 	"github.com/litelogin/litelogin/internal/store"
@@ -17,7 +18,8 @@ import (
 )
 
 // newFedEnv is an env whose login host shows one identity provider, the
-// fake one, as "fake".
+// fake one, as "fake". The org trusts its email_verified, and its acr
+// "strong" as two factors.
 func newFedEnv(t *testing.T, requireVerified bool) (*env, *fedtest.Provider) {
 	t.Helper()
 	p := fedtest.New(t)
@@ -28,12 +30,27 @@ func newFedEnv(t *testing.T, requireVerified bool) (*env, *fedtest.Provider) {
 		t.Fatal(err)
 	}
 	err = e.st.CreateIDP(ctx, &store.IDP{ID: "fake", PoolID: e.pool.ID, OrgID: e.pool.OrgID, Type: store.IDPTypeOIDC,
-		Name: "Fake", Issuer: p.Issuer, ClientID: p.ClientID, ClientSecret: sealed, MFAACR: []string{"strong"}})
+		Name: "Fake", Issuer: p.Issuer, ClientID: p.ClientID, ClientSecret: sealed, MFAACR: []string{"strong"},
+		TrustEmailVerified: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.updateHost(func(h *store.LoginHost) { h.IDPs = []string{"fake"} })
 	return e, p
+}
+
+// updateIDP changes the fake provider's settings.
+func (e *env) updateIDP(change func(*store.IDP)) {
+	e.t.Helper()
+	ctx := context.Background()
+	p, err := e.st.GetIDP(ctx, e.pool.ID, "fake")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	change(p)
+	if err := e.st.UpdateIDP(ctx, p); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 var fedStartRE = regexp.MustCompile(`<a class="idp" href="([^"]+)">Continue with Fake</a>`)
@@ -154,9 +171,10 @@ func TestFederatedSignUpAndSignIn(t *testing.T) {
 func TestFederatedMFAEvidence(t *testing.T) {
 	e, p := newFedEnv(t, false)
 	e.requireMFA()
+	e.updateIDP(func(i *store.IDP) { i.MFAAMR = []string{"mfa"} })
 
-	// "mfa" in the provider's amr, or a configured acr, is two factors:
-	// no authenticator app needed even though the pool requires one.
+	// A configured amr or acr is two factors: no authenticator app needed
+	// even though the pool requires one.
 	p.SetUser(fedtest.User{Subject: "s1", Email: "one@example.com", EmailVerified: true, AMR: []string{"pwd", "mfa"}})
 	c := fedAuthorize(t, e, e.browser(), p)
 	if got := amr(c); !slices.Equal(got, []string{"fed", "mfa"}) || c["acr"] != "urn:litelogin:acr:mfa" {
@@ -322,5 +340,60 @@ func TestFederationRejectsInvalidIDToken(t *testing.T) {
 	expect(t, fedSignIn(t, e.browser(), p, "/login"), http.StatusBadGateway, "Signing in with Fake didn&#39;t work")
 	if n := int(e.metrics.Sum("FederatedLoginFailed")); n != 1 {
 		t.Errorf("FederatedLoginFailed = %v", n)
+	}
+}
+
+// "mfa" from a provider counts only if the org says so.
+func TestFederatedMFANotTrustedByDefault(t *testing.T) {
+	e, p := newFedEnv(t, false)
+	p.SetUser(fedtest.User{Subject: "s1", Email: "one@example.com", EmailVerified: true, AMR: []string{"pwd", "mfa"}})
+	if got := amr(fedAuthorize(t, e, e.browser(), p)); !slices.Equal(got, []string{"fed"}) {
+		t.Errorf("amr = %v, want [fed]", got)
+	}
+}
+
+// A provider whose email_verified the org doesn't trust: LiteLogin
+// verifies the email itself, and the identity that created the account
+// doesn't survive the email's owner resetting the password (a pre-hijacked
+// account).
+func TestFederatedEmailNotTrusted(t *testing.T) {
+	e, p := newFedEnv(t, false)
+	ctx := context.Background()
+	e.updateIDP(func(i *store.IDP) { i.TrustEmailVerified = false })
+	p.SetUser(fedtest.User{Subject: "attacker", Email: "victim@example.com", EmailVerified: true})
+	expectRedirect(t, fedSignIn(t, e.browser(), p, "/login"), "/account")
+	u, err := e.st.GetUserByEmail(ctx, e.pool.ID, "victim@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.EmailVerified {
+		t.Fatal("the provider's email_verified was trusted")
+	}
+	e.lastLink("victim@example.com", "Verify")
+
+	// The email's owner takes the account back.
+	b := e.browser()
+	expect(t, b.post("/password/forgot", "/password/forgot", url.Values{"email": {"victim@example.com"}}), http.StatusOK, "")
+	link := e.lastLink("victim@example.com", "Reset")
+	token := regexp.MustCompile(`token=([^&\s]+)`).FindStringSubmatch(link)[1]
+	expectRedirect(t, b.post(link, "/password/reset", url.Values{"token": {token}, "password": {"the owner's password"}}), "/login?n=reset")
+	if _, _, err := e.st.GetUserByIdentity(ctx, e.pool.ID, "fake", "attacker"); err == nil {
+		t.Fatal("the attacker's identity survived the reset")
+	}
+	// The attacker's next sign-in can't reach the account.
+	expect(t, fedSignIn(t, e.browser(), p, "/login"), http.StatusForbidden, "no account here linked")
+}
+
+func TestMicrosoftIssuer(t *testing.T) {
+	for iss, want := range map[string]bool{
+		"https://login.microsoftonline.com/9188040d-6c67-4c5b-b112-36a304b66dad/v2.0": true,
+		"https://sts.windows.net/72f988bf-86f1-41af-91ab-2d7cd011db47/":               true,
+		"https://contoso.ciamlogin.com/contoso.onmicrosoft.com/v2.0":                  true,
+		"https://accounts.google.com":                                                 false,
+		"https://login.microsoftonline.com.evil.example/v2.0":                         false,
+	} {
+		if got := federation.MicrosoftIssuer(iss); got != want {
+			t.Errorf("MicrosoftIssuer(%q) = %v", iss, got)
+		}
 	}
 }

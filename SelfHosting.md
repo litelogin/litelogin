@@ -275,9 +275,14 @@ Then add the provider to the pool, and show it on a host:
 
 ```sh
 dist/litelogin idp create --pool POOL --id google --type oidc --name Google \
-  --issuer https://accounts.google.com --client-id CLIENT_ID --client-secret-file secret.txt
+  --issuer https://accounts.google.com --client-id CLIENT_ID --client-secret-file secret.txt --trust-email-verified
 dist/litelogin host update login.acme.com --idps google
 ```
+
+Two settings decide how much LiteLogin trusts a provider. Both are off by default:
+
+- `--trust-email-verified`: a new user's email counts as verified when the provider says so. Turn it on only for providers that verify every address they vouch for, such as Google and Apple. Otherwise LiteLogin sends its own verification email, and a password reset by the email's owner removes the provider account that created the user. For Microsoft, the email counts as verified only with the `xms_edov` optional claim, which you add to the app registration's token configuration.
+- `--mfa-amr` and `--mfa-acr`: the `amr` or `acr` values in the provider's ID token that count as two factors, such as `--mfa-amr mfa`. Without them, a sign-in through the provider is one factor, and the pool's two-factor rules apply.
 
 Secrets are read from a file, or from stdin with `-`, so they stay out of shell history. They're encrypted with a KMS key that only the Auth Lambda can decrypt with, and are never shown again: `idp update POOL IDP --client-secret-file ...` replaces one. `idp get POOL IDP` lists the callback URLs to register.
 

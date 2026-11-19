@@ -117,8 +117,13 @@ func TestIDPs(t *testing.T) {
 	}
 
 	// Updates; the type can't change.
-	e.json(&g, "", "idp", "update", pool, "google", "--name", "Google Workspace", "--mfa-amr", "mfa,hwk", "--status", "disabled")
-	if g.Name != "Google Workspace" || !slices.Equal(g.MFAAMR, []string{"mfa", "hwk"}) || g.Status != store.IDPDisabled || !g.ClientSecretSet || g.Version != 2 {
+	if g.TrustEmailVerified {
+		t.Fatalf("email_verified trusted by default: %+v", g)
+	}
+	e.json(&g, "", "idp", "update", pool, "google", "--name", "Google Workspace", "--mfa-amr", "mfa,hwk", "--status", "disabled",
+		"--trust-email-verified")
+	if g.Name != "Google Workspace" || !slices.Equal(g.MFAAMR, []string{"mfa", "hwk"}) || g.Status != store.IDPDisabled || !g.ClientSecretSet ||
+		g.Version != 2 || !g.TrustEmailVerified {
 		t.Fatalf("idp update: %+v", g)
 	}
 	if out := e.run("", "idp", "list", "--pool", pool); !strings.Contains(out, "github") || !strings.Contains(out, "Google Workspace") {

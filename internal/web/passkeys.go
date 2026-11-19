@@ -540,9 +540,13 @@ func (s *Server) removePasskey(w http.ResponseWriter, r *http.Request, t *tenant
 		http.Redirect(w, r, "/account", http.StatusSeeOther)
 		return
 	}
-	err := s.Store.DeletePasskey(ctx, u.ID, id)
-	if errors.Is(err, store.ErrNotFound) {
+	err := s.Store.DeletePasskey(ctx, u.ID, id, false)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConditionFailed) {
 		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
+	}
+	if errors.Is(err, store.ErrLastSignInMethod) {
+		s.renderAccount(w, r, t, http.StatusConflict, sess, u, pageData{Error: msgOnlySignInMethod})
 		return
 	}
 	if err != nil {

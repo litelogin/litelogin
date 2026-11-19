@@ -44,9 +44,13 @@ type User struct {
 	// IdentityCount is how many identity providers the user is linked to
 	// (Identity items).
 	IdentityCount int64 `dynamodbav:"identity_count,omitempty"`
-	CreatedAt     int64 `dynamodbav:"created_at"`
-	UpdatedAt     int64 `dynamodbav:"updated_at"`
-	Version       int64 `dynamodbav:"version"`
+	// PasskeyCount is how many passkeys the user has. Users whose passkeys
+	// predate it have none counted until they add or remove one; the
+	// count only makes the last-sign-in-method guard stricter.
+	PasskeyCount int64 `dynamodbav:"passkey_count,omitempty"`
+	CreatedAt    int64 `dynamodbav:"created_at"`
+	UpdatedAt    int64 `dynamodbav:"updated_at"`
+	Version      int64 `dynamodbav:"version"`
 }
 
 type userItem struct {

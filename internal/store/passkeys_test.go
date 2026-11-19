@@ -59,11 +59,11 @@ func TestPasskeys(t *testing.T) {
 		t.Fatalf("ListPasskeys = %d passkeys, want 2", len(list))
 	}
 
-	must(t, e.DeletePasskey(e.ctx, f.user.ID, p.ID))
+	must(t, e.DeletePasskey(e.ctx, f.user.ID, p.ID, false))
 	if _, err := e.GetPasskey(e.ctx, f.user.ID, []byte("cred-1")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted passkey: %v", err)
 	}
-	if err := e.DeletePasskey(e.ctx, f.user.ID, p.ID); !errors.Is(err, ErrNotFound) {
+	if err := e.DeletePasskey(e.ctx, f.user.ID, p.ID, false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleting again: %v", err)
 	}
 	if err := e.RecordPasskeyUse(e.ctx, f.user.ID, p.ID, 8, true); !errors.Is(err, ErrNotFound) {

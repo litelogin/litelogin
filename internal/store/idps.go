@@ -67,12 +67,16 @@ type IDP struct {
 	// MFAAMR and MFAACR are the amr and acr values in the provider's ID
 	// token that count as evidence of two factors ("mfa" in amr always
 	// does).
-	MFAAMR    []string `dynamodbav:"mfa_amr,omitempty"`
-	MFAACR    []string `dynamodbav:"mfa_acr,omitempty"`
-	Status    string   `dynamodbav:"status"`
-	CreatedAt int64    `dynamodbav:"created_at"`
-	UpdatedAt int64    `dynamodbav:"updated_at"`
-	Version   int64    `dynamodbav:"version"`
+	MFAAMR []string `dynamodbav:"mfa_amr,omitempty"`
+	// TrustEmailVerified: a new user's email counts as verified when the
+	// provider's ID token says email_verified. Otherwise LiteLogin
+	// verifies it itself.
+	TrustEmailVerified bool     `dynamodbav:"trust_email_verified,omitempty"`
+	MFAACR             []string `dynamodbav:"mfa_acr,omitempty"`
+	Status             string   `dynamodbav:"status"`
+	CreatedAt          int64    `dynamodbav:"created_at"`
+	UpdatedAt          int64    `dynamodbav:"updated_at"`
+	Version            int64    `dynamodbav:"version"`
 }
 
 type idpItem struct {
