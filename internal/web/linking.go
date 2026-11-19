@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"slices"
 	"time"
 
 	"github.com/litelogin/litelogin/internal/email"
@@ -49,8 +51,10 @@ func (s *Server) fillIdentities(ctx context.Context, t *tenant, u *store.User, d
 			v.Name = p.Name
 		}
 		if on {
-			_, err := s.hostIDP(ctx, t, id.IDPID)
-			v.Usable = err == nil
+			if p, err := s.hostIDP(ctx, t, id.IDPID); err == nil {
+				v.Usable = true
+				d.addProviderOrigin(s.providerOrigin(ctx, p))
+			}
 		}
 		d.Identities = append(d.Identities, v)
 	}
@@ -63,9 +67,31 @@ func (s *Server) fillIdentities(ctx context.Context, t *tenant, u *store.User, d
 		}
 		if p, err := s.hostIDP(ctx, t, id); err == nil {
 			d.Linkable = append(d.Linkable, linkOption{IDPID: p.ID, Name: p.Name})
+			d.addProviderOrigin(s.providerOrigin(ctx, p))
 		}
 	}
 	return nil
+}
+
+// providerOrigin is the origin of the provider's authorization endpoint,
+// where its link and confirm forms end up, or "" if its discovery document
+// can't be read now (submitting the form then shows the provider error).
+func (s *Server) providerOrigin(ctx context.Context, p *store.IDP) string {
+	m, err := s.Federation.Discover(ctx, p.Issuer)
+	if err != nil {
+		return ""
+	}
+	u, err := url.Parse(m.AuthorizationEndpoint) // https, checked by Discover
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+func (d *pageData) addProviderOrigin(origin string) {
+	if origin != "" && !slices.Contains(d.ProviderOrigins, origin) {
+		d.ProviderOrigins = append(d.ProviderOrigins, origin)
+	}
 }
 
 // fedClockSkew is how far the provider's clock may be behind ours.

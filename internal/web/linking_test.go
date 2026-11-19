@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,23 @@ func linkFake(t *testing.T, b *browser, p *fedtest.Provider, fields url.Values) 
 	t.Helper()
 	fields.Set("idp", "fake")
 	return b.get(atProvider(t, p, b.post("/account", "/account/identities/link", fields)))
+}
+
+// expectFormActionAllows fails unless the page's CSP lets its forms
+// redirect to origin: browsers apply form-action to the redirects after a
+// form submission, so the link and confirm forms, which end at the
+// provider's authorization endpoint, would do nothing.
+func expectFormActionAllows(t *testing.T, p page, origin string) {
+	t.Helper()
+	for _, d := range strings.Split(p.header.Get("Content-Security-Policy"), ";") {
+		if f := strings.Fields(d); len(f) > 0 && f[0] == "form-action" {
+			if slices.Contains(f[1:], origin) {
+				return
+			}
+			t.Fatalf("%s doesn't allow %s", strings.TrimSpace(d), origin)
+		}
+	}
+	t.Fatal("no form-action in the CSP")
 }
 
 // lastSubject is the subject of the newest email to addr.
@@ -38,14 +56,16 @@ func TestLinkAndUnlinkProvider(t *testing.T) {
 	ctx := context.Background()
 	e.newUser()
 	b := e.signIn("alice@example.com", password)
-	expect(t, b.get("/account"), http.StatusOK, "Link Fake")
+	acct := b.get("/account")
+	expect(t, acct, http.StatusOK, "Link Fake")
+	expectFormActionAllows(t, acct, p.Issuer)
 
 	p.SetUser(fedtest.User{Subject: "alice-at-fake", Email: "alice@fake.example", EmailVerified: true})
 	expectRedirect(t, linkFake(t, b, p, url.Values{}), "/account?n=idp_linked")
 	if s := e.lastSubject("alice@example.com"); !strings.Contains(s, "Fake was linked") {
 		t.Errorf("notice subject = %q", s)
 	}
-	acct := b.get("/account")
+	acct = b.get("/account")
 	expect(t, acct, http.StatusOK, "Unlink Fake")
 	if strings.Contains(acct.body, "Link Fake</button>") {
 		t.Error("a linked provider is offered for linking again")
@@ -160,7 +180,9 @@ func TestPasswordlessConfirmThroughProvider(t *testing.T) {
 
 	// An old session can't set a password or change the email until the
 	// user signs in again with the provider.
-	expect(t, b.get("/account"), http.StatusOK, `action="/account/identities/confirm"`)
+	acct := b.get("/account")
+	expect(t, acct, http.StatusOK, `action="/account/identities/confirm"`)
+	expectFormActionAllows(t, acct, p.Issuer)
 	expect(t, b.post("/account", "/account/password/set", url.Values{"new_password": {"bob's first password"}}),
 		http.StatusForbidden, "sign in again")
 	expect(t, b.post("/account", "/account/email", url.Values{"new_email": {"thief@example.com"}}),

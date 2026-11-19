@@ -225,7 +225,7 @@ Authorization codes are bound to the client, the redirect URI, the PKCE challeng
 - **Signing in during authorization:** without a usable session, `/authorize` sends the browser to `/login`, carrying the request's query. After signing in, the browser returns to the same `/authorize` request. `prompt=login` and `max_age` are removed at that point, since the user just signed in.
 - **`prompt`:** `none` and `login` are supported. There's no consent screen: clients are configured by the operator, so `consent` is accepted and has no effect.
 - **RP-initiated logout:** `/logout` checks `id_token_hint` and `client_id` against the host's client, and `post_logout_redirect_uri` against its registered URIs. The user confirms before being signed out, so another site can't sign them out with a link.
-- **Pages' `form-action`** allows the client's redirect and post-logout redirect URI origins, because browsers apply it to the redirects that follow a form submission.
+- **Pages' `form-action`** allows the client's redirect and post-logout redirect URI origins, because browsers apply it to the redirects that follow a form submission. The account page also allows the authorization endpoint origins (from discovery) of the providers it offers to link or confirm with, since those forms end there.
 
 ### Tokens
 
