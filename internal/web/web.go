@@ -468,6 +468,9 @@ type pageData struct {
 	Linkable   []linkOption
 	NoPassword bool
 	FedConfirm bool
+	// ProviderOrigins are the origins of the authorization endpoints the
+	// account page's provider forms redirect to, for form-action.
+	ProviderOrigins []string
 	// Script is the page's script: the passkey script on the login and
 	// account pages, if the host allows passkeys.
 	Script template.JS
@@ -500,28 +503,34 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, t *tenant, statu
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
 	// Browsers apply form-action to the redirects that follow a form
-	// submission too: signing in ends at the client's redirect URI, and
-	// logging out at its post-logout redirect URI.
+	// submission too: signing in ends at the client's redirect URI,
+	// logging out at its post-logout redirect URI, and linking or
+	// confirming through a provider at its authorization endpoint.
 	scripts := ""
 	if d.Script != "" {
 		// The script's fetches go to this host only.
 		scripts = "script-src 'nonce-" + d.Nonce + "'; connect-src 'self'; "
 	}
 	h.Set("Content-Security-Policy", "default-src 'none'; "+scripts+"style-src 'nonce-"+d.Nonce+"'; img-src 'self' https:; "+
-		"form-action "+formActionSources(t)+"; frame-ancestors 'none'; base-uri 'none'")
+		"form-action "+formActionSources(t, d.ProviderOrigins...)+"; frame-ancestors 'none'; base-uri 'none'")
 	w.WriteHeader(status)
 	if err := tmpl.ExecuteTemplate(w, "layout", d); err != nil {
 		s.log().ErrorContext(r.Context(), "render page", "page", name, "error", err)
 	}
 }
 
-// formActionSources lists 'self' and the origins (or, for native apps,
-// schemes) of the request's client's redirect and post-logout redirect
-// URIs.
-func formActionSources(t *tenant) string {
+// formActionSources lists 'self', the extra origins, and the origins (or,
+// for native apps, schemes) of the request's client's redirect and
+// post-logout redirect URIs.
+func formActionSources(t *tenant, extra ...string) string {
 	sources := []string{"'self'"}
+	for _, src := range extra {
+		if src != "" && !strings.ContainsAny(src, " ;,'\"") && !slices.Contains(sources, src) {
+			sources = append(sources, src)
+		}
+	}
 	if t == nil || t.Client == nil {
-		return sources[0]
+		return strings.Join(sources, " ")
 	}
 	for _, raw := range append(slices.Clone(t.Client.RedirectURIs), t.Client.PostLogoutRedirectURIs...) {
 		u, err := url.Parse(raw)
