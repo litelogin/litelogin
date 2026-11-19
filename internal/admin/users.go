@@ -566,7 +566,7 @@ func (s *Server) deletePasskey(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if err := s.Store.DeletePasskey(r.Context(), id, passkey); err != nil {
+	if err := s.Store.DeletePasskey(r.Context(), id, passkey, true); err != nil {
 		return err
 	}
 	if _, err := s.Store.RevokeUserCredentials(r.Context(), id); err != nil {

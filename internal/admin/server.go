@@ -66,7 +66,7 @@ type Store interface {
 	ListActiveSessions(ctx context.Context, userID string) ([]store.SessionSummary, error)
 	ListPasskeys(ctx context.Context, userID string) ([]store.Passkey, error)
 	DisableMFA(ctx context.Context, userID string) (int64, error)
-	DeletePasskey(ctx context.Context, userID, id string) error
+	DeletePasskey(ctx context.Context, userID, id string, force bool) error
 	ListIdentities(ctx context.Context, userID string) ([]store.Identity, error)
 	UnlinkIdentity(ctx context.Context, userID, idpID string, force bool) (int64, error)
 

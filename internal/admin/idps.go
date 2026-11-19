@@ -63,7 +63,10 @@ type IDP struct {
 	Scopes             []string `json:"scopes"`
 	MFAAMR             []string `json:"mfa_amr"`
 	MFAACR             []string `json:"mfa_acr"`
-	Status             string   `json:"status"`
+	// TrustEmailVerified: the provider's email_verified is taken for new
+	// users; otherwise LiteLogin sends its own verification email.
+	TrustEmailVerified bool   `json:"trust_email_verified"`
+	Status             string `json:"status"`
 	// CallbackURLs are the redirect URIs to register with the provider:
 	// one for each of the pool's login hosts.
 	CallbackURLs []string `json:"callback_urls"`
@@ -82,7 +85,7 @@ func idpJSON(p *store.IDP, callbacks []string) IDP {
 	return IDP{ID: p.ID, UserPoolID: p.PoolID, OrgID: p.OrgID, Type: p.Type, Name: p.Name, Issuer: p.Issuer,
 		ClientID: p.ClientID, ClientSecretSet: len(p.ClientSecret) > 0,
 		AppleTeamID: p.AppleTeamID, AppleKeyID: p.AppleKeyID, ApplePrivateKeySet: len(p.ApplePrivateKey) > 0,
-		Scopes: orEmpty(p.Scopes), MFAAMR: orEmpty(p.MFAAMR), MFAACR: orEmpty(p.MFAACR), Status: p.Status,
+		Scopes: orEmpty(p.Scopes), MFAAMR: orEmpty(p.MFAAMR), MFAACR: orEmpty(p.MFAACR), TrustEmailVerified: p.TrustEmailVerified, Status: p.Status,
 		CallbackURLs: orEmpty(callbacks), CreatedAt: timestamp(p.CreatedAt), UpdatedAt: timestamp(p.UpdatedAt), Version: p.Version}
 }
 
@@ -102,7 +105,9 @@ type IDPInput struct {
 	Scopes          *[]string `json:"scopes"`
 	MFAAMR          *[]string `json:"mfa_amr"`
 	MFAACR          *[]string `json:"mfa_acr"`
-	Status          *string   `json:"status"`
+	// TrustEmailVerified defaults to false.
+	TrustEmailVerified *bool   `json:"trust_email_verified"`
+	Status             *string `json:"status"`
 }
 
 // apply copies the fields set in in onto p, sealing secrets, and validates
@@ -129,6 +134,9 @@ func (s *Server) applyIDP(ctx context.Context, in *IDPInput, p *store.IDP) error
 		if f.in != nil {
 			*f.out = slices.Clone(*f.in)
 		}
+	}
+	if in.TrustEmailVerified != nil {
+		p.TrustEmailVerified = *in.TrustEmailVerified
 	}
 	if in.Status != nil {
 		p.Status = *in.Status

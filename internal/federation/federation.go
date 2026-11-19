@@ -157,6 +157,10 @@ type AuthRequest struct {
 	// Verifier is the PKCE code verifier; the request carries its S256
 	// challenge.
 	Verifier string
+	// FreshSignIn asks the provider to sign the user in again, even with
+	// a session there (prompt=login, max_age=0). The ID token's auth_time
+	// then says whether it did.
+	FreshSignIn bool
 }
 
 // AuthURL returns the URL that starts a sign-in at the provider: the
@@ -173,6 +177,10 @@ func AuthURL(m *Metadata, a AuthRequest) string {
 	q.Set("nonce", a.Nonce)
 	q.Set("code_challenge", base64.RawURLEncoding.EncodeToString(sum[:]))
 	q.Set("code_challenge_method", "S256")
+	if a.FreshSignIn {
+		q.Set("prompt", "login")
+		q.Set("max_age", "0")
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }
@@ -239,9 +247,11 @@ type Claims struct {
 	Subject       string
 	Email         string
 	EmailVerified bool
-	// AMR and ACR say how the user signed in at the provider.
-	AMR []string
-	ACR string
+	// AMR and ACR say how the user signed in at the provider, and
+	// AuthTime when (zero if the token doesn't say).
+	AMR      []string
+	ACR      string
+	AuthTime time.Time
 }
 
 // VerifyIDToken verifies an ID token from the provider (OpenID Connect
@@ -284,6 +294,8 @@ func (c *Client) VerifyIDToken(ctx context.Context, m *Metadata, raw, clientID, 
 		Nonce         string          `json:"nonce"`
 		Email         string          `json:"email"`
 		EmailVerified json.RawMessage `json:"email_verified"`
+		XMSEdov       json.RawMessage `json:"xms_edov"`
+		AuthTime      json.Number     `json:"auth_time"`
 		AMR           []string        `json:"amr"`
 		ACR           string          `json:"acr"`
 	}
@@ -309,9 +321,37 @@ func (c *Client) VerifyIDToken(ctx context.Context, m *Metadata, raw, clientID, 
 	case claims.Sub == "":
 		return nil, fmt.Errorf("%w: no sub", ErrIDToken)
 	}
-	return &Claims{
+	out := &Claims{
 		Subject: claims.Sub, Email: claims.Email, EmailVerified: truthy(claims.EmailVerified), AMR: claims.AMR, ACR: claims.ACR,
-	}, nil
+	}
+	if MicrosoftIssuer(claims.Iss) {
+		// Microsoft's email claim is whatever the account's admin or owner
+		// typed ("nOAuth"); only xms_edov says the domain's owner verified
+		// it.
+		out.EmailVerified = truthy(claims.XMSEdov)
+	}
+	if claims.AuthTime != "" {
+		if t, err := numericDate(claims.AuthTime); err == nil {
+			out.AuthTime = t
+		}
+	}
+	return out, nil
+}
+
+// MicrosoftIssuer reports whether iss is Microsoft Entra ID's (work and
+// school accounts, personal accounts, External ID).
+func MicrosoftIssuer(iss string) bool {
+	u, err := url.Parse(iss)
+	if err != nil {
+		return false
+	}
+	h := strings.ToLower(u.Hostname())
+	for _, d := range []string{"login.microsoftonline.com", "login.microsoftonline.us", "login.partner.microsoftonline.cn", "sts.windows.net", "ciamlogin.com"} {
+		if h == d || strings.HasSuffix(h, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 // audience is aud: one string or an array of them.

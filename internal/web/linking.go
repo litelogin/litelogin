@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/litelogin/litelogin/internal/email"
 	"github.com/litelogin/litelogin/internal/federation"
@@ -67,9 +68,12 @@ func (s *Server) fillIdentities(ctx context.Context, t *tenant, u *store.User, d
 	return nil
 }
 
+// fedClockSkew is how far the provider's clock may be behind ours.
+const fedClockSkew = time.Minute
+
 const (
 	msgConfirmWithProvider = "First confirm it's you: sign in again with one of your linked accounts above."
-	msgOnlySignInMethod    = "This is your only way to sign in. Set a password or link another account first."
+	msgOnlySignInMethod    = "This is your only way to sign in. Set a password, add a passkey or link another account first."
 )
 
 // recentlyProved reports whether the user showed it's them just now: a
@@ -204,6 +208,16 @@ func (s *Server) finishConfirm(w http.ResponseWriter, r *http.Request, t *tenant
 		return
 	}
 	ctx := r.Context()
+	// The provider must have signed the user in just now, not reused a
+	// session there: auth_time no earlier than the confirmation's start.
+	started := time.Unix(st.ExpiresAt, 0).Add(-FedLifetime)
+	if c.AuthTime.IsZero() || c.AuthTime.Before(started.Add(-fedClockSkew)) {
+		s.federationFailed("not_fresh")
+		s.renderAccount(w, r, t, http.StatusUnauthorized, sess, u, pageData{
+			Error: p.Name + " didn't confirm that you signed in again just now. Try again, or confirm it's you another way.",
+		})
+		return
+	}
 	linked, _, err := s.Store.GetUserByIdentity(ctx, t.Pool.ID, p.ID, c.Subject)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		s.fail(w, r, t, err)

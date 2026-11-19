@@ -115,28 +115,57 @@ func (s *Store) VerifyEmail(ctx context.Context, hash string) (string, error) {
 // own it), clears the lockout, and increments auth_version, revoking every
 // credential. The Worker cleans up afterwards.
 //
-// It returns the user ID, or ErrNotFound if the link is invalid, expired, or
-// was sent to an email the user no longer has.
+// Unproven identities (Identity.Unproven) are removed in the same
+// transaction: whoever controls them may have signed up with this email
+// before its owner, and would otherwise keep a way in after the owner takes
+// the account back.
+//
+// It returns the user ID, ErrNotFound if the link is invalid, expired, or
+// was sent to an email the user no longer has, or ErrConditionFailed if an
+// identity was linked meanwhile.
 func (s *Store) CompletePasswordReset(ctx context.Context, hash, newPasswordHash string) (string, error) {
 	t, err := s.GetOneTimeToken(ctx, hash, PurposeResetPassword)
 	if err != nil {
 		return "", err
 	}
+	ids, err := s.ListIdentities(ctx, t.UserID)
+	if err != nil {
+		return "", err
+	}
+	var unproven []Identity
+	for _, id := range ids {
+		if id.Unproven {
+			unproven = append(unproven, id)
+		}
+	}
 	now := s.unix()
-	err = s.transact(ctx, []types.TransactWriteItem{
+	set := "SET #password_hash = :hash, #password_updated_at = :now, #updated_at = :now, #email_verified = :true, " +
+		"#failed_login_count = :zero REMOVE #locked_until ADD #auth_version :one, #version :one"
+	cond := "#email = :email"
+	nm := names("password_hash", "password_updated_at", "updated_at", "email_verified", "failed_login_count",
+		"locked_until", "auth_version", "version", "email")
+	vals := map[string]types.AttributeValue{
+		":hash": avS(newPasswordHash), ":now": avN(now), ":true": avB(true), ":zero": avN(0),
+		":one": avN(1), ":email": avS(t.Email),
+	}
+	if len(unproven) > 0 {
+		set += ", #identity_count :removed"
+		cond += " AND #identity_count = :ids"
+		nm["#identity_count"] = "identity_count"
+		vals[":removed"], vals[":ids"] = avN(-int64(len(unproven))), avN(int64(len(ids)))
+	}
+	items := []types.TransactWriteItem{
 		s.consumeOTT(hash, PurposeResetPassword),
-		update(s.config, userKey(t.UserID),
-			"SET #password_hash = :hash, #password_updated_at = :now, #updated_at = :now, #email_verified = :true, "+
-				"#failed_login_count = :zero REMOVE #locked_until ADD #auth_version :one, #version :one",
-			"#email = :email",
-			names("password_hash", "password_updated_at", "updated_at", "email_verified", "failed_login_count",
-				"locked_until", "auth_version", "version", "email"),
-			map[string]types.AttributeValue{
-				":hash": avS(newPasswordHash), ":now": avN(now), ":true": avB(true), ":zero": avN(0),
-				":one": avN(1), ":email": avS(t.Email),
-			}),
-	})
-	if asTxFailure(err) != nil {
+		update(s.config, userKey(t.UserID), set, cond, nm, vals),
+	}
+	err = s.transact(ctx, append(items, s.identityDeletes(unproven, t.UserID)...))
+	if f := asTxFailure(err); f != nil {
+		if len(unproven) > 0 && !f.failed(0) {
+			// The email changed (an invalid link) or the identities did.
+			if u, err := s.GetUser(ctx, t.UserID); err == nil && u.Email == t.Email {
+				return "", ErrConditionFailed
+			}
+		}
 		return "", ErrNotFound
 	}
 	if err != nil {

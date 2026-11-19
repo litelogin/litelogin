@@ -22,6 +22,7 @@ type idpFlags struct {
 	appleTeam, appleKey, appleKeyFile  string
 	scopes, mfaAMR, mfaACR             []string
 	status                             string
+	trustEmail                         bool
 }
 
 func (f *idpFlags) register(cmd *cobra.Command, update bool) {
@@ -34,8 +35,11 @@ func (f *idpFlags) register(cmd *cobra.Command, update bool) {
 	fl.StringVar(&f.appleKey, "apple-key-id", "", "ID of the Sign in with Apple key (type apple)")
 	fl.StringVar(&f.appleKeyFile, "apple-private-key-file", "", "the key's .p8 file, or - for stdin (type apple)")
 	fl.StringSliceVar(&f.scopes, "scopes", nil, "scopes to ask for (default: openid,email; GitHub: read:user,user:email)")
-	fl.StringSliceVar(&f.mfaAMR, "mfa-amr", nil, `amr values in the provider's ID token that count as two factors ("mfa" always does)`)
+	fl.StringSliceVar(&f.mfaAMR, "mfa-amr", nil, `amr values in the provider's ID token that count as two factors, e.g. mfa (none by default)`)
 	fl.StringSliceVar(&f.mfaACR, "mfa-acr", nil, "acr values in the provider's ID token that count as two factors")
+	fl.BoolVar(&f.trustEmail, "trust-email-verified", false,
+		"take the provider's email_verified for new users, instead of LiteLogin verifying the email itself; only for providers that "+
+			"verify every address they vouch for (Google, Apple). Microsoft addresses also need the xms_edov optional claim")
 	if update {
 		fl.StringVar(&f.status, "status", "", "active or disabled")
 	}
@@ -47,6 +51,7 @@ func (f *idpFlags) body(a *App, cmd *cobra.Command) (map[string]any, error) {
 	body := changed(cmd, map[string]any{
 		"name": &f.name, "issuer": &f.issuer, "client-id": &f.clientID, "apple-team-id": &f.appleTeam,
 		"apple-key-id": &f.appleKey, "scopes": &f.scopes, "mfa-amr": &f.mfaAMR, "mfa-acr": &f.mfaACR, "status": &f.status,
+		"trust-email-verified": &f.trustEmail,
 	})
 	if f.secretFile == "-" && f.appleKeyFile == "-" {
 		return nil, errors.New("only one of --client-secret-file and --apple-private-key-file can read stdin")

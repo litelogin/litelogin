@@ -281,3 +281,98 @@ func TestFederationStateForUser(t *testing.T) {
 		t.Fatalf("ConsumeFederationState = %+v", got)
 	}
 }
+
+// A passkey counts as a way to sign in, both ways round.
+func TestPasskeyIsASignInMethod(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	must(t, e.CreateIDP(e.ctx, newTestIDP(f, "google")))
+	u := newIdentityUser(f, "passkey@example.com")
+	must(t, e.CreateUserWithIdentity(e.ctx, u, &Identity{IDPID: "google", Subject: "g"}))
+	pk := &Passkey{UserID: u.ID, CredentialID: []byte("cred-1"), RPID: f.host, PublicKey: []byte("k")}
+	must(t, e.CreatePasskey(e.ctx, pk, u.AuthVersion))
+	got, err := e.GetUser(e.ctx, u.ID)
+	must(t, err)
+	if got.PasskeyCount != 1 {
+		t.Fatalf("passkey_count = %d", got.PasskeyCount)
+	}
+
+	// With the passkey, the provider can go; then the passkey can't.
+	v, err := e.UnlinkIdentity(e.ctx, u.ID, "google", false)
+	must(t, err)
+	wantErr(t, e.DeletePasskey(e.ctx, u.ID, pk.ID, false), ErrLastSignInMethod)
+	// A second passkey makes the first removable.
+	pk2 := &Passkey{UserID: u.ID, CredentialID: []byte("cred-2"), RPID: f.host, PublicKey: []byte("k")}
+	must(t, e.CreatePasskey(e.ctx, pk2, v))
+	must(t, e.DeletePasskey(e.ctx, u.ID, pk.ID, false))
+	wantErr(t, e.DeletePasskey(e.ctx, u.ID, pk2.ID, false), ErrLastSignInMethod)
+	// An administrator can remove the last one.
+	must(t, e.DeletePasskey(e.ctx, u.ID, pk2.ID, true))
+	got, err = e.GetUser(e.ctx, u.ID)
+	must(t, err)
+	if got.PasskeyCount != 0 {
+		t.Fatalf("passkey_count = %d", got.PasskeyCount)
+	}
+}
+
+// Concurrently unlinking a passwordless user's only identity and deleting
+// their only passkey leaves one of them.
+func TestRaceUnlinkAndDeleteLastPasskey(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	must(t, e.CreateIDP(e.ctx, newTestIDP(f, "google")))
+	u := newIdentityUser(f, "race@example.com")
+	must(t, e.CreateUserWithIdentity(e.ctx, u, &Identity{IDPID: "google", Subject: "g"}))
+	pk := &Passkey{UserID: u.ID, CredentialID: []byte("cred"), RPID: f.host, PublicKey: []byte("k")}
+	must(t, e.CreatePasskey(e.ctx, pk, u.AuthVersion))
+
+	errs := race(func(i int) error {
+		if i%2 == 0 {
+			_, err := e.UnlinkIdentity(e.ctx, u.ID, "google", false)
+			return err
+		}
+		return e.DeletePasskey(e.ctx, u.ID, pk.ID, false)
+	})
+	for i, err := range errs {
+		if err != nil && !errors.Is(err, ErrLastSignInMethod) && !errors.Is(err, ErrNotFound) && !errors.Is(err, ErrConditionFailed) {
+			t.Fatalf("call %d: %v", i, err)
+		}
+	}
+	got, err := e.GetUser(e.ctx, u.ID)
+	must(t, err)
+	if got.IdentityCount+got.PasskeyCount != 1 {
+		t.Fatalf("identity_count %d, passkey_count %d: want exactly one way to sign in left", got.IdentityCount, got.PasskeyCount)
+	}
+}
+
+// A password reset removes the identities that created a user with an
+// unverified email, and keeps the others.
+func TestPasswordResetRemovesUnprovenIdentities(t *testing.T) {
+	e := newTestEnv(t)
+	f := e.newFixture(t)
+	must(t, e.CreateIDP(e.ctx, newTestIDP(f, "sketchy")))
+	must(t, e.CreateIDP(e.ctx, newTestIDP(f, "google")))
+	u := newIdentityUser(f, "victim@example.com")
+	u.EmailVerified = false
+	must(t, e.CreateUserWithIdentity(e.ctx, u, &Identity{IDPID: "sketchy", Subject: "attacker", Unproven: true}))
+	must(t, e.LinkIdentity(e.ctx, u.ID, u.AuthVersion, &Identity{PoolID: f.pool.ID, IDPID: "google", Subject: "g"}))
+
+	reset := func() error {
+		h := newHash()
+		must(t, e.CreateOneTimeToken(e.ctx, &OneTimeToken{Hash: h, Purpose: PurposeResetPassword, PoolID: f.pool.ID, UserID: u.ID,
+			Email: u.Email}, time.Hour))
+		_, err := e.CompletePasswordReset(e.ctx, h, "new-hash")
+		return err
+	}
+	must(t, reset())
+	if _, _, err := e.GetUserByIdentity(e.ctx, f.pool.ID, "sketchy", "attacker"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the unproven identity survived the reset: %v", err)
+	}
+	got, _, err := e.GetUserByIdentity(e.ctx, f.pool.ID, "google", "g")
+	must(t, err)
+	if got.ID != u.ID || got.IdentityCount != 1 || got.PasswordHash != "new-hash" || !got.EmailVerified {
+		t.Fatalf("after reset: %+v", got)
+	}
+	// Nothing left to remove: a second reset works as before.
+	must(t, reset())
+}

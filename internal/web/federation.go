@@ -165,7 +165,7 @@ func (s *Server) toProvider(w http.ResponseWriter, r *http.Request, t *tenant, p
 	}
 	to := federation.AuthURL(m, federation.AuthRequest{
 		ClientID: p.ClientID, RedirectURI: s.link(t, FederationCallbackPath, nil), Scopes: scopes,
-		State: state, Nonce: nonce, Verifier: verifier,
+		State: state, Nonce: nonce, Verifier: verifier, FreshSignIn: st.Purpose == store.FedConfirm,
 	})
 	http.Redirect(w, r, to, http.StatusSeeOther) //nolint:gosec // the provider's https authorization endpoint, from its checked discovery document
 }
@@ -260,11 +260,12 @@ func (s *Server) federationCallback(w http.ResponseWriter, r *http.Request, t *t
 }
 
 // mfaEvidence reports whether the provider's ID token shows that the user
-// signed in there with two factors: "mfa" in amr, or one of the amr or acr
-// values the provider is configured with.
+// signed in there with two factors: one of the amr or acr values the org
+// configured for the provider. Nothing counts by default, not even "mfa":
+// the org decides whether it trusts the provider's second factor.
 func mfaEvidence(p *store.IDP, c *federation.Claims) bool {
 	for _, v := range c.AMR {
-		if v == "mfa" || slices.Contains(p.MFAAMR, v) {
+		if slices.Contains(p.MFAAMR, v) {
 			return true
 		}
 	}
@@ -365,8 +366,11 @@ func (s *Server) federatedSignUp(w http.ResponseWriter, r *http.Request, t *tena
 		})
 		return nil
 	}
-	u := &store.User{ID: crypto.NewID(), PoolID: t.Pool.ID, Email: addr, EmailVerified: c.EmailVerified}
-	err = s.Store.CreateUserWithIdentity(ctx, u, &store.Identity{IDPID: p.ID, Subject: c.Subject, Email: addr})
+	// The provider's email_verified counts only if the org trusts it to
+	// verify every address it vouches for.
+	verified := c.EmailVerified && p.TrustEmailVerified
+	u := &store.User{ID: crypto.NewID(), PoolID: t.Pool.ID, Email: addr, EmailVerified: verified}
+	err = s.Store.CreateUserWithIdentity(ctx, u, &store.Identity{IDPID: p.ID, Subject: c.Subject, Email: addr, Unproven: !verified})
 	switch {
 	case err == nil:
 		if !u.EmailVerified {
