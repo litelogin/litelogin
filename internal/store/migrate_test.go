@@ -61,7 +61,7 @@ func TestMigrateToSharedHosts(t *testing.T) {
 	h, err := e.GetLoginHost(e.ctx, "main.example.com")
 	must(t, err)
 	if h.OrgID != org.ID || h.PoolID != pool.ID || h.Type != HostTypeDefault || h.Status != HostVerified ||
-		h.Theme["brand_name"] != "Acme" || !h.RegistrationEnabled || h.SessionTTL != 3600 || h.SessionIdleTTL != 600 {
+		!h.RegistrationEnabled || h.SessionTTL != 3600 || h.SessionIdleTTL != 600 {
 		t.Fatalf("default host = %+v", h)
 	}
 	ids, err := e.ListHostClients(e.ctx, "main.example.com")

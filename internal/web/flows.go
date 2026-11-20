@@ -355,7 +355,7 @@ func (s *Server) sendReset(ctx context.Context, t *tenant, u *store.User, kind e
 
 func (s *Server) send(ctx context.Context, t *tenant, kind email.Kind, to, path, token, expires string) error {
 	m, err := email.Render(kind, to, email.Data{
-		Brand: t.Theme.Brand, Host: t.Host, Link: s.link(t, path, url.Values{"token": {token}}), Expires: expires,
+		Brand: t.Brand, Host: t.Host, Link: s.link(t, path, url.Values{"token": {token}}), Expires: expires,
 	})
 	if err != nil {
 		return err

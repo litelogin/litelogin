@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/litelogin/litelogin/internal/store"
 )
@@ -24,21 +23,20 @@ const (
 
 // Host is the API representation of a login host.
 type Host struct {
-	Host                string            `json:"host"`
-	OrgID               string            `json:"org_id"`
-	UserPoolID          string            `json:"user_pool_id"`
-	Type                string            `json:"type"`
-	Status              string            `json:"status"`
-	Issuer              string            `json:"issuer"`
-	Theme               map[string]string `json:"theme"`
-	RegistrationEnabled bool              `json:"registration_enabled"`
-	PasskeysEnabled     bool              `json:"passkeys_enabled"`
-	IDPs                []string          `json:"idps"`
-	SessionTTL          int64             `json:"session_ttl"`
-	SessionIdleTTL      int64             `json:"session_idle_ttl"`
-	CreatedAt           string            `json:"created_at"`
-	UpdatedAt           string            `json:"updated_at"`
-	Version             int64             `json:"version"`
+	Host                string   `json:"host"`
+	OrgID               string   `json:"org_id"`
+	UserPoolID          string   `json:"user_pool_id"`
+	Type                string   `json:"type"`
+	Status              string   `json:"status"`
+	Issuer              string   `json:"issuer"`
+	RegistrationEnabled bool     `json:"registration_enabled"`
+	PasskeysEnabled     bool     `json:"passkeys_enabled"`
+	IDPs                []string `json:"idps"`
+	SessionTTL          int64    `json:"session_ttl"`
+	SessionIdleTTL      int64    `json:"session_idle_ttl"`
+	CreatedAt           string   `json:"created_at"`
+	UpdatedAt           string   `json:"updated_at"`
+	Version             int64    `json:"version"`
 
 	// CNAMETarget is where a custom host's DNS must point: the customer
 	// creates a CNAME record from the host to it.
@@ -52,16 +50,12 @@ type Host struct {
 }
 
 func (s *Server) hostJSON(h *store.LoginHost) Host {
-	theme := h.Theme
-	if theme == nil {
-		theme = map[string]string{}
-	}
 	idps := h.IDPs
 	if idps == nil {
 		idps = []string{}
 	}
 	return Host{Host: h.Host, IDPs: idps, OrgID: h.OrgID, UserPoolID: h.PoolID, Type: h.Type, Status: h.Status, Issuer: "https://" + h.Host,
-		Theme: theme, RegistrationEnabled: h.RegistrationEnabled, PasskeysEnabled: h.PasskeysEnabled, SessionTTL: h.SessionTTL, SessionIdleTTL: h.SessionIdleTTL,
+		RegistrationEnabled: h.RegistrationEnabled, PasskeysEnabled: h.PasskeysEnabled, SessionTTL: h.SessionTTL, SessionIdleTTL: h.SessionIdleTTL,
 		CreatedAt: timestamp(h.CreatedAt), UpdatedAt: timestamp(h.UpdatedAt), Version: h.Version,
 		WorkAttempts: h.WorkAttempts, WorkUpdatedAt: timestamp(h.WorkUpdatedAt), WorkLastError: h.WorkLastError,
 		CNAMETarget: s.customHostTarget(h)}
@@ -78,9 +72,8 @@ func (s *Server) customHostTarget(h *store.LoginHost) string {
 // requests. Omitted fields keep their current value (update) or default
 // (create).
 type HostSettingsInput struct {
-	Theme               *map[string]string `json:"theme"`
-	RegistrationEnabled *bool              `json:"registration_enabled"`
-	PasskeysEnabled     *bool              `json:"passkeys_enabled"`
+	RegistrationEnabled *bool `json:"registration_enabled"`
+	PasskeysEnabled     *bool `json:"passkeys_enabled"`
 	// IDPs are the pool's identity providers the sign-in page shows, in
 	// order.
 	IDPs           *[]string `json:"idps"`
@@ -96,9 +89,6 @@ func defaultHostSettings() store.HostSettings {
 func (in *HostSettingsInput) apply(h *store.HostSettings) error {
 	if in == nil {
 		return validateHostSettings(h)
-	}
-	if in.Theme != nil {
-		h.Theme = *in.Theme
 	}
 	if in.RegistrationEnabled != nil {
 		h.RegistrationEnabled = *in.RegistrationEnabled
@@ -125,14 +115,6 @@ func (in *HostSettingsInput) apply(h *store.HostSettings) error {
 }
 
 func validateHostSettings(h *store.HostSettings) error {
-	if len(h.Theme) > maxThemeKeys {
-		return errInvalid("theme has more than %d entries", maxThemeKeys)
-	}
-	for k, v := range h.Theme {
-		if k == "" || len(k) > maxThemeKeyLen || len(v) > maxThemeValLen || !utf8.ValidString(k) || !utf8.ValidString(v) {
-			return errInvalid("theme keys must be 1-%d bytes and values at most %d bytes", maxThemeKeyLen, maxThemeValLen)
-		}
-	}
 	if h.SessionTTL < minSessionTTL || h.SessionTTL > maxSessionTTL {
 		return errInvalid("session_ttl must be between %d and %d seconds", minSessionTTL, maxSessionTTL)
 	}

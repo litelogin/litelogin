@@ -219,7 +219,7 @@ func (s *Server) inviteHost(r *http.Request, poolID, host, clientID string) (*st
 
 func (s *Server) sendInvite(ctx context.Context, h *store.LoginHost, org *store.Org, addr, token string) error {
 	link := s.hostLink(h, "/password/reset", url.Values{"token": {token}})
-	m, err := email.Render(email.Invite, addr, email.Data{Brand: hostBrand(h, org), Host: h.Host, Link: link, Expires: "7 days"})
+	m, err := email.Render(email.Invite, addr, email.Data{Brand: org.Name, Host: h.Host, Link: link, Expires: "7 days"})
 	if err != nil {
 		return err
 	}
@@ -229,7 +229,7 @@ func (s *Server) sendInvite(ctx context.Context, h *store.LoginHost, org *store.
 // sendNotice emails a user a security notice linking to their account
 // page on h.
 func (s *Server) sendNotice(ctx context.Context, h *store.LoginHost, org *store.Org, addr string, kind email.Kind) error {
-	m, err := email.Render(kind, addr, email.Data{Brand: hostBrand(h, org), Host: h.Host, Link: s.hostLink(h, "/account", nil)})
+	m, err := email.Render(kind, addr, email.Data{Brand: org.Name, Host: h.Host, Link: s.hostLink(h, "/account", nil)})
 	if err != nil {
 		return err
 	}
@@ -245,13 +245,6 @@ func (s *Server) hostLink(h *store.LoginHost, path string, q url.Values) string 
 		host += ":" + s.LinkPort
 	}
 	return (&url.URL{Scheme: scheme, Host: host, Path: path, RawQuery: q.Encode()}).String()
-}
-
-func hostBrand(h *store.LoginHost, org *store.Org) string {
-	if v := h.Theme["brand_name"]; v != "" {
-		return v
-	}
-	return org.Name
 }
 
 const (

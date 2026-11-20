@@ -52,7 +52,7 @@ var passkeyScript string
 func (s *Server) relyingParty(t *tenant) (*webauthn.WebAuthn, error) {
 	return webauthn.New(&webauthn.Config{
 		RPID:                  t.Host,
-		RPDisplayName:         t.Theme.Brand,
+		RPDisplayName:         t.Brand,
 		RPOrigins:             []string{s.link(t, "", nil)},
 		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
@@ -466,7 +466,7 @@ func (s *Server) passkeyRegister(w http.ResponseWriter, r *http.Request, t *tena
 	}
 	metrics.Count(s.Metrics, metrics.PasskeyAdded, 1)
 	m, err := email.Render(email.PasskeyAdded, u.Email, email.Data{
-		Brand: t.Theme.Brand, Host: t.Host, Link: s.link(t, "/account", nil), Name: name,
+		Brand: t.Brand, Host: t.Host, Link: s.link(t, "/account", nil), Name: name,
 	})
 	if err == nil {
 		err = s.Email.Send(ctx, m)

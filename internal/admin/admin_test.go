@@ -297,7 +297,8 @@ func TestCreateOrgDefaultHost(t *testing.T) {
 		{`{"name":"x","host_label":"Login-1"}`, 201},
 		{`{"name":"y","host_settings":{"session_ttl":3600,"session_idle_ttl":7200}}`, 400},
 		{`{"name":"y","host_settings":{"session_ttl":10}}`, 400},
-		{`{"name":"y","host_settings":{"registration_enabled":false,"theme":{"brand_name":"Y"}}}`, 201},
+		{`{"name":"y","host_settings":{"theme":{"brand_name":"Y"}}}`, 400},
+		{`{"name":"y","host_settings":{"registration_enabled":false}}`, 201},
 		{`{"name":"z","host_settings":{"session_ttl_typo":1}}`, 400},
 	} {
 		if res := r.call("POST", "/v1/orgs", tc.body); res.code != tc.want {
@@ -307,7 +308,7 @@ func TestCreateOrgDefaultHost(t *testing.T) {
 	if h := r.store.hosts["login-1.litelogin.test"]; h.OrgID == "" {
 		t.Error("host_label isn't lowercased")
 	}
-	if h := r.store.hosts["y.litelogin.test"]; h.RegistrationEnabled || h.Theme["brand_name"] != "Y" || h.SessionTTL != 604800 {
+	if h := r.store.hosts["y.litelogin.test"]; h.RegistrationEnabled || h.SessionTTL != 604800 {
 		t.Errorf("host_settings not applied: %+v", h)
 	}
 }

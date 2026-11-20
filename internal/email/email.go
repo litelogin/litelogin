@@ -116,7 +116,7 @@ var subjects = map[Kind]string{ //nolint:gosec // email subjects, not credential
 
 // Data fills a message template.
 type Data struct {
-	Brand   string // the client's name, or its theme's brand name
+	Brand   string // the client's name, or the org's name
 	Host    string // the login host the link points to
 	Link    string // the action link (verification, reset), or the account page
 	Name    string // a passkey's name, or an identity provider's
