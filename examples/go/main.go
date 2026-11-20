@@ -12,7 +12,8 @@
 //	ISSUER_URL     the login host, e.g. https://acme.login.example.com (required)
 //	CLIENT_ID      the client's ID (required)
 //	CLIENT_SECRET  the client's secret (leave it unset for a public client)
-//	REDIRECT_URL   a registered redirect URI (default http://localhost:3000/callback)
+//	REDIRECT_URL   the registered redirect URI, ending in /callback
+//	               (default http://localhost:3000/callback)
 //	POST_LOGOUT_REDIRECT_URL
 //	               a registered post-logout redirect URI, e.g. http://localhost:3000/
 //	               (optional: without it, logout ends on LiteLogin's sign-in page)
@@ -33,7 +34,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -117,19 +117,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if redirect == "" {
 		redirect = "http://localhost:3000/callback"
 	}
+	// The app always serves its callback on /callback. REDIRECT_URL says
+	// where the app is reachable: its scheme and host.
 	u, err := url.Parse(redirect)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path == "" {
-		return cfg, fmt.Errorf("REDIRECT_URL %q isn't an absolute http(s) URL with a path", redirect)
-	}
-	// The callback is served on this path, right next to the app's own
-	// pages, so it can't take one of theirs. Braces would be read as a
-	// ServeMux wildcard, so those are out too.
-	switch u.Path {
-	case "/", "/login", "/claims", "/logout":
-		return cfg, fmt.Errorf("REDIRECT_URL's path %s is one of the app's pages: use another, such as /callback", u.Path)
-	}
-	if strings.ContainsAny(u.Path, "{}") {
-		return cfg, fmt.Errorf("REDIRECT_URL's path %s has braces: use a plain path, such as /callback", u.Path)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "/callback" {
+		return cfg, fmt.Errorf("REDIRECT_URL %q must be an absolute http(s) URL whose path is /callback", redirect)
 	}
 	cfg.redirectURL = u
 	if v := getenv("POST_LOGOUT_REDIRECT_URL"); v != "" {
@@ -205,12 +197,12 @@ func (a *app) home() string {
 	return (&url.URL{Scheme: a.cfg.redirectURL.Scheme, Host: a.cfg.redirectURL.Host, Path: "/"}).String()
 }
 
-// routes wires up the pages. The callback goes wherever REDIRECT_URL says.
+// routes wires up the pages.
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", a.handleHome)
 	mux.HandleFunc("GET /login", a.handleLogin)
-	mux.HandleFunc("GET "+a.cfg.redirectURL.Path, a.handleCallback)
+	mux.HandleFunc("GET /callback", a.handleCallback)
 	mux.HandleFunc("GET /claims", a.handleClaims)
 	mux.HandleFunc("POST /logout", a.handleLogout)
 	return securityHeaders(mux)

@@ -219,15 +219,16 @@ func TestLoadConfig(t *testing.T) {
 	}
 
 	for name, extra := range map[string]map[string]string{
-		"no issuer":               {"ISSUER_URL": ""},
-		"no client ID":            {"CLIENT_ID": ""},
-		"relative redirect":       {"REDIRECT_URL": "/callback"},
-		"redirect without a path": {"REDIRECT_URL": "https://app.example.com"},
-		"redirect on a page":      {"REDIRECT_URL": "https://app.example.com/login"},
-		"redirect on home":        {"REDIRECT_URL": "https://app.example.com/"},
-		"redirect with braces":    {"REDIRECT_URL": "https://app.example.com/{x}"},
-		"other scheme":            {"REDIRECT_URL": "com.example.app:/callback"},
-		"relative logout":         {"POST_LOGOUT_REDIRECT_URL": "/"},
+		"no issuer":                {"ISSUER_URL": ""},
+		"no client ID":             {"CLIENT_ID": ""},
+		"relative redirect":        {"REDIRECT_URL": "/callback"},
+		"redirect without a path":  {"REDIRECT_URL": "https://app.example.com"},
+		"redirect on another path": {"REDIRECT_URL": "https://app.example.com/cb"},
+		"redirect on home":         {"REDIRECT_URL": "https://app.example.com/"},
+		"unclean redirect path":    {"REDIRECT_URL": "http://localhost:3000//callback"},
+		"trailing slash":           {"REDIRECT_URL": "https://app.example.com/callback/"},
+		"other scheme":             {"REDIRECT_URL": "com.example.app:/callback"},
+		"relative logout":          {"POST_LOGOUT_REDIRECT_URL": "/"},
 	} {
 		if _, err := load(extra); err == nil {
 			t.Errorf("%s: no error", name)
