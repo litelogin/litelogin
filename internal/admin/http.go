@@ -4,91 +4,18 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/litelogin/litelogin/internal/httpx"
-	"github.com/litelogin/litelogin/internal/store"
 )
-
-// apiError is an error response: {"error": code, "message": text}.
-type apiError struct {
-	Status  int    `json:"-"`
-	Code    string `json:"error"`
-	Message string `json:"message"`
-}
-
-func (e *apiError) Error() string { return fmt.Sprintf("%d %s: %s", e.Status, e.Code, e.Message) }
-
-func errInvalid(format string, args ...any) *apiError {
-	return &apiError{Status: http.StatusBadRequest, Code: "invalid_request", Message: fmt.Sprintf(format, args...)}
-}
-
-func errNotFound(msg string) *apiError {
-	return &apiError{Status: http.StatusNotFound, Code: "not_found", Message: msg}
-}
-
-func errConflict(code, msg string) *apiError {
-	return &apiError{Status: http.StatusConflict, Code: code, Message: msg}
-}
-
-// toAPIError maps store and request errors to responses. Anything not
-// recognized is a 500 whose details are logged, not returned.
-func toAPIError(err error) *apiError {
-	var ae *apiError
-	if errors.As(err, &ae) {
-		return ae
-	}
-	var tooBig *http.MaxBytesError
-	switch {
-	case errors.As(err, &tooBig):
-		return &apiError{Status: http.StatusRequestEntityTooLarge, Code: "body_too_large", Message: "request body is too large"}
-	case errors.Is(err, store.ErrNotFound):
-		return errNotFound(strings.TrimPrefix(err.Error(), "store: "))
-	case errors.Is(err, store.ErrAlreadyExists):
-		return errConflict("already_exists", "the resource already exists")
-	case errors.Is(err, store.ErrEmailTaken):
-		return errConflict("email_taken", "a user in this pool already has this email")
-	case errors.Is(err, store.ErrHostTaken):
-		return errConflict("host_taken", "this login host already exists")
-	case errors.Is(err, store.ErrVersionMismatch):
-		return &apiError{Status: http.StatusPreconditionFailed, Code: "version_mismatch",
-			Message: "the resource was changed since it was read; get it again and retry"}
-	case errors.Is(err, store.ErrPoolNotActive):
-		return errConflict("pool_not_active", "the pool doesn't exist in this org, or is being deleted")
-	case errors.Is(err, store.ErrPoolInUse):
-		return errConflict("pool_in_use", "a client or login host still uses this pool")
-	case errors.Is(err, store.ErrWrongPool):
-		return errConflict("wrong_pool", "a client can only be on login hosts of its own org and user pool")
-	case errors.Is(err, store.ErrHostInUse):
-		return errConflict("host_in_use", "clients are still on this login host: remove them first")
-	case errors.Is(err, store.ErrLastHost):
-		return errConflict("last_host", "this is the client's only login host; every client is on at least one")
-	case errors.Is(err, store.ErrDefaultHost):
-		return errConflict("default_host", "an org's default login host can't be removed")
-	case errors.Is(err, store.ErrIDPInUse):
-		return errConflict("idp_in_use", "a login host still shows this identity provider: remove it from the host's idps first")
-	case errors.Is(err, store.ErrIDPNotFound):
-		return errInvalid("idps: every identity provider must exist in the host's user pool")
-	case errors.Is(err, store.ErrTooMany):
-		return errConflict("limit_reached", "the limit for this resource has been reached")
-	case errors.Is(err, store.ErrConditionFailed):
-		return errConflict("conflict", "the resource isn't in a state that allows this; get it again and retry")
-	case errors.Is(err, store.ErrInvalidEmail):
-		return errInvalid("invalid email address")
-	case errors.Is(err, store.ErrInvalidHost):
-		return errInvalid("invalid host name")
-	}
-	return &apiError{Status: http.StatusInternalServerError, Code: "internal_error", Message: "internal error"}
-}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	body, err := json.Marshal(v)
 	if err != nil {
-		writeError(w, toAPIError(err))
+		writeError(w, AsError(err))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -97,7 +24,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(append(body, '\n'))
 }
 
-func writeError(w http.ResponseWriter, e *apiError) {
+func writeError(w http.ResponseWriter, e *Error) {
 	w.Header().Del("ETag")
 	writeJSON(w, e.Status, e)
 }
@@ -118,7 +45,7 @@ func ifMatch(r *http.Request) (int64, error) {
 		return 0, err
 	}
 	if !ok {
-		return 0, &apiError{Status: http.StatusPreconditionRequired, Code: "if_match_required",
+		return 0, &Error{Status: http.StatusPreconditionRequired, Code: "if_match_required",
 			Message: "send If-Match with the ETag from a GET of this resource"}
 	}
 	return v, nil

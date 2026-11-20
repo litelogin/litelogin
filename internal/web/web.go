@@ -64,7 +64,7 @@ type Store interface {
 	GetPasskey(ctx context.Context, userID string, credentialID []byte) (*store.Passkey, error)
 	RecordPasskeyUse(ctx context.Context, userID, id string, signCount uint32, backupState bool) error
 	RenamePasskey(ctx context.Context, userID, id, name string) error
-	DeletePasskey(ctx context.Context, userID, id string) error
+	DeletePasskey(ctx context.Context, userID, id string, force bool) error
 	CreateWebAuthnChallenge(ctx context.Context, c *store.WebAuthnChallenge, lifetime time.Duration) error
 	ConsumeWebAuthnChallenge(ctx context.Context, hash, purpose, host string) (*store.WebAuthnChallenge, error)
 	GetOneTimeToken(ctx context.Context, hash, purpose string) (*store.OneTimeToken, error)
@@ -91,7 +91,11 @@ type Store interface {
 	GetUserByIdentity(ctx context.Context, poolID, idpID, sub string) (*store.User, *store.Identity, error)
 	RecordIdentityUse(ctx context.Context, userID, idpID string) error
 	CreateFederationState(ctx context.Context, f *store.FederationState, lifetime time.Duration) error
-	ConsumeFederationState(ctx context.Context, hash, purpose, host string) (*store.FederationState, error)
+	ConsumeFederationState(ctx context.Context, hash, host string, purposes ...string) (*store.FederationState, error)
+	ListIdentities(ctx context.Context, userID string) ([]store.Identity, error)
+	LinkIdentity(ctx context.Context, userID string, authVersion int64, id *store.Identity) error
+	UnlinkIdentity(ctx context.Context, userID, idpID string, force bool) (int64, error)
+	SetFirstPassword(ctx context.Context, userID, hash string) (int64, error)
 }
 
 var _ Store = (*store.Store)(nil)
@@ -211,6 +215,10 @@ func (s *Server) Handler() http.Handler {
 	page("POST /account/2fa/disable", s.disableMFA)
 	page("POST /account/2fa/recovery-codes", s.replaceRecoveryCodes)
 	page("POST /account/verify", s.confirmIdentity)
+	page("POST /account/password/set", s.setPassword)
+	page("POST /account/identities/link", s.startLink)
+	page("POST /account/identities/confirm", s.startConfirm)
+	page("POST /account/identities/remove", s.unlinkIdentity)
 	page("GET /federation/start", s.federationStart)
 	page("GET "+FederationCallbackPath, s.federationCallback)
 	// Passkey ceremonies, called by the pages' script. They answer JSON.
@@ -248,7 +256,8 @@ type tenant struct {
 	Login *store.LoginHost
 	Org   *store.Org
 	Pool  *store.Pool
-	Theme Theme
+	// Brand is the name pages, emails and passkeys show: the org's name.
+	Brand string
 	// Client is the request's client, once known: named by client_id
 	// (authorize, logout), authenticated (token), or the audience of a
 	// token. It's nil on pages with no sign-in request in progress.
@@ -286,7 +295,7 @@ func (s *Server) resolve(r *http.Request) (*tenant, error) {
 	}
 	logctx.Set(ctx, logctx.Host, host)
 	logctx.Set(ctx, logctx.OrgID, org.ID)
-	return &tenant{Host: host, Login: h, Org: org, Pool: pool, Theme: ThemeFor(h, org)}, nil
+	return &tenant{Host: host, Login: h, Org: org, Pool: pool, Brand: org.Name}, nil
 }
 
 // hostClient returns a client if it's active on the tenant's host: a
@@ -441,7 +450,6 @@ type pageData struct {
 
 	// Set by render.
 	Brand        string
-	Theme        Theme
 	CSRF         string
 	Nonce        string
 	Registration bool
@@ -451,6 +459,18 @@ type pageData struct {
 	// IDPs are the identity providers to sign in with, on the sign-in
 	// and registration pages.
 	IDPs []idpButton
+	// Identities are the signed-in user's linked provider accounts, and
+	// Linkable the host's providers they can link. NoPassword: the user
+	// has no password. FedConfirm: they must sign in again through a
+	// linked account before a sensitive change (no password, no recent
+	// sign-in).
+	Identities []identityView
+	Linkable   []linkOption
+	NoPassword bool
+	FedConfirm bool
+	// ProviderOrigins are the origins of the authorization endpoints the
+	// account page's provider forms redirect to, for form-action.
+	ProviderOrigins []string
 	// Script is the page's script: the passkey script on the login and
 	// account pages, if the host allows passkeys.
 	Script template.JS
@@ -470,41 +490,47 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, t *tenant, statu
 	d.Nonce = crypto.NewToken()
 	d.MinPassword = MinPasswordLength
 	if t != nil {
-		d.Theme, d.Brand, d.Registration = t.Theme, t.Theme.Brand, t.Login.RegistrationEnabled
+		d.Brand, d.Registration = t.Brand, t.Login.RegistrationEnabled
 		d.PasskeysEnabled = t.Login.PasskeysEnabled
 		d.CSRF = s.ensureCSRF(w, r)
 		if name == "login" || name == "register" {
 			d.IDPs = s.idpButtons(r.Context(), t, d.Authz)
 		}
 	} else {
-		d.Theme, d.Brand = DefaultTheme(), "LiteLogin"
+		d.Brand = "LiteLogin"
 	}
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
 	// Browsers apply form-action to the redirects that follow a form
-	// submission too: signing in ends at the client's redirect URI, and
-	// logging out at its post-logout redirect URI.
+	// submission too: signing in ends at the client's redirect URI,
+	// logging out at its post-logout redirect URI, and linking or
+	// confirming through a provider at its authorization endpoint.
 	scripts := ""
 	if d.Script != "" {
 		// The script's fetches go to this host only.
 		scripts = "script-src 'nonce-" + d.Nonce + "'; connect-src 'self'; "
 	}
 	h.Set("Content-Security-Policy", "default-src 'none'; "+scripts+"style-src 'nonce-"+d.Nonce+"'; img-src 'self' https:; "+
-		"form-action "+formActionSources(t)+"; frame-ancestors 'none'; base-uri 'none'")
+		"form-action "+formActionSources(t, d.ProviderOrigins...)+"; frame-ancestors 'none'; base-uri 'none'")
 	w.WriteHeader(status)
 	if err := tmpl.ExecuteTemplate(w, "layout", d); err != nil {
 		s.log().ErrorContext(r.Context(), "render page", "page", name, "error", err)
 	}
 }
 
-// formActionSources lists 'self' and the origins (or, for native apps,
-// schemes) of the request's client's redirect and post-logout redirect
-// URIs.
-func formActionSources(t *tenant) string {
+// formActionSources lists 'self', the extra origins, and the origins (or,
+// for native apps, schemes) of the request's client's redirect and
+// post-logout redirect URIs.
+func formActionSources(t *tenant, extra ...string) string {
 	sources := []string{"'self'"}
+	for _, src := range extra {
+		if src != "" && !strings.ContainsAny(src, " ;,'\"") && !slices.Contains(sources, src) {
+			sources = append(sources, src)
+		}
+	}
 	if t == nil || t.Client == nil {
-		return sources[0]
+		return strings.Join(sources, " ")
 	}
 	for _, raw := range append(slices.Clone(t.Client.RedirectURIs), t.Client.PostLogoutRedirectURIs...) {
 		u, err := url.Parse(raw)

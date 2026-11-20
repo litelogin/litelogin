@@ -382,7 +382,6 @@ func (f *clientFlags) body(cmd *cobra.Command) map[string]any {
 
 // hostSettingsFlags are a login host's settings.
 type hostSettingsFlags struct {
-	theme               map[string]string
 	registration        bool
 	passkeys            bool
 	idps                []string
@@ -393,7 +392,6 @@ type hostSettingsFlags struct {
 // providers yet, so org create leaves out --idps (withIDPs false).
 func (f *hostSettingsFlags) register(cmd *cobra.Command, withIDPs bool) {
 	fl := cmd.Flags()
-	fl.StringToStringVar(&f.theme, "theme", nil, "theme, as key=value pairs (brand_name, primary_color, background_color, logo_url; replaces the theme)")
 	fl.BoolVar(&f.registration, "registration", true, "allow users to register on the login pages")
 	fl.BoolVar(&f.passkeys, "passkeys", false, "let users add passkeys and sign in with them")
 	if withIDPs {
@@ -414,9 +412,6 @@ func (f *hostSettingsFlags) body(cmd *cobra.Command) map[string]any {
 	if v, ok := body["passkeys"]; ok {
 		delete(body, "passkeys")
 		body["passkeys_enabled"] = v
-	}
-	if cmd.Flags().Changed("theme") {
-		body["theme"] = f.theme
 	}
 	if fl := cmd.Flags().Lookup("idps"); fl != nil && fl.Changed {
 		body["idps"] = append([]string{}, f.idps...) // [] clears the list
@@ -745,6 +740,35 @@ func (a *App) userCommand() *cobra.Command {
 		},
 	)
 
+	identities := group("identity", "Manage a user's linked identity provider accounts",
+		&cobra.Command{
+			Use: "list USER", Short: "List a user's linked identity provider accounts", Args: cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				var out struct{ Items []admin.Identity }
+				if _, err := a.get(cmd, "/v1/users/"+esc(args[0])+"/identities", &out); err != nil {
+					return err
+				}
+				return printList(a.Stdout, a.output, out.Items, "", "idp_id", "subject", "email", "created_at", "last_used_at")
+			},
+		},
+		&cobra.Command{
+			Use:   "unlink USER IDP",
+			Short: "Unlink a user's identity provider account and log them out everywhere",
+			Long: "Unlink a user's account at an identity provider and log them out everywhere. Unlike on the account page, " +
+				"this can remove the user's last way to sign in: without a password, they can then only get back in by " +
+				"resetting their password by email.",
+			Args: cobra.ExactArgs(2),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if _, err := a.do(cmd, Request{Method: http.MethodDelete,
+					Path: "/v1/users/" + esc(args[0]) + "/identities/" + esc(args[1]), IdempotencyKey: a.NewID()}); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(a.Stdout, "unlinked %s from user %s\n", args[1], args[0])
+				return nil
+			},
+		},
+	)
+
 	var resetHost string
 	resetMFA := &cobra.Command{
 		Use: "reset-2fa USER", Short: "Turn off a user's two-factor sign-in and log them out everywhere", Args: cobra.ExactArgs(1),
@@ -779,7 +803,7 @@ func (a *App) userCommand() *cobra.Command {
 		upd,
 		actionCommand[admin.User](a, "disable USER", "Disable a user and log them out everywhere", "/v1/users/", "/disable"),
 		actionCommand[admin.User](a, "enable USER", "Enable a disabled user", "/v1/users/", "/enable"),
-		sessions, revoke, passkeys, resetMFA,
+		sessions, revoke, passkeys, identities, resetMFA,
 		deleteCommand(a, "delete USER", "Delete a user", "/v1/users/", "user"),
 	)
 }

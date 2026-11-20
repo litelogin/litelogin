@@ -1,10 +1,10 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
@@ -46,11 +46,8 @@ var ttlRules = []struct {
 }
 
 const (
-	maxURIs        = 20
-	maxURILen      = 2000
-	maxThemeKeys   = 32
-	maxThemeKeyLen = 64
-	maxThemeValLen = 1024
+	maxURIs   = 20
+	maxURILen = 2000
 )
 
 // Client is the API representation of a client. ClientSecret is set only
@@ -375,29 +372,27 @@ func newClient(in *ClientInput) *store.Client {
 	return c
 }
 
-func (s *Server) createClient(w http.ResponseWriter, r *http.Request) error {
-	orgID, err := pathValue(r, "org")
-	if err != nil {
-		return err
-	}
-	var in ClientInput
-	if err := decode(r, &in); err != nil {
-		return err
+// CreateClient creates a client on an existing login host of the org (in.Host).
+// The result has the host, its issuer and, for a confidential client, the
+// client secret: the only time it's returned.
+func (s *Service) CreateClient(ctx context.Context, p Principal, orgID string, in ClientInput) (*Client, error) {
+	if err := inOrg(p, orgID); err != nil {
+		return nil, err
 	}
 	c := newClient(&in)
 	c.ID, c.OrgID = crypto.NewID(), orgID
 	if in.Name == nil {
-		return errInvalid("name is required")
+		return nil, errInvalid("name is required")
 	}
 	if in.Host == nil {
-		return errInvalid("host is required: the login host the client is on (an org's default host is in its default_host)")
+		return nil, errInvalid("host is required: the login host the client is on (an org's default host is in its default_host)")
 	}
 	host, err := store.NormalizeHost(*in.Host)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := in.apply(c); err != nil {
-		return err
+		return nil, err
 	}
 
 	var secret string
@@ -405,160 +400,133 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request) error {
 		secret = crypto.NewToken()
 		c.ClientSecretHash = crypto.HashToken(secret)
 	}
-	if err := s.Store.CreateClient(r.Context(), c, host); err != nil {
+	if err := s.Store.CreateClient(ctx, c, host); err != nil {
 		switch {
 		case errors.Is(err, store.ErrNotFound):
-			return errInvalid("login host %s doesn't exist", host)
+			return nil, errInvalid("login host %s doesn't exist", host)
 		case errors.Is(err, store.ErrWrongPool):
-			return errInvalid("login host %s belongs to another org", host)
+			return nil, errInvalid("login host %s belongs to another org", host)
 		}
-		return err
+		return nil, err
 	}
 	out := clientJSON(c)
-	out.Host, out.Issuer = host, "https://"+host
-	redacted := out
-	out.ClientSecret = secret
-	writeWithSecret(w, http.StatusCreated, c.Version, out, redacted)
-	return nil
+	out.Host, out.Issuer, out.ClientSecret = host, "https://"+host, secret
+	return &out, nil
 }
 
-func (s *Server) listClients(w http.ResponseWriter, r *http.Request) error {
-	orgID, err := pathValue(r, "org")
+// ListClients lists an org's clients.
+func (s *Service) ListClients(ctx context.Context, p Principal, orgID string) ([]Client, error) {
+	if err := inOrg(p, orgID); err != nil {
+		return nil, err
+	}
+	if _, err := s.Store.GetOrg(ctx, orgID); err != nil {
+		return nil, err
+	}
+	clients, err := s.Store.ListClients(ctx, orgID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := s.Store.GetOrg(r.Context(), orgID); err != nil {
-		return err
-	}
-	clients, err := s.Store.ListClients(r.Context(), orgID)
-	if err != nil {
-		return err
-	}
-	out := list[Client]{Items: make([]Client, 0, len(clients))}
+	out := make([]Client, 0, len(clients))
 	for i := range clients {
-		out.Items = append(out.Items, clientJSON(&clients[i]))
+		out = append(out, clientJSON(&clients[i]))
 	}
-	writeJSON(w, http.StatusOK, out)
-	return nil
+	return out, nil
 }
 
-func (s *Server) getClient(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "client")
+// client reads a client that p manages.
+func (s *Service) client(ctx context.Context, p Principal, id string) (*store.Client, error) {
+	c, err := s.Store.GetClient(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	c, err := s.Store.GetClient(r.Context(), id)
-	if err != nil {
-		return err
+	if err := inOrg(p, c.OrgID); err != nil {
+		return nil, err
 	}
-	writeVersioned(w, http.StatusOK, c.Version, clientJSON(c))
-	return nil
+	return c, nil
 }
 
-func (s *Server) updateClient(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "client")
+// GetClient returns a client.
+func (s *Service) GetClient(ctx context.Context, p Principal, id string) (*Client, error) {
+	c, err := s.client(ctx, p, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	version, err := ifMatch(r)
-	if err != nil {
-		return err
-	}
-	var in ClientInput
-	if err := decode(r, &in); err != nil {
-		return err
-	}
+	out := clientJSON(c)
+	return &out, nil
+}
+
+// UpdateClient changes a client's settings. version is the client's
+// version when it was read.
+func (s *Service) UpdateClient(ctx context.Context, p Principal, id string, version int64, in ClientInput) (*Client, error) {
 	if in.ClientType != nil {
-		return errInvalid("client_type can't be changed: create a new client instead")
+		return nil, errInvalid("client_type can't be changed: create a new client instead")
 	}
 	if in.Host != nil {
-		return errInvalid("host can only be set when creating a client; use PUT /v1/hosts/{host}/clients/{client} to add it to another host")
+		return nil, errInvalid("host can only be set when creating a client; use PUT /v1/hosts/{host}/clients/{client} to add it to another host")
 	}
-	c, err := s.Store.GetClient(r.Context(), id)
+	c, err := s.client(ctx, p, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := in.apply(c); err != nil {
-		return err
+		return nil, err
 	}
 	c.Version = version
-	if err := s.Store.UpdateClient(r.Context(), c); err != nil {
-		return err
+	if err := s.Store.UpdateClient(ctx, c); err != nil {
+		return nil, err
 	}
-	writeVersioned(w, http.StatusOK, c.Version, clientJSON(c))
-	return nil
+	out := clientJSON(c)
+	return &out, nil
 }
 
-func (s *Server) setClientStatus(status string) func(http.ResponseWriter, *http.Request) error {
-	return func(w http.ResponseWriter, r *http.Request) error {
-		id, err := pathValue(r, "client")
+// SetClientStatus disables or enables a client (store.ClientDisabled or
+// store.ClientActive). version is the client's version when it was read,
+// or 0 for its current version.
+func (s *Service) SetClientStatus(ctx context.Context, p Principal, id, status string, version int64) (*Client, error) {
+	if version == 0 || !p.Operator {
+		c, err := s.client(ctx, p, id)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		version, ok, err := optionalIfMatch(r)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			c, err := s.Store.GetClient(r.Context(), id)
-			if err != nil {
-				return err
-			}
+		if version == 0 {
 			version = c.Version
 		}
-		if _, err := s.Store.SetClientStatus(r.Context(), id, status, version); err != nil {
-			return err
-		}
-		c, err := s.Store.GetClient(r.Context(), id)
-		if err != nil {
-			return err
-		}
-		writeVersioned(w, http.StatusOK, c.Version, clientJSON(c))
-		return nil
 	}
+	if _, err := s.Store.SetClientStatus(ctx, id, status, version); err != nil {
+		return nil, err
+	}
+	return s.GetClient(ctx, p, id)
 }
 
-// rotateClientSecret replaces a confidential client's secret. The old one
-// stops working at once.
-func (s *Server) rotateClientSecret(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "client")
+// RotateClientSecret replaces a confidential client's secret. The old one
+// stops working at once. version is the client's version when it was
+// read, or 0 for its current version. The result has the new secret: the
+// only time it's returned.
+func (s *Service) RotateClientSecret(ctx context.Context, p Principal, id string, version int64) (*Client, error) {
+	c, err := s.client(ctx, p, id)
 	if err != nil {
-		return err
-	}
-	version, ok, err := optionalIfMatch(r)
-	if err != nil {
-		return err
-	}
-	c, err := s.Store.GetClient(r.Context(), id)
-	if err != nil {
-		return err
+		return nil, err
 	}
 	if c.ClientType != ClientConfidential {
-		return errConflict("public_client", "public clients have no secret")
+		return nil, errConflict("public_client", "public clients have no secret")
 	}
-	if !ok {
+	if version == 0 {
 		version = c.Version
 	}
 	secret := crypto.NewToken()
-	c, err = s.Store.SetClientSecretHash(r.Context(), id, crypto.HashToken(secret), version)
+	c, err = s.Store.SetClientSecretHash(ctx, id, crypto.HashToken(secret), version)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	out := clientJSON(c)
-	redacted := out
 	out.ClientSecret = secret
-	writeWithSecret(w, http.StatusOK, c.Version, out, redacted)
-	return nil
+	return &out, nil
 }
 
-func (s *Server) deleteClient(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "client")
-	if err != nil {
+// DeleteClient deletes a client.
+func (s *Service) DeleteClient(ctx context.Context, p Principal, id string) error {
+	if err := s.authorizeClient(ctx, p, id); err != nil {
 		return err
 	}
-	if err := s.Store.DeleteClient(r.Context(), id); err != nil {
-		return err
-	}
-	w.WriteHeader(http.StatusNoContent)
-	return nil
+	return s.Store.DeleteClient(ctx, id)
 }

@@ -235,6 +235,12 @@ func TestPKCEOptOutRedemption(t *testing.T) {
 // Host settings apply to every client on the host.
 func TestHostSettings(t *testing.T) {
 	e := newEnv(t, false)
-	e.updateHost(func(h *store.LoginHost) { h.Theme = map[string]string{"brand_name": "Acme Accounts"} })
-	expect(t, e.browser().get("/login"), 200, "Acme Accounts")
+	p := e.browser().get("/login")
+	expect(t, p, 200, "Create an account")
+	e.updateHost(func(h *store.LoginHost) { h.RegistrationEnabled = false })
+	p = e.browser().get("/login")
+	expect(t, p, 200, "Acme Portal")
+	if strings.Contains(p.body, "Create an account") {
+		t.Error("registration link shown with registration off")
+	}
 }

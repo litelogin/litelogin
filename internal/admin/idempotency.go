@@ -28,22 +28,22 @@ func (s *Server) idempotent(h func(http.ResponseWriter, *http.Request) error, w 
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		writeError(w, toAPIError(err))
+		writeError(w, AsError(err))
 		return false
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	hash := requestHash(r, body)
 	ctx, caller := r.Context(), callerARN(r.Context())
 
-	rec, err := s.Store.BeginIdempotentRequest(ctx, caller, idemKey, hash)
+	rec, err := s.Service.Store.BeginIdempotentRequest(ctx, caller, idemKey, hash)
 	if err != nil {
-		s.log().ErrorContext(ctx, "begin idempotent request", "error", err)
-		writeError(w, toAPIError(err))
+		s.Service.log().ErrorContext(ctx, "begin idempotent request", "error", err)
+		writeError(w, AsError(err))
 		return false
 	}
 	switch rec.Outcome {
 	case store.IdempotencyMismatch:
-		writeError(w, &apiError{Status: http.StatusUnprocessableEntity, Code: "idempotency_key_reused",
+		writeError(w, &Error{Status: http.StatusUnprocessableEntity, Code: "idempotency_key_reused",
 			Message: "this Idempotency-Key was used for a different request"})
 		return false
 	case store.IdempotencyInProgress:
@@ -65,8 +65,8 @@ func (s *Server) idempotent(h func(http.ResponseWriter, *http.Request) error, w 
 	// and retry with the same key. Every operation is a single conditional
 	// write or transaction, so a failed request changed nothing.
 	if w.status() >= 300 {
-		if err := s.Store.ReleaseIdempotentRequest(ctx, caller, idemKey, hash); err != nil {
-			s.log().ErrorContext(ctx, "release idempotent request", "error", err)
+		if err := s.Service.Store.ReleaseIdempotentRequest(ctx, caller, idemKey, hash); err != nil {
+			s.Service.log().ErrorContext(ctx, "release idempotent request", "error", err)
 		}
 		return false
 	}
@@ -74,10 +74,10 @@ func (s *Server) idempotent(h func(http.ResponseWriter, *http.Request) error, w 
 	if w.replay != nil {
 		stored = w.replay
 	}
-	if err := s.Store.CompleteIdempotentRequest(ctx, caller, idemKey, hash, w.status(), stored); err != nil {
+	if err := s.Service.Store.CompleteIdempotentRequest(ctx, caller, idemKey, hash, w.status(), stored); err != nil {
 		// The change happened and the caller has the response. A retry
 		// with this key gets 409 until the record expires.
-		s.log().ErrorContext(ctx, "complete idempotent request", "error", err)
+		s.Service.log().ErrorContext(ctx, "complete idempotent request", "error", err)
 	}
 	return false
 }

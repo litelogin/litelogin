@@ -89,7 +89,7 @@ flowchart LR
 
 ### Login hosts and TLS
 
-- **Hosts belong to orgs.** Every org has a default host, `{label}.login.example.com`, created with it; it can add custom hosts. A host serves one user pool, and the org's clients on that pool can be put on it. A host is the sign-on boundary: its sessions, theme, sign-up setting and session lifetimes are shared by every client on it, while each client keeps its own redirect URIs, scopes, grants, PKCE setting, token lifetimes and credentials (Datamodel.md, Decision 8).
+- **Hosts belong to orgs.** Every org has a default host, `{label}.login.example.com`, created with it; it can add custom hosts. A host serves one user pool, and the org's clients on that pool can be put on it. A host is the sign-on boundary: its sessions, sign-up setting and session lifetimes are shared by every client on it, while each client keeps its own redirect URIs, scopes, grants, PKCE setting, token lifetimes and credentials (Datamodel.md, Decision 8). Pages, emails, passkeys and authenticator apps show the org's name; hosts have no theme yet.
 - **Default hosts** (`*.login.example.com`) are served by one CloudFront distribution with a wildcard ACM certificate.
 - **Custom hosts** (e.g. `login.acme.com`) need a certificate each. Use CloudFront's multi-tenant distributions (CloudFront SaaS Manager): each custom host becomes a distribution tenant with its own managed certificate. The customer adds one CNAME, to the routing endpoint of the connection group that serves the tenants. The certificate is validated over HTTP through that CNAME (CloudFront serves the validation token), so certificate validation doubles as the domain-ownership check. The multi-tenant distribution serves requests just as the default hosts' distribution does: same origin, origin secret, policies, host function and WAF. Custom hosts are optional: a deployment can leave out the multi-tenant distribution (`custom_hosts = false`, as Lean does), and then the Admin API refuses to add them.
 - **When a custom host is verified:** the host becomes `verified` only when both checks pass: the certificate has been issued, and the CNAME resolves to LiteLogin. A valid certificate alone doesn't prove that traffic will route correctly.
@@ -185,7 +185,7 @@ Users can turn on two-factor sign-in with an authenticator app (TOTP, RFC 6238).
 
 ### Social sign-in
 
-Social sign-in lets users sign in and register with an identity provider: any OpenID Connect provider found by discovery (Google, Microsoft Entra, GitLab, Okta…), and later GitHub and Apple. It's being built in phases ([issue #37](https://github.com/litelogin/litelogin/issues/37) has the design). OpenID Connect providers work; GitHub and Apple providers can be configured but aren't shown yet, and linking a provider to an existing account (from the account page) comes next.
+Social sign-in lets users sign in and register with an identity provider: any OpenID Connect provider found by discovery (Google, Microsoft Entra, GitLab, Okta…), and later GitHub and Apple. It's being built in phases ([issue #37](https://github.com/litelogin/litelogin/issues/37) has the design). OpenID Connect providers work, for signing in and up and for linking from the account page; GitHub and Apple providers can be configured but aren't shown yet.
 
 - **Each org registers its own app** with each provider, so the provider's consent screen shows the org's name. There's no shared app.
 - **Providers belong to a pool** (`/v1/pools/{pool}/idps`), because the identities they vouch for are the pool's users. Each login host lists which of its pool's providers its sign-in page shows (`idps`, at most 10). A provider can't be deleted while a host lists it.
@@ -195,11 +195,13 @@ Social sign-in lets users sign in and register with an identity provider: any Op
 - **Starting** stores a federation state (`FED#`, 10 minutes, works once): the provider, a nonce, the PKCE verifier and the pending request. The `state` sent to the provider is a random token, stored hashed. A second random token goes in a `__Host-litelogin_fed` cookie (`SameSite=Lax`), stored hashed in the state too: the callback must come from the browser that started the sign-in, so an attacker can't get a victim signed in to the attacker's account (login CSRF).
 - **The callback** uses up the state (on the same host), checks the cookie, exchanges the code with PKCE and the org's client secret, and verifies the ID token: an RS256 or ES256 signature by one of the provider's keys, `iss`, `aud` (and `azp`), `exp`, `iat` and the nonce.
 - **Calls to providers** go through an HTTP client that allows only HTTPS, follows no redirects, times out after 10 seconds, reads at most 1 MiB, and connects only to public addresses: the dialer checks the address it actually connects to, after DNS resolution, and refuses private, loopback, link-local (the instance metadata service) and other special-purpose ranges. Issuer URLs come from org admins, so this keeps them from reaching anything inside AWS. Discovery documents and keys are cached for an hour; an unknown key ID refetches the keys at most once a minute.
-- **Finding the user:** the provider's `sub` identifies the account at the provider, and an identity item links it to one user of the pool. The first sign-in creates the user, if the host's `registration_enabled` allows it, with the email from the ID token and no password. `email_verified` is the provider's say-so; if it doesn't vouch for the address, LiteLogin sends its own verification email, and pools that require a verified email (or two factors) wait for it, as for passwords. The email is never synced afterwards.
-- **Never linked automatically:** if the email already belongs to a user, the provider account isn't linked to them, and the page says only that no account is linked and to sign in another way, whether or not the email exists. Otherwise whoever controls the email at any provider an org configures could take over the account. Linking an existing account to a provider will be on the account page.
-- **Evidence of two factors:** a provider's `mfa_amr` and `mfa_acr` list the `amr` and `acr` values in its ID token that count as two factors (`mfa` in `amr` always does). With evidence, the sign-in counts as two factors. Without it, the pool's two-factor rules apply as they do to passwords: a user with an authenticator app gives a code (`/login/2fa`), and in a pool with `mfa_required` a user without one sets it up first.
+- **Finding the user:** the provider's `sub` identifies the account at the provider, and an identity item links it to one user of the pool. The first sign-in creates the user, if the host's `registration_enabled` allows it, with the email from the ID token and no password. `email_verified` counts only for providers the org marks `trust_email_verified` (off by default: turn it on for providers that verify every address they vouch for, such as Google and Apple). For Microsoft Entra issuers it's read from the `xms_edov` optional claim (the domain's owner verified it) instead, since Entra's `email` is whatever the account's admin typed. Otherwise LiteLogin sends its own verification email, and pools that require a verified email (or two factors) wait for it, as for passwords. The email is never synced afterwards. An identity that created its user with an unverified email is marked unproven, and a password reset (which proves the email) removes it, so someone who signed up first with another person's email at a provider loses the account when its owner takes it back.
+- **Never linked automatically:** if the email already belongs to a user, the provider account isn't linked to them, and the page says only that no account is linked and to sign in another way, whether or not the email exists. Otherwise whoever controls the email at any provider an org configures could take over the account. Users link existing accounts themselves, from the account page.
+- **Evidence of two factors:** a provider's `mfa_amr` and `mfa_acr` list the `amr` and `acr` values in its ID token that count as two factors. None count by default, not even `mfa`: the org decides whether it trusts the provider's second factor. With evidence, the sign-in counts as two factors. Without it, the pool's two-factor rules apply as they do to passwords: a user with an authenticator app gives a code (`/login/2fa`), and in a pool with `mfa_required` a user without one sets it up first.
 - **`amr` and `acr`:** a social sign-in is `["fed"]` and `urn:litelogin:acr:fed`; with the provider's evidence of two factors `["fed", "mfa"]`, and with an app code `["fed", "otp", "mfa"]` (a recovery code `["fed", "mfa"]`), all three `urn:litelogin:acr:mfa`. Clients that need a strong sign-in should check `acr` or `amr`: a provider account is only as strong as the provider's own sign-in.
-- **Users without a password** can't sign in with one, and the account page can't confirm it's them by password; a recent social sign-in works instead. They can set one through "Forgot your password?", which proves they control the email.
+- **Linking from the account page:** a signed-in user links one account per provider of the host. Like adding a passkey, it takes the current password unless the user signed in within 10 minutes (and a fresh second factor with two-factor sign-in), so a stolen session can't link the thief's provider account. The federation state (`purpose=fed_link`) also holds the session, user and `auth_version` that started it: the callback must come back to that session, unrevoked, as well as the browser. A provider account links to at most one user of the pool, and linking ends no session. The user gets an email either way.
+- **Unlinking** ends every session and refresh token, as removing a passkey does, since some may have come from the provider, and emails the user. The account page refuses to remove the last way to sign in (no password, no other linked account and no passkey), checked in the same transaction, so concurrent unlinks can't both win; removing the last passkey of a user without a password or a linked account is refused the same way (`passkey_count` on the user). An administrator can (`DELETE /v1/users/{user}/identities/{idp}`, `litelogin user identity unlink`); the user can still reset their password by email.
+- **Users without a password** sign in only through a linked account (or "Forgot your password?", which proves they control the email and sets one). Where the account page asks others for their password (changing the email, adding a passkey, linking, turning on two-factor sign-in), it takes a sign-in within the last 10 minutes instead; on an older session, "Confirm it's you" signs in again through a linked account (`purpose=fed_confirm`), which must be the account linked to this user, and renews the session. It asks the provider for a new sign-in (`prompt=login`, `max_age=0`) and requires the ID token's `auth_time` to be after the confirmation started, so a session still open at the provider isn't enough. They can set a password (`/account/password/set`) on a recent session, which ends every other session, as changing one does.
 
 ## Protocol
 
@@ -223,7 +225,7 @@ Authorization codes are bound to the client, the redirect URI, the PKCE challeng
 - **Signing in during authorization:** without a usable session, `/authorize` sends the browser to `/login`, carrying the request's query. After signing in, the browser returns to the same `/authorize` request. `prompt=login` and `max_age` are removed at that point, since the user just signed in.
 - **`prompt`:** `none` and `login` are supported. There's no consent screen: clients are configured by the operator, so `consent` is accepted and has no effect.
 - **RP-initiated logout:** `/logout` checks `id_token_hint` and `client_id` against the host's client, and `post_logout_redirect_uri` against its registered URIs. The user confirms before being signed out, so another site can't sign them out with a link.
-- **Pages' `form-action`** allows the client's redirect and post-logout redirect URI origins, because browsers apply it to the redirects that follow a form submission.
+- **Pages' `form-action`** allows the client's redirect and post-logout redirect URI origins, because browsers apply it to the redirects that follow a form submission. The account page also allows the authorization endpoint origins (from discovery) of the providers it offers to link or confirm with, since those forms end there.
 
 ### Tokens
 
@@ -275,6 +277,16 @@ The admin API is for deployment operators.
 - **Tools enforce their own permissions:** a tool that serves per-org administrators must decide what each of its users can do before it calls the admin API.
 - **Granting and revoking access:** both happen in IAM, either on the principal's policy or on the function's resource-based policy.
 
+### Service and permissions
+
+`internal/admin` has two layers. `admin.Service` has one method per operation, with its validation and permission checks; the Admin API's handlers only read the request, call the service and write JSON. Another front end, such as the planned web console, can call the same service in its own process.
+
+- **Every call has a principal.** An operator manages the deployment and every org. Any other principal manages only the orgs it's given. Every Admin API caller is an operator.
+- **Operators only:** creating, listing, suspending and reactivating orgs, and listing signing keys.
+- **Other orgs' resources don't exist.** A principal that asks for a client, user, pool, host or identity provider in an org it doesn't manage gets the same not-found error as for one that doesn't exist, and nothing changes. The service finds the org from the resource itself, not from the request.
+- **No extra reads for operators.** The checks that need to read a resource to find its org skip the read for operators, so the Admin API reads the same items as before.
+- **Tested for every method.** `internal/admin/service_test.go` calls every method on another org's resources and checks that it fails and the org is unchanged, and fails if a new method isn't in it.
+
 ### Resources
 
 | Resource | Operations |
@@ -290,7 +302,7 @@ The admin API is for deployment operators.
 | `/v1/clients/{client}/secret` | Rotate (returns the new secret once) |
 | `/v1/clients/{client}/hosts` | List the client's login hosts |
 | `/v1/orgs/{org}/hosts` | List, add a custom host |
-| `/v1/hosts/{host}` | Get (including verification status), update settings (theme, registration, passkeys, identity providers, session lifetimes), remove (a custom host with no clients) |
+| `/v1/hosts/{host}` | Get (including verification status), update settings (registration, passkeys, identity providers, session lifetimes), remove (a custom host with no clients) |
 | `/v1/hosts/{host}/clients` | List the host's clients |
 | `/v1/hosts/{host}/clients/{client}` | Add (`PUT`, idempotent) or remove (`DELETE`; not the client's last host) |
 | `/v1/pools/{pool}/users` | Create (with an initial password, or by emailing a password-set link), list, search by `email_prefix` |
@@ -298,6 +310,7 @@ The admin API is for deployment operators.
 | `/v1/users/{user}/sessions` | List, revoke all (increments `auth_version`) |
 | `/v1/users/{user}/passkeys` | List; remove one (`DELETE /v1/users/{user}/passkeys/{passkey}`, which also revokes the user's sessions) |
 | `/v1/users/{user}/mfa` | Reset (`DELETE`): turns two-factor sign-in off, revokes the user's sessions, and emails them |
+| `/v1/users/{user}/identities` | List the user's linked provider accounts; unlink one (`DELETE /v1/users/{user}/identities/{idp}`, which also revokes the user's sessions, and may remove their last way to sign in) |
 | `/v1/keys` | List signing keys and their status |
 
 ### Conventions
@@ -322,7 +335,7 @@ litelogin init --org "Acme" --client "Acme Portal" --redirect-uri https://app.ac
 
 # A second client on the same host: one sign-in serves both.
 litelogin client create --org {org} --host acme.login.example.com --name "Mobile app" --type public --redirect-uri com.acme.app:/callback
-litelogin host update acme.login.example.com --theme brand_name=Acme --registration=false
+litelogin host update acme.login.example.com --registration=false
 litelogin host add --org {org} login.acme.com
 litelogin host status login.acme.com
 litelogin host add-client login.acme.com {client}
@@ -331,6 +344,19 @@ litelogin host update acme.login.example.com --idps google
 litelogin user create --pool {pool} --email admin@acme.com --invite
 litelogin user revoke-sessions {user}
 ```
+
+## Admin console
+
+A web console for operators who don't use the CLI (#52). It's in progress: it runs locally (`make run-console`), and its deployment, as its own Lambda function behind CloudFront, comes next.
+
+- **Same service, no API calls.** The console's pages (`internal/console`) call `admin.Service` in their own process, as the Admin API's handlers do. There's no HTTP call to the Admin Lambda and no second copy of its logic.
+- **A client of LiteLogin.** The console is a confidential client on the console org's login host. It signs admins in with the authorization code flow, PKCE and a nonce, with a state bound to the browser by a cookie, and verifies the ID token's signature, issuer, audience and expiry.
+- **Every console admin is an operator.** Any active user of the console org's pool can sign in, and manages every org. The console checks the user's pool on every request, so a token for another client or pool never gives access. Roles limited to some orgs come later: `admin.Service` already checks a `Principal` limited to a list of orgs.
+- **Its own sessions.** A console session is an opaque `__Host-` cookie backed by a `CONSOLE_SESSION` item (Datamodel.md, "Admin console sign-in"): 8 hours at most, and 1 hour idle. The user is read on every request, so disabling an admin, or signing them out everywhere, ends their console session at once. Signing out ends the console session, then the login host's (RP-initiated logout).
+- **Server-rendered pages with htmx.** Pages are `html/template`, and work without JavaScript. htmx 4 is embedded, and `TestHTMXHash` checks it against its published SHA-384. Links are boosted (`hx-boost:inherited`), and a request with `HX-Request-Type: partial` gets only the page's content block. Static files are served at content-hashed paths that can be cached for good.
+- **Strict CSP.** `default-src 'none'`, with scripts, styles and fetches from the console only: no inline script or style, and no `unsafe-eval`. The htmx features that evaluate JavaScript (`hx-on`, trigger filters, `js:` values) can't run, and a test fails on any template that uses them, or an inline script, style or event handler.
+- **CSRF.** Every POST must pass `http.CrossOriginProtection` (Sec-Fetch-Site or Origin) and carry the double-submit token from its `__Host-` cookie. Pages use only GET and POST.
+- **Audit log.** Every POST is logged as `console audit`, with the admin's user ID and email.
 
 ## Management integration
 

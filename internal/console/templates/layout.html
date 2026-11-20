@@ -1,0 +1,31 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"includeIndicatorCSS": false}'>
+<title>{{.Title}} · LiteLogin console</title>
+<link rel="stylesheet" href="{{asset "console.css"}}">
+<script src="{{asset "htmx.min.js"}}" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">LiteLogin <span>console</span></a>
+  {{if .Admin}}
+  <nav hx-boost:inherited="true"><a href="/orgs">Orgs</a></nav>
+  <div class="me">
+    <span class="who">{{.Admin.Email}}</span>
+    <a href="{{.AccountURL}}">Account</a>
+    <form method="post" action="/logout">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button type="submit" class="link">Sign out</button>
+    </form>
+  </div>
+  {{end}}
+</header>
+<main id="main"{{if .Admin}} hx-boost:inherited="true"{{end}}>
+{{template "content" .}}
+</main>
+</body>
+</html>
+{{end}}

@@ -15,6 +15,7 @@ make tf-fmt tf-validate   # Terraform format and validate (validate uses -backen
 make package              # linux/arm64 Lambdas as dist/<name>.zip (reproducible builds)
 make run-auth             # Auth Lambda on localhost:8080; login hosts are <org>.litelogin.localhost:8080
 make run-admin            # Admin API on localhost:8081, no auth
+make run-console          # admin console on localhost:8082; signs in through make run-auth
 make cli                  # dist/litelogin; use --endpoint http://localhost:8081 locally
 ```
 

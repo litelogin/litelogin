@@ -4,6 +4,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 func TestOrgs(t *testing.T) {
@@ -232,15 +236,25 @@ func TestLoginHosts(t *testing.T) {
 		t.Fatalf("work = %+v", work)
 	}
 
-	// Settings are versioned.
-	custom.Theme = map[string]string{"brand_name": "Customer"}
+	// Settings are versioned. Saving them removes a theme stored before
+	// themes were taken out.
+	_, err = e.db.UpdateItem(e.ctx, &dynamodb.UpdateItemInput{TableName: aws.String(e.config),
+		Key: key(pfxLoginHost+"login.customer.com", skDetails), UpdateExpression: aws.String("SET theme = :t"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":t": &types.AttributeValueMemberM{
+			Value: map[string]types.AttributeValue{"brand_name": avS("Customer")}}}})
+	must(t, err)
 	custom.RegistrationEnabled = false
 	stale := *custom
 	must(t, e.UpdateHostSettings(e.ctx, custom))
 	h, err := e.GetLoginHost(e.ctx, "login.customer.com")
 	must(t, err)
-	if h.Version != 2 || h.Theme["brand_name"] != "Customer" || h.RegistrationEnabled || h.Status != HostPending || h.PoolID != f.pool.ID {
+	if h.Version != 2 || h.RegistrationEnabled || h.Status != HostPending || h.PoolID != f.pool.ID {
 		t.Fatalf("after UpdateHostSettings: %+v", h)
+	}
+	var raw map[string]any
+	must(t, e.get(e.ctx, e.config, key(pfxLoginHost+"login.customer.com", skDetails), &raw))
+	if _, ok := raw["theme"]; ok {
+		t.Error("UpdateHostSettings kept the stored theme")
 	}
 	wantErr(t, e.UpdateHostSettings(e.ctx, &stale), ErrVersionMismatch)
 

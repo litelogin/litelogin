@@ -52,7 +52,7 @@ var passkeyScript string
 func (s *Server) relyingParty(t *tenant) (*webauthn.WebAuthn, error) {
 	return webauthn.New(&webauthn.Config{
 		RPID:                  t.Host,
-		RPDisplayName:         t.Theme.Brand,
+		RPDisplayName:         t.Brand,
 		RPOrigins:             []string{s.link(t, "", nil)},
 		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
@@ -346,6 +346,10 @@ func (s *Server) passkeyRegisterOptions(w http.ResponseWriter, r *http.Request, 
 			s.failJSON(w, r, err)
 			return
 		}
+		if !ok && u.PasswordHash == "" {
+			jsonError(w, http.StatusUnauthorized, msgConfirmWithProvider)
+			return
+		}
 		if !ok {
 			msg := "Enter your password to add a passkey."
 			if r.PostFormValue("password") != "" {
@@ -462,7 +466,7 @@ func (s *Server) passkeyRegister(w http.ResponseWriter, r *http.Request, t *tena
 	}
 	metrics.Count(s.Metrics, metrics.PasskeyAdded, 1)
 	m, err := email.Render(email.PasskeyAdded, u.Email, email.Data{
-		Brand: t.Theme.Brand, Host: t.Host, Link: s.link(t, "/account", nil), Name: name,
+		Brand: t.Brand, Host: t.Host, Link: s.link(t, "/account", nil), Name: name,
 	})
 	if err == nil {
 		err = s.Email.Send(ctx, m)
@@ -536,9 +540,13 @@ func (s *Server) removePasskey(w http.ResponseWriter, r *http.Request, t *tenant
 		http.Redirect(w, r, "/account", http.StatusSeeOther)
 		return
 	}
-	err := s.Store.DeletePasskey(ctx, u.ID, id)
-	if errors.Is(err, store.ErrNotFound) {
+	err := s.Store.DeletePasskey(ctx, u.ID, id, false)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConditionFailed) {
 		http.Redirect(w, r, "/account", http.StatusSeeOther)
+		return
+	}
+	if errors.Is(err, store.ErrLastSignInMethod) {
+		s.renderAccount(w, r, t, http.StatusConflict, sess, u, pageData{Error: msgOnlySignInMethod})
 		return
 	}
 	if err != nil {

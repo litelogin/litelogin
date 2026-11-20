@@ -65,19 +65,21 @@ func newEnv(t *testing.T) *env {
 	st := store.New(db, configTable, sessionTable)
 	cursor, _ := admin.NewCursorSigner(bytes.Repeat([]byte("c"), 32))
 	srv := &admin.Server{
-		Store:             st,
-		Hasher:            crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
-		Cursor:            cursor,
-		DefaultHostDomain: "litelogin.test",
-		CustomHostTarget:  "d1.cloudfront.test",
-		Caller:            func(*http.Request) (string, bool) { return "local", true },
-		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Email:             &email.Recorder{},
-		Secrets:           testSecrets,
+		Service: &admin.Service{
+			Store:             st,
+			Hasher:            crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
+			Cursor:            cursor,
+			DefaultHostDomain: "litelogin.test",
+			CustomHostTarget:  "d1.cloudfront.test",
+			Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Email:             &email.Recorder{},
+			Secrets:           testSecrets,
+		},
+		Caller: func(*http.Request) (string, bool) { return "local", true },
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return &env{t: t, endpoint: ts.URL, store: st, mail: srv.Email.(*email.Recorder), config: filepath.Join(t.TempDir(), "config.json")}
+	return &env{t: t, endpoint: ts.URL, store: st, mail: srv.Service.Email.(*email.Recorder), config: filepath.Join(t.TempDir(), "config.json")}
 }
 
 // run runs a CLI command and returns stdout, failing the test if it fails.
@@ -248,9 +250,9 @@ func TestResourceLifecycle(t *testing.T) {
 
 	// Hosts: the org's default host, and a custom one.
 	var h admin.Host
-	e.json(&h, "", "host", "update", defaultHost, "--registration=false", "--theme", "brand_name=Acme Login", "--session-ttl", "3600",
+	e.json(&h, "", "host", "update", defaultHost, "--registration=false", "--session-ttl", "3600",
 		"--session-idle-ttl", "600")
-	if h.RegistrationEnabled || h.Theme["brand_name"] != "Acme Login" || h.SessionTTL != 3600 || h.Version != 2 {
+	if h.RegistrationEnabled || h.SessionTTL != 3600 || h.Version != 2 {
 		t.Fatalf("host update: %+v", h)
 	}
 	e.json(&h, "", "host", "add", "--org", org, "Login.Acme.com")
@@ -463,6 +465,41 @@ func TestUsers(t *testing.T) {
 	}
 	if _, errOut, code := e.try("", "user", "passkey", "list", "no-such-user"); code == 0 || !strings.Contains(errOut, "not_found") {
 		t.Fatalf("unknown user: %q", errOut)
+	}
+
+	// Linked identities: list, and unlink (which revokes).
+	ctx := context.Background()
+	up, err := e.store.GetPool(ctx, u.PoolID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.CreateIDP(ctx, &store.IDP{ID: "google", PoolID: up.ID, OrgID: up.OrgID, Type: store.IDPTypeOIDC,
+		Name: "Google", Issuer: "https://accounts.google.com", ClientID: "id", ClientSecret: []byte("sealed")}); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ = e.store.GetUser(ctx, u.ID)
+	if err := e.store.LinkIdentity(ctx, u.ID, stored.AuthVersion, &store.Identity{PoolID: up.ID, IDPID: "google", Subject: "g-1", Email: "a@gmail.example"}); err != nil {
+		t.Fatal(err)
+	}
+	var ids struct{ Items []admin.Identity }
+	e.json(&ids, "", "user", "identity", "list", u.ID)
+	if len(ids.Items) != 1 || ids.Items[0].IDPID != "google" || ids.Items[0].Subject != "g-1" || ids.Items[0].Email != "a@gmail.example" {
+		t.Fatalf("identity list: %+v", ids)
+	}
+	var withIDs admin.User
+	e.json(&withIDs, "", "user", "get", u.ID)
+	if withIDs.Identities != 1 {
+		t.Fatalf("user get: identities = %d", withIDs.Identities)
+	}
+	if out := e.run("", "user", "identity", "unlink", u.ID, "google"); !strings.Contains(out, "unlinked google") {
+		t.Fatalf("identity unlink: %s", out)
+	}
+	after, _ = e.store.GetUser(ctx, u.ID)
+	if after.AuthVersion != stored.AuthVersion+1 || after.IdentityCount != 0 {
+		t.Fatalf("unlinking didn't revoke: %+v", after)
+	}
+	if _, errOut, code := e.try("", "user", "identity", "unlink", u.ID, "google"); code == 0 || !strings.Contains(errOut, "not_found") {
+		t.Fatalf("unlinking again: %q", errOut)
 	}
 
 	e.run("", "user", "delete", u.ID)

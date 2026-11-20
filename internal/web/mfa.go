@@ -53,7 +53,7 @@ func totpContext(u *store.User) map[string]string {
 
 // totpIssuer is the name authenticator apps show for the account.
 func totpIssuer(t *tenant) string {
-	if b := strings.TrimSpace(t.Theme.Brand); b != "" {
+	if b := strings.TrimSpace(t.Brand); b != "" {
 		return strings.ReplaceAll(b, ":", " ")
 	}
 	return t.Host
@@ -158,7 +158,7 @@ func twoFactorAMR(first, second []string) []string {
 // notify sends a security notice to the user, logging a failure: the
 // change it reports has already happened.
 func (s *Server) notify(ctx context.Context, t *tenant, u *store.User, kind email.Kind, d email.Data) {
-	d.Brand, d.Host, d.Link = t.Theme.Brand, t.Host, s.link(t, "/account", nil)
+	d.Brand, d.Host, d.Link = t.Brand, t.Host, s.link(t, "/account", nil)
 	m, err := email.Render(kind, u.Email, d)
 	if err == nil {
 		err = s.Email.Send(ctx, m)
@@ -342,7 +342,11 @@ func (s *Server) startMFASetup(w http.ResponseWriter, r *http.Request, t *tenant
 			return
 		}
 		if !ok {
-			s.renderAccount(w, r, t, http.StatusUnauthorized, sess, u, pageData{Error: "Your current password is incorrect."})
+			msg := "Your current password is incorrect."
+			if u.PasswordHash == "" {
+				msg = msgConfirmWithProvider
+			}
+			s.renderAccount(w, r, t, http.StatusUnauthorized, sess, u, pageData{Error: msg})
 			return
 		}
 	}

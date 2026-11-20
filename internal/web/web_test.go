@@ -103,7 +103,7 @@ func newEnvWith(t *testing.T, requireVerified bool, opts envOptions) *env {
 	org := &store.Org{ID: crypto.NewID(), Name: "Acme Portal"}
 	pool := &store.Pool{ID: crypto.NewID(), Name: "Default", RequireEmailVerified: requireVerified}
 	host := &store.LoginHost{Host: loginHost, HostSettings: store.HostSettings{
-		Theme: map[string]string{web.ThemePrimary: "#2563eb"}, RegistrationEnabled: true, SessionTTL: 604800, SessionIdleTTL: 86400,
+		RegistrationEnabled: true, SessionTTL: 604800, SessionIdleTTL: 86400,
 	}}
 	if err := st.CreateOrgWithHost(ctx, org, pool, host); err != nil {
 		t.Fatal(err)
@@ -437,13 +437,10 @@ func TestCSRF(t *testing.T) {
 	}
 }
 
-func TestPageHeadersAndTheme(t *testing.T) {
+func TestPageHeaders(t *testing.T) {
 	e := newEnv(t, false)
 	p := e.browser().get("/login")
 	expect(t, p, 200, "Acme Portal")
-	if !strings.Contains(p.body, "--primary:#2563eb") {
-		t.Error("theme color not applied")
-	}
 	csp := p.header.Get("Content-Security-Policy")
 	for _, want := range []string{"default-src 'none'", "frame-ancestors 'none'", "style-src 'nonce-"} {
 		if !strings.Contains(csp, want) {

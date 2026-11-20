@@ -53,6 +53,9 @@ const (
 	RecoveryCodeUsed      Kind = "recovery_code_used"
 	RecoveryCodesReplaced Kind = "recovery_codes_replaced"
 	MFALocked             Kind = "mfa_locked"
+	IdentityLinked        Kind = "identity_linked"
+	IdentityUnlinked      Kind = "identity_unlinked"
+	PasswordSet           Kind = "password_set"
 )
 
 const securityNotice = "security_notice"
@@ -81,7 +84,16 @@ var notices = map[Kind]notice{
 	MFALocked: {"Someone has your password",
 		"Someone signed in to your {{.Brand}} account with your correct password, then entered wrong two-factor codes " +
 			"too many times, so two-factor sign-in is paused for a while. If it wasn't you, change your password now."},
+	IdentityLinked: {"You can sign in with {{.Name}}",
+		"Your {{.Name}} account was linked to your {{.Brand}} account, so you can sign in with it." + unlinkHint},
+	IdentityUnlinked: {"{{.Name}} was removed from your account",
+		"Your {{.Name}} account was unlinked from your {{.Brand}} account, so you can't sign in with it any more, " +
+			"and you were signed out everywhere else." + unexpected},
+	PasswordSet: {"Your account has a password",
+		"A password was set on your {{.Brand}} account, so you can sign in with your email and password too." + unexpected},
 }
+
+const unlinkHint = " If you didn't do this, someone else may be signed in to your account: open your account page, remove it and sign out everywhere."
 
 var subjects = map[Kind]string{ //nolint:gosec // email subjects, not credentials
 	VerifyEmail:       "Verify your email for {{.Brand}}",
@@ -97,14 +109,17 @@ var subjects = map[Kind]string{ //nolint:gosec // email subjects, not credential
 	RecoveryCodeUsed:      "A recovery code was used on your {{.Brand}} account",
 	RecoveryCodesReplaced: "New recovery codes for your {{.Brand}} account",
 	MFALocked:             "Someone has your {{.Brand}} password",
+	IdentityLinked:        "{{.Name}} was linked to your {{.Brand}} account",
+	IdentityUnlinked:      "{{.Name}} was removed from your {{.Brand}} account",
+	PasswordSet:           "A password was set on your {{.Brand}} account",
 }
 
 // Data fills a message template.
 type Data struct {
-	Brand   string // the client's name, or its theme's brand name
+	Brand   string // the client's name, or the org's name
 	Host    string // the login host the link points to
 	Link    string // the action link (verification, reset), or the account page
-	Name    string // a passkey's name
+	Name    string // a passkey's name, or an identity provider's
 	Expires string // how long the link works, e.g. "24 hours"
 	Count   int    // how many recovery codes are left
 
