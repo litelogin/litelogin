@@ -146,7 +146,7 @@ A passkey belongs to the login host it was made on, so it doesn't work on anothe
 
 Point an OpenID Connect library at the issuer `http://acme.litelogin.localhost:8080`, with the client ID and secret from `init`, and a redirect URI you've registered. PKCE is required.
 
-[examples/go](examples/go/README.md) is a working example: a small Go web app, using `coreos/go-oidc` and `golang.org/x/oauth2`, that signs in, shows the ID token's claims and signs out. Its client is the one from step 2, with `http://localhost:3000/` registered as a post-logout redirect URI.
+[examples/go](examples/go/README.md) is a working example: a small Go web app, using `coreos/go-oidc` and `golang.org/x/oauth2`, that signs in, shows the ID token's claims and signs out. It uses the client from step 2. To come back to the app after signing out, also register `http://localhost:3000/` as the client's post-logout redirect URI, as the example's [README](examples/go/README.md#1-create-a-client) shows.
 
 `litelogin client test` doesn't work against the local servers: it uses the issuer the Admin API reports, which is the `https://` one.
 
