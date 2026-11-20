@@ -46,11 +46,8 @@ var ttlRules = []struct {
 }
 
 const (
-	maxURIs        = 20
-	maxURILen      = 2000
-	maxThemeKeys   = 32
-	maxThemeKeyLen = 64
-	maxThemeValLen = 1024
+	maxURIs   = 20
+	maxURILen = 2000
 )
 
 // Client is the API representation of a client. ClientSecret is set only

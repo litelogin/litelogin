@@ -89,7 +89,7 @@ flowchart LR
 
 ### Login hosts and TLS
 
-- **Hosts belong to orgs.** Every org has a default host, `{label}.login.example.com`, created with it; it can add custom hosts. A host serves one user pool, and the org's clients on that pool can be put on it. A host is the sign-on boundary: its sessions, theme, sign-up setting and session lifetimes are shared by every client on it, while each client keeps its own redirect URIs, scopes, grants, PKCE setting, token lifetimes and credentials (Datamodel.md, Decision 8).
+- **Hosts belong to orgs.** Every org has a default host, `{label}.login.example.com`, created with it; it can add custom hosts. A host serves one user pool, and the org's clients on that pool can be put on it. A host is the sign-on boundary: its sessions, sign-up setting and session lifetimes are shared by every client on it, while each client keeps its own redirect URIs, scopes, grants, PKCE setting, token lifetimes and credentials (Datamodel.md, Decision 8). Pages, emails, passkeys and authenticator apps show the org's name; hosts have no theme yet.
 - **Default hosts** (`*.login.example.com`) are served by one CloudFront distribution with a wildcard ACM certificate.
 - **Custom hosts** (e.g. `login.acme.com`) need a certificate each. Use CloudFront's multi-tenant distributions (CloudFront SaaS Manager): each custom host becomes a distribution tenant with its own managed certificate. The customer adds one CNAME, to the routing endpoint of the connection group that serves the tenants. The certificate is validated over HTTP through that CNAME (CloudFront serves the validation token), so certificate validation doubles as the domain-ownership check. The multi-tenant distribution serves requests just as the default hosts' distribution does: same origin, origin secret, policies, host function and WAF. Custom hosts are optional: a deployment can leave out the multi-tenant distribution (`custom_hosts = false`, as Lean does), and then the Admin API refuses to add them.
 - **When a custom host is verified:** the host becomes `verified` only when both checks pass: the certificate has been issued, and the CNAME resolves to LiteLogin. A valid certificate alone doesn't prove that traffic will route correctly.
@@ -292,7 +292,7 @@ The admin API is for deployment operators.
 | `/v1/clients/{client}/secret` | Rotate (returns the new secret once) |
 | `/v1/clients/{client}/hosts` | List the client's login hosts |
 | `/v1/orgs/{org}/hosts` | List, add a custom host |
-| `/v1/hosts/{host}` | Get (including verification status), update settings (theme, registration, passkeys, identity providers, session lifetimes), remove (a custom host with no clients) |
+| `/v1/hosts/{host}` | Get (including verification status), update settings (registration, passkeys, identity providers, session lifetimes), remove (a custom host with no clients) |
 | `/v1/hosts/{host}/clients` | List the host's clients |
 | `/v1/hosts/{host}/clients/{client}` | Add (`PUT`, idempotent) or remove (`DELETE`; not the client's last host) |
 | `/v1/pools/{pool}/users` | Create (with an initial password, or by emailing a password-set link), list, search by `email_prefix` |
@@ -325,7 +325,7 @@ litelogin init --org "Acme" --client "Acme Portal" --redirect-uri https://app.ac
 
 # A second client on the same host: one sign-in serves both.
 litelogin client create --org {org} --host acme.login.example.com --name "Mobile app" --type public --redirect-uri com.acme.app:/callback
-litelogin host update acme.login.example.com --theme brand_name=Acme --registration=false
+litelogin host update acme.login.example.com --registration=false
 litelogin host add --org {org} login.acme.com
 litelogin host status login.acme.com
 litelogin host add-client login.acme.com {client}

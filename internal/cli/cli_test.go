@@ -248,9 +248,9 @@ func TestResourceLifecycle(t *testing.T) {
 
 	// Hosts: the org's default host, and a custom one.
 	var h admin.Host
-	e.json(&h, "", "host", "update", defaultHost, "--registration=false", "--theme", "brand_name=Acme Login", "--session-ttl", "3600",
+	e.json(&h, "", "host", "update", defaultHost, "--registration=false", "--session-ttl", "3600",
 		"--session-idle-ttl", "600")
-	if h.RegistrationEnabled || h.Theme["brand_name"] != "Acme Login" || h.SessionTTL != 3600 || h.Version != 2 {
+	if h.RegistrationEnabled || h.SessionTTL != 3600 || h.Version != 2 {
 		t.Fatalf("host update: %+v", h)
 	}
 	e.json(&h, "", "host", "add", "--org", org, "Login.Acme.com")

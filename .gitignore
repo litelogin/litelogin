@@ -15,3 +15,6 @@ terraform.tfvars
 .vscode/
 .DS_Store
 
+
+# Static page previews for design work
+/preview/

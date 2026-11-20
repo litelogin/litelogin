@@ -31,7 +31,8 @@ type MigrationReport struct {
 // org-owned ones (a one-off, for data created before the change):
 //
 //  1. defaultHost becomes the org's default host, on its client's pool,
-//     with the settings that client had (theme, registration, sessions);
+//     with the settings that client had (registration, sessions; a theme
+//     is dropped);
 //  2. every client of the org joins it (they must all use that pool);
 //  3. the org's other subdomain hosts are deleted, and the host settings
 //     are removed from the client items.

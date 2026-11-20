@@ -382,7 +382,6 @@ func (f *clientFlags) body(cmd *cobra.Command) map[string]any {
 
 // hostSettingsFlags are a login host's settings.
 type hostSettingsFlags struct {
-	theme               map[string]string
 	registration        bool
 	passkeys            bool
 	idps                []string
@@ -393,7 +392,6 @@ type hostSettingsFlags struct {
 // providers yet, so org create leaves out --idps (withIDPs false).
 func (f *hostSettingsFlags) register(cmd *cobra.Command, withIDPs bool) {
 	fl := cmd.Flags()
-	fl.StringToStringVar(&f.theme, "theme", nil, "theme, as key=value pairs (brand_name, primary_color, background_color, logo_url; replaces the theme)")
 	fl.BoolVar(&f.registration, "registration", true, "allow users to register on the login pages")
 	fl.BoolVar(&f.passkeys, "passkeys", false, "let users add passkeys and sign in with them")
 	if withIDPs {
@@ -414,9 +412,6 @@ func (f *hostSettingsFlags) body(cmd *cobra.Command) map[string]any {
 	if v, ok := body["passkeys"]; ok {
 		delete(body, "passkeys")
 		body["passkeys_enabled"] = v
-	}
-	if cmd.Flags().Changed("theme") {
-		body["theme"] = f.theme
 	}
 	if fl := cmd.Flags().Lookup("idps"); fl != nil && fl.Changed {
 		body["idps"] = append([]string{}, f.idps...) // [] clears the list

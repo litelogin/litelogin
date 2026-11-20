@@ -256,7 +256,8 @@ type tenant struct {
 	Login *store.LoginHost
 	Org   *store.Org
 	Pool  *store.Pool
-	Theme Theme
+	// Brand is the name pages, emails and passkeys show: the org's name.
+	Brand string
 	// Client is the request's client, once known: named by client_id
 	// (authorize, logout), authenticated (token), or the audience of a
 	// token. It's nil on pages with no sign-in request in progress.
@@ -294,7 +295,7 @@ func (s *Server) resolve(r *http.Request) (*tenant, error) {
 	}
 	logctx.Set(ctx, logctx.Host, host)
 	logctx.Set(ctx, logctx.OrgID, org.ID)
-	return &tenant{Host: host, Login: h, Org: org, Pool: pool, Theme: ThemeFor(h, org)}, nil
+	return &tenant{Host: host, Login: h, Org: org, Pool: pool, Brand: org.Name}, nil
 }
 
 // hostClient returns a client if it's active on the tenant's host: a
@@ -449,7 +450,6 @@ type pageData struct {
 
 	// Set by render.
 	Brand        string
-	Theme        Theme
 	CSRF         string
 	Nonce        string
 	Registration bool
@@ -490,14 +490,14 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, t *tenant, statu
 	d.Nonce = crypto.NewToken()
 	d.MinPassword = MinPasswordLength
 	if t != nil {
-		d.Theme, d.Brand, d.Registration = t.Theme, t.Theme.Brand, t.Login.RegistrationEnabled
+		d.Brand, d.Registration = t.Brand, t.Login.RegistrationEnabled
 		d.PasskeysEnabled = t.Login.PasskeysEnabled
 		d.CSRF = s.ensureCSRF(w, r)
 		if name == "login" || name == "register" {
 			d.IDPs = s.idpButtons(r.Context(), t, d.Authz)
 		}
 	} else {
-		d.Theme, d.Brand = DefaultTheme(), "LiteLogin"
+		d.Brand = "LiteLogin"
 	}
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")

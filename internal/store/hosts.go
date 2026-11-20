@@ -14,8 +14,7 @@ import (
 // HostSettings are a login host's settings: they apply to every client on
 // the host, and to its pages when no sign-in request is in progress.
 type HostSettings struct {
-	Theme               map[string]string `dynamodbav:"theme,omitempty"`
-	RegistrationEnabled bool              `dynamodbav:"registration_enabled"`
+	RegistrationEnabled bool `dynamodbav:"registration_enabled"`
 	// PasskeysEnabled lets users add passkeys and sign in with them.
 	PasskeysEnabled bool  `dynamodbav:"passkeys_enabled"`
 	SessionTTL      int64 `dynamodbav:"session_ttl"`
@@ -211,30 +210,24 @@ func (s *Store) UpdateHostSettings(ctx context.Context, h *LoginHost) error {
 	if err != nil {
 		return err
 	}
-	theme := h.Theme
-	if theme == nil {
-		theme = map[string]string{}
-	}
-	themeAV, err := attributevalue.Marshal(theme)
-	if err != nil {
-		return err
-	}
-	set := "SET #theme = :theme, #registration_enabled = :reg, #passkeys_enabled = :passkeys, " +
+	// Hosts no longer have a theme: saving a host removes one stored
+	// before themes were taken out.
+	set := "SET #registration_enabled = :reg, #passkeys_enabled = :passkeys, " +
 		"#session_ttl = :ttl, #session_idle_ttl = :idle, #updated_at = :now, #version = #version + :one"
 	nm := names("theme", "registration_enabled", "passkeys_enabled", "session_ttl", "session_idle_ttl", "updated_at", "version", "idps", "pool_id")
 	vals := map[string]types.AttributeValue{
-		":theme": themeAV, ":reg": avB(h.RegistrationEnabled), ":passkeys": avB(h.PasskeysEnabled),
+		":reg": avB(h.RegistrationEnabled), ":passkeys": avB(h.PasskeysEnabled),
 		":ttl": avN(h.SessionTTL), ":idle": avN(h.SessionIdleTTL), ":now": avN(s.unix()), ":one": avN(1),
 		":expected": avN(h.Version), ":pool": avS(old.PoolID),
 	}
-	upd := set + " REMOVE #idps"
+	upd := set + " REMOVE #theme, #idps"
 	if len(h.IDPs) > 0 {
 		idps, err := attributevalue.Marshal(h.IDPs)
 		if err != nil {
 			return err
 		}
 		vals[":idps"] = idps
-		upd = set + ", #idps = :idps"
+		upd = set + ", #idps = :idps REMOVE #theme"
 	}
 	err = s.transact(ctx, append([]types.TransactWriteItem{
 		update(s.config, key(pfxLoginHost+old.Host, skDetails), upd, "#version = :expected AND #pool_id = :pool", nm, vals),
