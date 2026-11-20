@@ -277,6 +277,16 @@ The admin API is for deployment operators.
 - **Tools enforce their own permissions:** a tool that serves per-org administrators must decide what each of its users can do before it calls the admin API.
 - **Granting and revoking access:** both happen in IAM, either on the principal's policy or on the function's resource-based policy.
 
+### Service and permissions
+
+`internal/admin` has two layers. `admin.Service` has one method per operation, with its validation and permission checks; the Admin API's handlers only read the request, call the service and write JSON. Another front end, such as the planned web console, can call the same service in its own process.
+
+- **Every call has a principal.** An operator manages the deployment and every org. Any other principal manages only the orgs it's given. Every Admin API caller is an operator.
+- **Operators only:** creating, listing, suspending and reactivating orgs, and listing signing keys.
+- **Other orgs' resources don't exist.** A principal that asks for a client, user, pool, host or identity provider in an org it doesn't manage gets the same not-found error as for one that doesn't exist, and nothing changes. The service finds the org from the resource itself, not from the request.
+- **No extra reads for operators.** The checks that need to read a resource to find its org skip the read for operators, so the Admin API reads the same items as before.
+- **Tested for every method.** `internal/admin/service_test.go` calls every method on another org's resources and checks that it fails and the org is unchanged, and fails if a new method isn't in it.
+
 ### Resources
 
 | Resource | Operations |

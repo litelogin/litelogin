@@ -65,19 +65,21 @@ func newEnv(t *testing.T) *env {
 	st := store.New(db, configTable, sessionTable)
 	cursor, _ := admin.NewCursorSigner(bytes.Repeat([]byte("c"), 32))
 	srv := &admin.Server{
-		Store:             st,
-		Hasher:            crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
-		Cursor:            cursor,
-		DefaultHostDomain: "litelogin.test",
-		CustomHostTarget:  "d1.cloudfront.test",
-		Caller:            func(*http.Request) (string, bool) { return "local", true },
-		Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Email:             &email.Recorder{},
-		Secrets:           testSecrets,
+		Service: &admin.Service{
+			Store:             st,
+			Hasher:            crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
+			Cursor:            cursor,
+			DefaultHostDomain: "litelogin.test",
+			CustomHostTarget:  "d1.cloudfront.test",
+			Log:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Email:             &email.Recorder{},
+			Secrets:           testSecrets,
+		},
+		Caller: func(*http.Request) (string, bool) { return "local", true },
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return &env{t: t, endpoint: ts.URL, store: st, mail: srv.Email.(*email.Recorder), config: filepath.Join(t.TempDir(), "config.json")}
+	return &env{t: t, endpoint: ts.URL, store: st, mail: srv.Service.Email.(*email.Recorder), config: filepath.Join(t.TempDir(), "config.json")}
 }
 
 // run runs a CLI command and returns stdout, failing the test if it fails.

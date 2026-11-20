@@ -1,111 +1,25 @@
-// Package admin is the Admin API: a JSON management API for deployment
-// operators, served by the Admin Lambda's IAM-authenticated function URL
-// (Architecture.md, "Admin API").
+// Package admin is LiteLogin's management API. Service does each
+// operation and checks the caller's permissions; Server is the Admin API,
+// JSON over HTTP for deployment operators, served by the Admin Lambda's
+// IAM-authenticated function URL (Architecture.md, "Admin API").
 package admin
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
-	"time"
 
-	"github.com/litelogin/litelogin/internal/crypto"
-	"github.com/litelogin/litelogin/internal/email"
-	"github.com/litelogin/litelogin/internal/secretbox"
 	"github.com/litelogin/litelogin/internal/store"
 )
-
-// Store is the part of *store.Store the Admin API uses.
-type Store interface {
-	CreateOrgWithHost(ctx context.Context, org *store.Org, pool *store.Pool, host *store.LoginHost) error
-	GetOrg(ctx context.Context, orgID string) (*store.Org, error)
-	ListOrgs(ctx context.Context, opts store.ListOrgsOptions) ([]store.Org, string, error)
-	UpdateOrg(ctx context.Context, org *store.Org) error
-	SetOrgStatus(ctx context.Context, orgID, status string, expectedVersion int64) (int64, error)
-
-	CreatePool(ctx context.Context, pool *store.Pool) error
-	GetPool(ctx context.Context, poolID string) (*store.Pool, error)
-	ListPools(ctx context.Context, orgID string) ([]store.Pool, error)
-	UpdatePool(ctx context.Context, pool *store.Pool) error
-	MarkPoolDeleting(ctx context.Context, poolID string) error
-
-	CreateIDP(ctx context.Context, p *store.IDP) error
-	GetIDP(ctx context.Context, poolID, idpID string) (*store.IDP, error)
-	ListIDPs(ctx context.Context, poolID string) ([]store.IDP, error)
-	UpdateIDP(ctx context.Context, p *store.IDP) error
-	DeleteIDP(ctx context.Context, poolID, idpID string) error
-
-	CreateClient(ctx context.Context, c *store.Client, host string) error
-	GetClient(ctx context.Context, clientID string) (*store.Client, error)
-	CreateOneTimeToken(ctx context.Context, t *store.OneTimeToken, lifetime time.Duration) error
-	ListClients(ctx context.Context, orgID string) ([]store.Client, error)
-	UpdateClient(ctx context.Context, c *store.Client) error
-	SetClientStatus(ctx context.Context, clientID, status string, expectedVersion int64) (int64, error)
-	SetClientSecretHash(ctx context.Context, clientID, secretHash string, expectedVersion int64) (*store.Client, error)
-	DeleteClient(ctx context.Context, clientID string) error
-
-	CreateHost(ctx context.Context, h *store.LoginHost) error
-	GetLoginHost(ctx context.Context, host string) (*store.LoginHost, error)
-	UpdateHostSettings(ctx context.Context, h *store.LoginHost) error
-	ListOrgHosts(ctx context.Context, orgID string) ([]store.LoginHost, error)
-	RemoveHost(ctx context.Context, host string) error
-	AddHostClient(ctx context.Context, host, clientID string) error
-	RemoveHostClient(ctx context.Context, host, clientID string) error
-	ListHostClients(ctx context.Context, host string) ([]string, error)
-	ListClientHosts(ctx context.Context, clientID string) ([]store.LoginHost, error)
-
-	CreateUser(ctx context.Context, u *store.User) error
-	GetUser(ctx context.Context, userID string) (*store.User, error)
-	ListUsers(ctx context.Context, poolID string, opts store.ListUsersOptions) ([]store.UserSummary, string, error)
-	SetEmailVerified(ctx context.Context, userID string, verified bool, expectedVersion int64) (*store.User, error)
-	ChangePassword(ctx context.Context, userID, newHash string) (int64, error)
-	DisableUser(ctx context.Context, userID string) (int64, error)
-	EnableUser(ctx context.Context, userID string) error
-	DeleteUser(ctx context.Context, userID string) error
-	RevokeUserCredentials(ctx context.Context, userID string) (int64, error)
-	ListActiveSessions(ctx context.Context, userID string) ([]store.SessionSummary, error)
-	ListPasskeys(ctx context.Context, userID string) ([]store.Passkey, error)
-	DisableMFA(ctx context.Context, userID string) (int64, error)
-	DeletePasskey(ctx context.Context, userID, id string, force bool) error
-	ListIdentities(ctx context.Context, userID string) ([]store.Identity, error)
-	UnlinkIdentity(ctx context.Context, userID, idpID string, force bool) (int64, error)
-
-	ListSigningKeys(ctx context.Context) ([]store.SigningKey, error)
-
-	BeginIdempotentRequest(ctx context.Context, callerARN, idemKey, requestHash string) (*store.IdempotencyRecord, error)
-	CompleteIdempotentRequest(ctx context.Context, callerARN, idemKey, requestHash string, status int, body []byte) error
-	ReleaseIdempotentRequest(ctx context.Context, callerARN, idemKey, requestHash string) error
-}
-
-var _ Store = (*store.Store)(nil)
 
 // CallerFunc returns the IAM principal ARN of the request's caller, or
 // false if the request isn't authenticated.
 type CallerFunc func(*http.Request) (string, bool)
 
-// Server is the Admin API.
+// Server is the Admin API: JSON over HTTP in front of a Service. Every
+// caller is an operator (Principal.Operator).
 type Server struct {
-	Store  Store
-	Hasher *crypto.PasswordHasher
-	Cursor Cursors
-	// DefaultHostDomain is the parent domain of default login hosts, e.g.
-	// login.example.com: an org's default host is {label}.{domain}.
-	DefaultHostDomain string
-	// CustomHostTarget is where custom hosts' CNAME records point: the
-	// routing endpoint of the connection group serving them. Empty means
-	// custom hosts aren't supported, and adding one returns 501.
-	CustomHostTarget string
-	Caller           CallerFunc
-	Log              *slog.Logger
-	Now              func() time.Time
-	// Email sends user invites. Without it, invites return 501.
-	Email email.Sender
-	// Secrets seals identity providers' secrets (secretbox.IDPContext).
-	// Without it, setting a secret returns 501.
-	Secrets secretbox.Box
-	// LinkScheme and LinkPort shape invite links: https and no port,
-	// except for the local development server.
-	LinkScheme, LinkPort string
+	Service *Service
+	Caller  CallerFunc
 }
 
 // maxBodyBytes bounds request bodies.
@@ -180,25 +94,16 @@ func (s *Server) Handler() http.Handler {
 	return s.authenticate(mux)
 }
 
-func (s *Server) log() *slog.Logger {
-	if s.Log != nil {
-		return s.Log
-	}
-	return slog.Default()
-}
-
-func (s *Server) now() time.Time {
-	if s.Now != nil {
-		return s.Now()
-	}
-	return time.Now()
-}
-
 type callerKey struct{}
 
 func callerARN(ctx context.Context) string {
 	arn, _ := ctx.Value(callerKey{}).(string)
 	return arn
+}
+
+// principal is who a request acts for: its caller, an operator.
+func principal(r *http.Request) Principal {
+	return Principal{ID: callerARN(r.Context()), Operator: true}
 }
 
 // authenticate rejects requests without a caller. In Lambda the function
@@ -208,7 +113,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		arn, ok := s.Caller(r)
 		if !ok || arn == "" {
-			writeError(w, &apiError{Status: http.StatusUnauthorized, Code: "unauthenticated",
+			writeError(w, &Error{Status: http.StatusUnauthorized, Code: "unauthenticated",
 				Message: "requests must be signed with AWS SigV4 by an IAM principal"})
 			return
 		}
@@ -237,9 +142,9 @@ func (s *Server) handle(h func(http.ResponseWriter, *http.Request) error) http.H
 // run calls h and writes its error, if any.
 func (s *Server) run(h func(http.ResponseWriter, *http.Request) error, w *recorder, r *http.Request) {
 	if err := h(w, r); err != nil {
-		ae := toAPIError(err)
+		ae := AsError(err)
 		if ae.Status >= 500 {
-			s.log().ErrorContext(r.Context(), "admin request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+			s.Service.log().ErrorContext(r.Context(), "admin request failed", "method", r.Method, "path", r.URL.Path, "error", err)
 		}
 		writeError(w, ae)
 	}
@@ -257,5 +162,5 @@ func (s *Server) audit(r *http.Request, status int, replayed bool) {
 	if id := requestID(r); id != "" {
 		attrs = append(attrs, "request_id", id)
 	}
-	s.log().InfoContext(r.Context(), "admin audit", attrs...)
+	s.Service.log().InfoContext(r.Context(), "admin audit", attrs...)
 }

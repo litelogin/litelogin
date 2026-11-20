@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -67,7 +65,7 @@ const InviteLifetime = 7 * 24 * time.Hour
 // MinPasswordLength is the shortest password accepted (NIST SP 800-63B).
 const MinPasswordLength = 8
 
-func (s *Server) hashPassword(pw string) (string, error) {
+func (s *Service) hashPassword(pw string) (string, error) {
 	if len(pw) < MinPasswordLength {
 		return "", errInvalid("password must be at least %d characters", MinPasswordLength)
 	}
@@ -78,66 +76,62 @@ func (s *Server) hashPassword(pw string) (string, error) {
 	return h, err
 }
 
-func (s *Server) createUser(w http.ResponseWriter, r *http.Request) error {
-	poolID, err := pathValue(r, "pool")
-	if err != nil {
-		return err
-	}
-	var in UserInput
-	if err := decode(r, &in); err != nil {
-		return err
+// CreateUser creates a user in a pool, with an initial password or, with
+// in.Invite, by emailing them a link to choose one.
+func (s *Service) CreateUser(ctx context.Context, p Principal, poolID string, in UserInput) (*User, error) {
+	if err := s.authorizePool(ctx, p, poolID); err != nil {
+		return nil, err
 	}
 	if in.Email == nil {
-		return errInvalid("email is required")
+		return nil, errInvalid("email is required")
 	}
 	invite := deref(in.Invite)
 	switch {
 	case invite && in.Password != nil:
-		return errInvalid("send either password or invite, not both")
+		return nil, errInvalid("send either password or invite, not both")
 	case invite && in.Host != nil && in.ClientID != nil:
-		return errInvalid("send host or client_id with invite, not both")
+		return nil, errInvalid("send host or client_id with invite, not both")
 	case !invite && (in.ClientID != nil || in.Host != nil):
-		return errInvalid("host and client_id are only used with invite")
+		return nil, errInvalid("host and client_id are only used with invite")
 	case !invite && in.Password == nil:
-		return errInvalid("password is required (or invite)")
+		return nil, errInvalid("password is required (or invite)")
 	}
 	addr, err := store.NormalizeEmail(*in.Email)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if invite {
-		return s.inviteUser(w, r, poolID, addr, deref(in.Host), deref(in.ClientID))
+		return s.inviteUser(ctx, p, poolID, addr, deref(in.Host), deref(in.ClientID))
 	}
 	hash, err := s.hashPassword(*in.Password)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	u := &store.User{ID: crypto.NewID(), PoolID: poolID, Email: addr, PasswordHash: hash,
 		EmailVerified: deref(in.EmailVerified), PasswordUpdatedAt: s.now().Unix()}
-	if err := s.Store.CreateUser(r.Context(), u); err != nil {
-		return err
+	if err := s.Store.CreateUser(ctx, u); err != nil {
+		return nil, err
 	}
-	writeVersioned(w, http.StatusCreated, u.Version, userJSON(u))
-	return nil
+	out := userJSON(u)
+	return &out, nil
 }
 
 // inviteUser creates a user without a password and emails them a link to
 // choose one, on a login host of their pool. Choosing the password also
 // verifies the email. If the email can't be sent, the user is deleted
 // again, so the request can simply be retried.
-func (s *Server) inviteUser(w http.ResponseWriter, r *http.Request, poolID, addr, host, clientID string) error {
-	ctx := r.Context()
+func (s *Service) inviteUser(ctx context.Context, p Principal, poolID, addr, host, clientID string) (*User, error) {
 	if s.Email == nil {
-		return &apiError{Status: http.StatusNotImplemented, Code: "not_implemented", Message: "email isn't configured for this server"}
+		return nil, errNotImplemented("not_implemented", "email isn't configured for this server")
 	}
-	h, org, err := s.inviteHost(r, poolID, host, clientID)
+	h, org, err := s.inviteHost(ctx, p, poolID, host, clientID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	u := &store.User{ID: crypto.NewID(), PoolID: poolID, Email: addr}
 	if err := s.Store.CreateUser(ctx, u); err != nil {
-		return err
+		return nil, err
 	}
 	token := crypto.NewToken()
 	err = s.Store.CreateOneTimeToken(ctx, &store.OneTimeToken{
@@ -150,15 +144,15 @@ func (s *Server) inviteUser(w http.ResponseWriter, r *http.Request, poolID, addr
 		if derr := s.Store.DeleteUser(ctx, u.ID); derr != nil {
 			s.log().ErrorContext(ctx, "delete user after failed invite", "user_id", u.ID, "error", derr)
 		}
-		return fmt.Errorf("invite: %w", err)
+		return nil, fmt.Errorf("invite: %w", err)
 	}
-	writeVersioned(w, http.StatusCreated, u.Version, userJSON(u))
-	return nil
+	out := userJSON(u)
+	return &out, nil
 }
 
-// inviteHost picks the login host an invite links to (see UserInput).
-func (s *Server) inviteHost(r *http.Request, poolID, host, clientID string) (*store.LoginHost, *store.Org, error) {
-	ctx := r.Context()
+// inviteHost picks the login host an invite or notice links to (see
+// UserInput). The pool has been authorized.
+func (s *Service) inviteHost(ctx context.Context, p Principal, poolID, host, clientID string) (*store.LoginHost, *store.Org, error) {
 	pool, err := s.Store.GetPool(ctx, poolID)
 	if err != nil {
 		return nil, nil, err
@@ -177,7 +171,8 @@ func (s *Server) inviteHost(r *http.Request, poolID, host, clientID string) (*st
 		return h, org, err
 	case clientID != "":
 		c, err := s.Store.GetClient(ctx, clientID)
-		if errors.Is(err, store.ErrNotFound) {
+		// A client in an org p doesn't manage doesn't exist, for p.
+		if errors.Is(err, store.ErrNotFound) || (err == nil && !p.manages(c.OrgID)) {
 			return nil, nil, errInvalid("client %s doesn't exist", clientID)
 		}
 		if err != nil {
@@ -217,7 +212,7 @@ func (s *Server) inviteHost(r *http.Request, poolID, host, clientID string) (*st
 	}
 }
 
-func (s *Server) sendInvite(ctx context.Context, h *store.LoginHost, org *store.Org, addr, token string) error {
+func (s *Service) sendInvite(ctx context.Context, h *store.LoginHost, org *store.Org, addr, token string) error {
 	link := s.hostLink(h, "/password/reset", url.Values{"token": {token}})
 	m, err := email.Render(email.Invite, addr, email.Data{Brand: org.Name, Host: h.Host, Link: link, Expires: "7 days"})
 	if err != nil {
@@ -228,7 +223,7 @@ func (s *Server) sendInvite(ctx context.Context, h *store.LoginHost, org *store.
 
 // sendNotice emails a user a security notice linking to their account
 // page on h.
-func (s *Server) sendNotice(ctx context.Context, h *store.LoginHost, org *store.Org, addr string, kind email.Kind) error {
+func (s *Service) sendNotice(ctx context.Context, h *store.LoginHost, org *store.Org, addr string, kind email.Kind) error {
 	m, err := email.Render(kind, addr, email.Data{Brand: org.Name, Host: h.Host, Link: s.hostLink(h, "/account", nil)})
 	if err != nil {
 		return err
@@ -236,7 +231,7 @@ func (s *Server) sendNotice(ctx context.Context, h *store.LoginHost, org *store.
 	return s.Email.Send(ctx, m)
 }
 
-func (s *Server) hostLink(h *store.LoginHost, path string, q url.Values) string {
+func (s *Service) hostLink(h *store.LoginHost, path string, q url.Values) string {
 	scheme, host := s.LinkScheme, h.Host
 	if scheme == "" {
 		scheme = "https"
@@ -247,169 +242,149 @@ func (s *Server) hostLink(h *store.LoginHost, path string, q url.Values) string 
 	return (&url.URL{Scheme: scheme, Host: host, Path: path, RawQuery: q.Encode()}).String()
 }
 
-const (
-	defaultPageSize = 50
-	maxPageSize     = 100
-)
-
-// pageLimit reads the limit query parameter of a paginated list.
-func pageLimit(r *http.Request) (int32, error) {
-	v := r.URL.Query().Get("limit")
-	if v == "" {
-		return defaultPageSize, nil
-	}
-	n, err := strconv.ParseInt(v, 10, 32)
-	if err != nil || n < 1 || n > maxPageSize {
-		return 0, errInvalid("limit must be between 1 and %d", maxPageSize)
-	}
-	return int32(n), nil
+// ListUsersOptions selects users in a pool.
+type ListUsersOptions struct {
+	ListOptions
+	// EmailPrefix keeps only users whose email starts with it.
+	EmailPrefix string
 }
 
-// listUsers lists a pool's users sorted by email, optionally only those
-// whose email starts with email_prefix.
-func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) error {
-	poolID, err := pathValue(r, "pool")
+// ListUsers lists a pool's users sorted by email, optionally only those
+// whose email starts with opts.EmailPrefix. Items are summaries: ID,
+// email, email_verified, status and created_at.
+func (s *Service) ListUsers(ctx context.Context, p Principal, poolID string, opts ListUsersOptions) (*Page[User], error) {
+	limit, err := opts.limit()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	q := r.URL.Query()
-	limit, err := pageLimit(r)
-	if err != nil {
-		return err
-	}
-	prefix := strings.ToLower(strings.TrimSpace(q.Get("email_prefix")))
+	prefix := strings.ToLower(strings.TrimSpace(opts.EmailPrefix))
 	if len(prefix) > 254 {
-		return errInvalid("email_prefix is too long")
+		return nil, errInvalid("email_prefix is too long")
 	}
 	// The cursor is bound to the pool and prefix it was issued for.
 	scope := "users\x00" + poolID + "\x00" + prefix
 	var inner string
-	if c := q.Get("cursor"); c != "" {
-		if inner, err = s.Cursor.Verify(r.Context(), scope, c); err != nil {
-			return err
+	if opts.Cursor != "" {
+		if inner, err = s.Cursor.Verify(ctx, scope, opts.Cursor); err != nil {
+			return nil, err
 		}
 	}
-	if _, err := s.Store.GetPool(r.Context(), poolID); err != nil {
-		return err
+	pool, err := s.Store.GetPool(ctx, poolID)
+	if err != nil {
+		return nil, err
 	}
-	users, next, err := s.Store.ListUsers(r.Context(), poolID, store.ListUsersOptions{
+	if err := inOrg(p, pool.OrgID); err != nil {
+		return nil, err
+	}
+	users, next, err := s.Store.ListUsers(ctx, poolID, store.ListUsersOptions{
 		EmailPrefix: prefix, Limit: limit, Cursor: inner,
 	})
 	if errors.Is(err, store.ErrInvalidCursor) {
-		return errInvalid("invalid cursor")
+		return nil, errInvalid("invalid cursor")
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	signed, err := s.Cursor.Sign(r.Context(), scope, next)
+	signed, err := s.Cursor.Sign(ctx, scope, next)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	out := list[User]{Items: make([]User, 0, len(users)), NextCursor: signed}
+	out := &Page[User]{Items: make([]User, 0, len(users)), NextCursor: signed}
 	for _, u := range users {
 		out.Items = append(out.Items, User{ID: u.ID, Email: u.Email, EmailVerified: u.EmailVerified,
 			Status: u.Status, CreatedAt: timestamp(u.CreatedAt)})
 	}
-	writeJSON(w, http.StatusOK, out)
-	return nil
+	return out, nil
 }
 
-func (s *Server) getUser(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
+// user reads a user that p manages.
+func (s *Service) user(ctx context.Context, p Principal, id string) (*store.User, error) {
+	u, err := s.Store.GetUser(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	u, err := s.Store.GetUser(r.Context(), id)
-	if err != nil {
-		return err
+	if err := s.userInOrg(ctx, p, u); err != nil {
+		return nil, err
 	}
-	writeVersioned(w, http.StatusOK, u.Version, userJSON(u))
-	return nil
+	return u, nil
 }
 
-// updateUser sets email_verified and/or a new password. A new password
-// revokes all of the user's sessions and refresh tokens.
-func (s *Server) updateUser(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
+// GetUser returns a user.
+func (s *Service) GetUser(ctx context.Context, p Principal, id string) (*User, error) {
+	u, err := s.user(ctx, p, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	version, err := ifMatch(r)
-	if err != nil {
-		return err
-	}
-	var in UserInput
-	if err := decode(r, &in); err != nil {
-		return err
-	}
+	out := userJSON(u)
+	return &out, nil
+}
+
+// UpdateUser sets email_verified and/or a new password. A new password
+// revokes all of the user's sessions and refresh tokens. version is the
+// user's version when it was read.
+func (s *Service) UpdateUser(ctx context.Context, p Principal, id string, version int64, in UserInput) (*User, error) {
 	if in.Email != nil {
-		return errInvalid("email can't be changed through the admin API yet")
+		return nil, errInvalid("email can't be changed through the admin API yet")
 	}
 	if in.Invite != nil {
-		return errInvalid("invite can only be set when creating a user")
+		return nil, errInvalid("invite can only be set when creating a user")
 	}
 	var hash string
 	if in.Password != nil {
+		var err error
 		if hash, err = s.hashPassword(*in.Password); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	u, err := s.Store.GetUser(r.Context(), id)
+	u, err := s.user(ctx, p, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if u.Version != version {
-		return store.ErrVersionMismatch
+		return nil, store.ErrVersionMismatch
 	}
 	if in.EmailVerified != nil {
-		if _, err := s.Store.SetEmailVerified(r.Context(), id, *in.EmailVerified, version); err != nil {
-			return err
+		if _, err := s.Store.SetEmailVerified(ctx, id, *in.EmailVerified, version); err != nil {
+			return nil, err
 		}
 	}
 	if hash != "" {
-		if _, err := s.Store.ChangePassword(r.Context(), id, hash); err != nil {
-			return err
+		if _, err := s.Store.ChangePassword(ctx, id, hash); err != nil {
+			return nil, err
 		}
 	}
-	if u, err = s.Store.GetUser(r.Context(), id); err != nil {
-		return err
-	}
-	writeVersioned(w, http.StatusOK, u.Version, userJSON(u))
-	return nil
+	return s.GetUser(ctx, p, id)
 }
 
-func (s *Server) disableUser(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
-	if err != nil {
-		return err
+// DisableUser disables a user: they can't sign in, and every session and
+// refresh token stops working. It returns the user as it is now.
+func (s *Service) DisableUser(ctx context.Context, p Principal, id string) (*User, error) {
+	if err := s.authorizeUser(ctx, p, id); err != nil {
+		return nil, err
 	}
-	if _, err := s.Store.DisableUser(r.Context(), id); err != nil {
-		return err
+	if _, err := s.Store.DisableUser(ctx, id); err != nil {
+		return nil, err
 	}
-	return s.getUser(w, r)
+	return s.GetUser(ctx, p, id)
 }
 
-func (s *Server) enableUser(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
-	if err != nil {
-		return err
+// EnableUser enables a disabled user. It returns the user as it is now.
+func (s *Service) EnableUser(ctx context.Context, p Principal, id string) (*User, error) {
+	if err := s.authorizeUser(ctx, p, id); err != nil {
+		return nil, err
 	}
-	if err := s.Store.EnableUser(r.Context(), id); err != nil {
-		return err
+	if err := s.Store.EnableUser(ctx, id); err != nil {
+		return nil, err
 	}
-	return s.getUser(w, r)
+	return s.GetUser(ctx, p, id)
 }
 
-func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
-	if err != nil {
+// DeleteUser deletes a user.
+func (s *Service) DeleteUser(ctx context.Context, p Principal, id string) error {
+	if err := s.authorizeUser(ctx, p, id); err != nil {
 		return err
 	}
-	if err := s.Store.DeleteUser(r.Context(), id); err != nil {
-		return err
-	}
-	w.WriteHeader(http.StatusNoContent)
-	return nil
+	return s.Store.DeleteUser(ctx, id)
 }
 
 // Session is the API representation of one of a user's sessions.
@@ -422,22 +397,21 @@ type Session struct {
 	UserAgent  string `json:"user_agent,omitempty"`
 }
 
-func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
-	if err != nil {
-		return err
+// ListSessions lists a user's active login sessions.
+func (s *Service) ListSessions(ctx context.Context, p Principal, id string) ([]Session, error) {
+	if err := s.authorizeUser(ctx, p, id); err != nil {
+		return nil, err
 	}
-	sessions, err := s.Store.ListActiveSessions(r.Context(), id)
+	sessions, err := s.Store.ListActiveSessions(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	out := list[Session]{Items: make([]Session, 0, len(sessions))}
+	out := make([]Session, 0, len(sessions))
 	for _, ss := range sessions {
-		out.Items = append(out.Items, Session{ClientID: ss.ClientID, CreatedAt: timestamp(ss.CreatedAt),
+		out = append(out, Session{ClientID: ss.ClientID, CreatedAt: timestamp(ss.CreatedAt),
 			LastSeenAt: timestamp(ss.LastSeenAt), ExpiresAt: timestamp(ss.ExpiresAt), IP: ss.IP, UserAgent: ss.UserAgent})
 	}
-	writeJSON(w, http.StatusOK, out)
-	return nil
+	return out, nil
 }
 
 // RevokeResult is the response of revoking a user's sessions.
@@ -445,19 +419,17 @@ type RevokeResult struct {
 	AuthVersion int64 `json:"auth_version"`
 }
 
-// revokeSessions logs the user out everywhere: every session, code and
+// RevokeSessions logs the user out everywhere: every session, code and
 // refresh token stops working at once.
-func (s *Server) revokeSessions(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
-	if err != nil {
-		return err
+func (s *Service) RevokeSessions(ctx context.Context, p Principal, id string) (*RevokeResult, error) {
+	if err := s.authorizeUser(ctx, p, id); err != nil {
+		return nil, err
 	}
-	v, err := s.Store.RevokeUserCredentials(r.Context(), id)
+	v, err := s.Store.RevokeUserCredentials(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, RevokeResult{AuthVersion: v})
-	return nil
+	return &RevokeResult{AuthVersion: v}, nil
 }
 
 // MFAResetResult is the response to resetting a user's two-factor sign-in.
@@ -468,34 +440,28 @@ type MFAResetResult struct {
 	Notified bool `json:"notified"`
 }
 
-// resetMFA turns off a user's two-factor sign-in, for a user who lost
+// ResetMFA turns off a user's two-factor sign-in, for a user who lost
 // both their authenticator app and recovery codes: they sign in with the
 // password alone again (and, if their pool requires it, set up a second
 // factor right away). Every session and refresh token ends, and the user
-// is emailed, through the login host in ?host= or the org's default.
-func (s *Server) resetMFA(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
+// is emailed, through the login host given or the org's default.
+func (s *Service) ResetMFA(ctx context.Context, p Principal, id, host string) (*MFAResetResult, error) {
+	u, err := s.user(ctx, p, id)
 	if err != nil {
-		return err
-	}
-	ctx := r.Context()
-	u, err := s.Store.GetUser(ctx, id)
-	if err != nil {
-		return err
+		return nil, err
 	}
 	if !u.MFA {
-		return errConflict("mfa_not_enabled", "user "+id+" doesn't have two-factor sign-in")
+		return nil, errConflict("mfa_not_enabled", "user "+id+" doesn't have two-factor sign-in")
 	}
-	host := r.URL.Query().Get("host")
-	h, org, herr := s.inviteHost(r, u.PoolID, host, "")
+	h, org, herr := s.inviteHost(ctx, p, u.PoolID, host, "")
 	if herr != nil && host != "" {
-		return herr
+		return nil, herr
 	}
 	v, err := s.Store.DisableMFA(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	out := MFAResetResult{AuthVersion: v}
+	out := &MFAResetResult{AuthVersion: v}
 	if herr == nil && s.Email != nil {
 		if err := s.sendNotice(ctx, h, org, u.Email, email.MFAReset); err != nil {
 			s.log().ErrorContext(ctx, "send reset notice", "error", err)
@@ -503,8 +469,7 @@ func (s *Server) resetMFA(w http.ResponseWriter, r *http.Request) error {
 			out.Notified = true
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
-	return nil
+	return out, nil
 }
 
 // Passkey is the API representation of one of a user's passkeys.
@@ -521,52 +486,40 @@ type Passkey struct {
 	LastUsedAt     string   `json:"last_used_at,omitempty"`
 }
 
-func (s *Server) listPasskeys(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
+// ListPasskeys lists a user's passkeys.
+func (s *Service) ListPasskeys(ctx context.Context, p Principal, id string) ([]Passkey, error) {
+	// Not found for a user that doesn't exist, rather than an empty list.
+	if _, err := s.user(ctx, p, id); err != nil {
+		return nil, err
+	}
+	passkeys, err := s.Store.ListPasskeys(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// 404 for a user that doesn't exist, rather than an empty list.
-	if _, err := s.Store.GetUser(r.Context(), id); err != nil {
-		return err
-	}
-	passkeys, err := s.Store.ListPasskeys(r.Context(), id)
-	if err != nil {
-		return err
-	}
-	out := list[Passkey]{Items: make([]Passkey, 0, len(passkeys))}
-	for _, p := range passkeys {
-		transports := p.Transports
+	out := make([]Passkey, 0, len(passkeys))
+	for _, pk := range passkeys {
+		transports := pk.Transports
 		if transports == nil {
 			transports = []string{}
 		}
-		out.Items = append(out.Items, Passkey{ID: p.ID, Name: p.Name, RPID: p.RPID, BackupEligible: p.BackupEligible,
-			BackupState: p.BackupState, Transports: transports, CreatedAt: timestamp(p.CreatedAt), LastUsedAt: timestamp(p.LastUsedAt)})
+		out = append(out, Passkey{ID: pk.ID, Name: pk.Name, RPID: pk.RPID, BackupEligible: pk.BackupEligible,
+			BackupState: pk.BackupState, Transports: transports, CreatedAt: timestamp(pk.CreatedAt), LastUsedAt: timestamp(pk.LastUsedAt)})
 	}
-	writeJSON(w, http.StatusOK, out)
-	return nil
+	return out, nil
 }
 
-// deletePasskey removes one of a user's passkeys and, as on the account
+// DeletePasskey removes one of a user's passkeys and, as on the account
 // page, revokes their sessions and refresh tokens: they may have come from
 // it, and the usual reason is a lost device.
-func (s *Server) deletePasskey(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
-	if err != nil {
+func (s *Service) DeletePasskey(ctx context.Context, p Principal, id, passkey string) error {
+	if err := s.authorizeUser(ctx, p, id); err != nil {
 		return err
 	}
-	passkey, err := pathValue(r, "passkey")
-	if err != nil {
+	if err := s.Store.DeletePasskey(ctx, id, passkey, true); err != nil {
 		return err
 	}
-	if err := s.Store.DeletePasskey(r.Context(), id, passkey, true); err != nil {
-		return err
-	}
-	if _, err := s.Store.RevokeUserCredentials(r.Context(), id); err != nil {
-		return err
-	}
-	w.WriteHeader(http.StatusNoContent)
-	return nil
+	_, err := s.Store.RevokeUserCredentials(ctx, id)
+	return err
 }
 
 // Identity is the API representation of a user's account at an identity
@@ -580,46 +533,34 @@ type Identity struct {
 	LastUsedAt string `json:"last_used_at,omitempty"`
 }
 
-func (s *Server) listIdentities(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
+// ListIdentities lists a user's linked identity provider accounts.
+func (s *Service) ListIdentities(ctx context.Context, p Principal, id string) ([]Identity, error) {
+	if _, err := s.user(ctx, p, id); err != nil {
+		return nil, err
+	}
+	ids, err := s.Store.ListIdentities(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := s.Store.GetUser(r.Context(), id); err != nil {
-		return err
-	}
-	ids, err := s.Store.ListIdentities(r.Context(), id)
-	if err != nil {
-		return err
-	}
-	out := list[Identity]{Items: make([]Identity, 0, len(ids))}
+	out := make([]Identity, 0, len(ids))
 	for _, i := range ids {
-		out.Items = append(out.Items, Identity{IDPID: i.IDPID, Subject: i.Subject, Email: i.Email,
+		out = append(out, Identity{IDPID: i.IDPID, Subject: i.Subject, Email: i.Email,
 			CreatedAt: timestamp(i.CreatedAt), LastUsedAt: timestamp(i.LastUsedAt)})
 	}
-	writeJSON(w, http.StatusOK, out)
-	return nil
+	return out, nil
 }
 
-// unlinkIdentity unlinks a user's account at a provider and revokes their
+// UnlinkIdentity unlinks a user's account at a provider and revokes their
 // sessions and refresh tokens. Unlike the account page, it may remove the
 // user's last way to sign in: they can still reset their password by
 // email, and an administrator may mean to lock them out of the provider.
-func (s *Server) unlinkIdentity(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "user")
-	if err != nil {
-		return err
-	}
-	idp, err := pathValue(r, "idp")
-	if err != nil {
-		return err
-	}
+func (s *Service) UnlinkIdentity(ctx context.Context, p Principal, id, idp string) error {
 	if !store.ValidIDPID(idp) {
 		return errNotFound("identity provider " + idp + " isn't linked to user " + id)
 	}
-	if _, err := s.Store.UnlinkIdentity(r.Context(), id, idp, true); err != nil {
+	if err := s.authorizeUser(ctx, p, id); err != nil {
 		return err
 	}
-	w.WriteHeader(http.StatusNoContent)
-	return nil
+	_, err := s.Store.UnlinkIdentity(ctx, id, idp, true)
+	return err
 }
