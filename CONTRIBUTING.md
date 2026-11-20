@@ -63,7 +63,7 @@ cmd/
 internal/
   store/         DynamoDB access: one function per access pattern in Datamodel.md
   web/           Login, registration, account and OIDC endpoints; templates
-  admin/         Admin API handlers
+  admin/         Admin API: the Service (operations, permission checks) and its JSON handlers
   cli/           CLI commands
   jwt/           KMS signing, JWKS and token verification
   keyrotation/   Signing key lifecycle

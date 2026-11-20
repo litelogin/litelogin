@@ -189,13 +189,15 @@ func newRig(t *testing.T) *rig {
 	}
 	logs := &bytes.Buffer{}
 	srv := &Server{
-		Store: fs, Hasher: crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
-		Cursor: cursor, DefaultHostDomain: "litelogin.test", CustomHostTarget: "d1.cloudfront.test",
+		Service: &Service{
+			Store: fs, Hasher: crypto.NewPasswordHasher(crypto.Argon2Params{MemoryKiB: 64, Time: 1, Threads: 1, SaltLen: 16, KeyLen: 32}),
+			Cursor: cursor, DefaultHostDomain: "litelogin.test", CustomHostTarget: "d1.cloudfront.test",
+			Log: slog.New(slog.NewJSONHandler(logs, nil)),
+		},
 		Caller: func(r *http.Request) (string, bool) {
 			c := r.Header.Get("X-Test-Caller")
 			return c, c != ""
 		},
-		Log: slog.New(slog.NewJSONHandler(logs, nil)),
 	}
 	return &rig{t: t, store: fs, srv: srv, h: srv.Handler(), logs: logs}
 }
@@ -330,7 +332,7 @@ func TestAddCustomHost(t *testing.T) {
 		t.Errorf("default host has a CNAME target: %s", def.raw)
 	}
 
-	r.srv.CustomHostTarget = ""
+	r.srv.Service.CustomHostTarget = ""
 	wantCode(t, r.call("POST", path, `{"host":"login2.acme.com"}`), 501, "not_implemented")
 }
 
@@ -579,7 +581,7 @@ func TestKMSCursors(t *testing.T) {
 		{c, "scope", signed + "x"},
 	} {
 		_, err := bad.c.Verify(ctx, bad.scope, bad.cursor)
-		var ae *apiError
+		var ae *Error
 		if !errors.As(err, &ae) || ae.Status != http.StatusBadRequest {
 			t.Errorf("Verify(%q, %q) = %v, want 400", bad.scope, bad.cursor, err)
 		}
@@ -631,7 +633,7 @@ func TestResetMFA(t *testing.T) {
 		"u2": {ID: "u2", PoolID: poolID, Email: "bob@example.com", AuthVersion: 1, Status: store.UserActive},
 	}}
 	mail := &email.Recorder{}
-	r.srv.Store, r.srv.Email = ms, mail
+	r.srv.Service.Store, r.srv.Service.Email = ms, mail
 	r.h = r.srv.Handler()
 
 	wantCode(t, r.call("DELETE", "/v1/users/u1/mfa?host=nope.litelogin.test", ""), 400, "invalid_request")

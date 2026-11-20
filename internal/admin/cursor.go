@@ -25,7 +25,7 @@ type Cursors interface {
 	Verify(ctx context.Context, scope, cursor string) (string, error)
 }
 
-func errInvalidCursor() *apiError {
+func errInvalidCursor() *Error {
 	return errInvalid("invalid cursor: pass next_cursor from the previous page unchanged")
 }
 

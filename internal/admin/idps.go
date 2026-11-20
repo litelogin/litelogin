@@ -7,7 +7,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
-	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
@@ -112,7 +111,7 @@ type IDPInput struct {
 
 // apply copies the fields set in in onto p, sealing secrets, and validates
 // the result.
-func (s *Server) applyIDP(ctx context.Context, in *IDPInput, p *store.IDP) error {
+func (s *Service) applyIDP(ctx context.Context, in *IDPInput, p *store.IDP) error {
 	var err error
 	if in.Name != nil {
 		if p.Name, err = validName(*in.Name); err != nil {
@@ -161,10 +160,10 @@ func (s *Server) applyIDP(ctx context.Context, in *IDPInput, p *store.IDP) error
 	return validateIDP(p)
 }
 
-var errNoSecrets = &apiError{Status: http.StatusNotImplemented, Code: "not_configured",
-	Message: "this Admin API can't seal identity provider secrets: its KMS key isn't configured"}
+var errNoSecrets = errNotImplemented("not_configured",
+	"this Admin API can't seal identity provider secrets: its KMS key isn't configured")
 
-func (s *Server) sealIDPSecret(ctx context.Context, p *store.IDP, secret []byte) ([]byte, error) {
+func (s *Service) sealIDPSecret(ctx context.Context, p *store.IDP, secret []byte) ([]byte, error) {
 	if s.Secrets == nil {
 		return nil, errNoSecrets
 	}
@@ -285,7 +284,7 @@ func printable(v string) bool {
 
 // callbackURLs returns the federation callback URL of each of a pool's
 // login hosts, which the org registers with its providers.
-func (s *Server) callbackURLs(ctx context.Context, orgID, poolID string) ([]string, error) {
+func (s *Service) callbackURLs(ctx context.Context, orgID, poolID string) ([]string, error) {
 	hosts, err := s.Store.ListOrgHosts(ctx, orgID)
 	if err != nil {
 		return nil, err
@@ -299,133 +298,116 @@ func (s *Server) callbackURLs(ctx context.Context, orgID, poolID string) ([]stri
 	return urls, nil
 }
 
-func (s *Server) writeIDP(w http.ResponseWriter, r *http.Request, status int, p *store.IDP) error {
-	callbacks, err := s.callbackURLs(r.Context(), p.OrgID, p.PoolID)
+func (s *Service) idpJSON(ctx context.Context, p *store.IDP) (*IDP, error) {
+	callbacks, err := s.callbackURLs(ctx, p.OrgID, p.PoolID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	writeVersioned(w, status, p.Version, idpJSON(p, callbacks))
-	return nil
+	out := idpJSON(p, callbacks)
+	return &out, nil
 }
 
-func idpPath(r *http.Request) (poolID, idpID string, err error) {
-	if poolID, err = pathValue(r, "pool"); err != nil {
-		return "", "", err
-	}
-	idpID, err = pathValue(r, "idp")
-	return poolID, idpID, err
-}
-
-func (s *Server) createIDP(w http.ResponseWriter, r *http.Request) error {
-	poolID, err := pathValue(r, "pool")
-	if err != nil {
-		return err
-	}
-	var in IDPInput
-	if err := decode(r, &in); err != nil {
-		return err
-	}
+// CreateIDP adds an identity provider to a pool, for social sign-in.
+func (s *Service) CreateIDP(ctx context.Context, pr Principal, poolID string, in IDPInput) (*IDP, error) {
 	if in.ID == nil || !store.ValidIDPID(*in.ID) {
-		return errInvalid("id is required: 1 to 32 lowercase letters, digits and hyphens, such as google")
+		return nil, errInvalid("id is required: 1 to 32 lowercase letters, digits and hyphens, such as google")
 	}
 	if in.Type == nil {
-		return errInvalid("type is required: %s, %s or %s", store.IDPTypeOIDC, store.IDPTypeGitHub, store.IDPTypeApple)
+		return nil, errInvalid("type is required: %s, %s or %s", store.IDPTypeOIDC, store.IDPTypeGitHub, store.IDPTypeApple)
 	}
-	pool, err := s.Store.GetPool(r.Context(), poolID)
+	pool, err := s.Store.GetPool(ctx, poolID)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if err := inOrg(pr, pool.OrgID); err != nil {
+		return nil, err
 	}
 	p := &store.IDP{ID: *in.ID, PoolID: pool.ID, OrgID: pool.OrgID, Type: *in.Type, Status: store.IDPActive,
 		Scopes: slices.Clone(defaultIDPScopes[*in.Type])}
-	if err := s.applyIDP(r.Context(), &in, p); err != nil {
-		return err
+	if err := s.applyIDP(ctx, &in, p); err != nil {
+		return nil, err
 	}
-	if err := s.Store.CreateIDP(r.Context(), p); err != nil {
+	if err := s.Store.CreateIDP(ctx, p); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
-			return errConflict("already_exists", "the pool already has an identity provider with this id")
+			return nil, errConflict("already_exists", "the pool already has an identity provider with this id")
 		}
-		return err
+		return nil, err
 	}
-	return s.writeIDP(w, r, http.StatusCreated, p)
+	return s.idpJSON(ctx, p)
 }
 
-func (s *Server) listIDPs(w http.ResponseWriter, r *http.Request) error {
-	poolID, err := pathValue(r, "pool")
+// ListIDPs lists a pool's identity providers.
+func (s *Service) ListIDPs(ctx context.Context, pr Principal, poolID string) ([]IDP, error) {
+	pool, err := s.Store.GetPool(ctx, poolID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	pool, err := s.Store.GetPool(r.Context(), poolID)
-	if err != nil {
-		return err
+	if err := inOrg(pr, pool.OrgID); err != nil {
+		return nil, err
 	}
-	idps, err := s.Store.ListIDPs(r.Context(), poolID)
+	idps, err := s.Store.ListIDPs(ctx, poolID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	callbacks, err := s.callbackURLs(r.Context(), pool.OrgID, poolID)
+	callbacks, err := s.callbackURLs(ctx, pool.OrgID, poolID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	out := make([]IDP, len(idps))
 	for i := range idps {
 		out[i] = idpJSON(&idps[i], callbacks)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out})
-	return nil
+	return out, nil
 }
 
-func (s *Server) getIDP(w http.ResponseWriter, r *http.Request) error {
-	poolID, idpID, err := idpPath(r)
+// idp reads an identity provider in an org pr manages.
+func (s *Service) idp(ctx context.Context, pr Principal, poolID, idpID string) (*store.IDP, error) {
+	p, err := s.Store.GetIDP(ctx, poolID, idpID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	p, err := s.Store.GetIDP(r.Context(), poolID, idpID)
-	if err != nil {
-		return err
+	if err := inOrg(pr, p.OrgID); err != nil {
+		return nil, err
 	}
-	return s.writeIDP(w, r, http.StatusOK, p)
+	return p, nil
 }
 
-func (s *Server) updateIDP(w http.ResponseWriter, r *http.Request) error {
-	poolID, idpID, err := idpPath(r)
+// GetIDP returns an identity provider, with the callback URLs to register
+// with it.
+func (s *Service) GetIDP(ctx context.Context, pr Principal, poolID, idpID string) (*IDP, error) {
+	p, err := s.idp(ctx, pr, poolID, idpID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	version, err := ifMatch(r)
-	if err != nil {
-		return err
-	}
-	var in IDPInput
-	if err := decode(r, &in); err != nil {
-		return err
-	}
+	return s.idpJSON(ctx, p)
+}
+
+// UpdateIDP changes an identity provider's settings or secrets. version
+// is its version when it was read.
+func (s *Service) UpdateIDP(ctx context.Context, pr Principal, poolID, idpID string, version int64, in IDPInput) (*IDP, error) {
 	if in.ID != nil || in.Type != nil {
-		return errInvalid("id and type can't be changed: create a new identity provider instead")
+		return nil, errInvalid("id and type can't be changed: create a new identity provider instead")
 	}
-	p, err := s.Store.GetIDP(r.Context(), poolID, idpID)
+	p, err := s.idp(ctx, pr, poolID, idpID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := s.applyIDP(r.Context(), &in, p); err != nil {
-		return err
+	if err := s.applyIDP(ctx, &in, p); err != nil {
+		return nil, err
 	}
 	p.Version = version
-	if err := s.Store.UpdateIDP(r.Context(), p); err != nil {
-		return err
+	if err := s.Store.UpdateIDP(ctx, p); err != nil {
+		return nil, err
 	}
-	return s.writeIDP(w, r, http.StatusOK, p)
+	return s.idpJSON(ctx, p)
 }
 
-func (s *Server) deleteIDP(w http.ResponseWriter, r *http.Request) error {
-	poolID, idpID, err := idpPath(r)
-	if err != nil {
+// DeleteIDP removes an identity provider. No login host may show it.
+func (s *Service) DeleteIDP(ctx context.Context, pr Principal, poolID, idpID string) error {
+	if err := s.authorizePool(ctx, pr, poolID); err != nil {
 		return err
 	}
-	if err := s.Store.DeleteIDP(r.Context(), poolID, idpID); err != nil {
-		return err
-	}
-	w.WriteHeader(http.StatusNoContent)
-	return nil
+	return s.Store.DeleteIDP(ctx, poolID, idpID)
 }
 
 // validHostIDPs checks a host's list of identity providers; that they

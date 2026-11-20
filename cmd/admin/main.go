@@ -110,19 +110,21 @@ func run(logger *slog.Logger) error {
 		rec = metrics.NewEMF(os.Stdout, "admin")
 	}
 	srv := &admin.Server{
-		Store:             store.New(platform.NewDynamoDB(cfg), tables.Config, tables.Session, store.WithMetrics(rec)),
-		Hasher:            crypto.NewPasswordHasher(crypto.DefaultArgon2Params),
-		Cursor:            cursor,
-		DefaultHostDomain: domain,
-		CustomHostTarget:  os.Getenv(envRoutingEndpoint),
-		Secrets:           secrets,
-		Caller:            admin.FunctionURLCaller,
-		Log:               logger,
+		Service: &admin.Service{
+			Store:             store.New(platform.NewDynamoDB(cfg), tables.Config, tables.Session, store.WithMetrics(rec)),
+			Hasher:            crypto.NewPasswordHasher(crypto.DefaultArgon2Params),
+			Cursor:            cursor,
+			DefaultHostDomain: domain,
+			CustomHostTarget:  os.Getenv(envRoutingEndpoint),
+			Secrets:           secrets,
+			Log:               logger,
+		},
+		Caller: admin.FunctionURLCaller,
 	}
 	if inLambda {
 		// Invites are sent only when email is configured.
 		if from := os.Getenv("LITELOGIN_EMAIL_FROM"); from != "" {
-			srv.Email = email.Metered(&email.SES{
+			srv.Service.Email = email.Metered(&email.SES{
 				Client: sesv2.NewFromConfig(cfg), From: from, ConfigurationSet: os.Getenv("LITELOGIN_SES_CONFIGURATION"),
 			}, rec)
 		}
@@ -131,7 +133,7 @@ func run(logger *slog.Logger) error {
 	}
 	srv.Caller = func(*http.Request) (string, bool) { return localCaller, true }
 	// Invite links point at the local Auth server (make run-auth).
-	srv.Email, srv.LinkScheme, srv.LinkPort = &email.Printer{W: os.Stderr}, "http", "8080"
+	srv.Service.Email, srv.Service.LinkScheme, srv.Service.LinkPort = &email.Printer{W: os.Stderr}, "http", "8080"
 	return serveLocal(logger, srv.Handler())
 }
 

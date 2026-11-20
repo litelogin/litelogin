@@ -1,8 +1,8 @@
 package admin
 
 import (
+	"context"
 	"errors"
-	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -79,153 +79,169 @@ type OrgInput struct {
 	HostSettings *HostSettingsInput `json:"host_settings"`
 }
 
-func (s *Server) createOrg(w http.ResponseWriter, r *http.Request) error {
-	var in OrgInput
-	if err := decode(r, &in); err != nil {
-		return err
+// CreateOrg creates an org with its default user pool and default login
+// host. The result's DefaultPoolID is that pool. Only operators create
+// orgs.
+func (s *Service) CreateOrg(ctx context.Context, p Principal, in OrgInput) (*Org, error) {
+	if err := requireOperator(p); err != nil {
+		return nil, err
 	}
 	org := &store.Org{ID: crypto.NewID()}
 	var err error
 	if org.Name, err = validName(deref(in.Name)); err != nil {
-		return err
+		return nil, err
 	}
 	if org.Description, err = validDescription(deref(in.Description)); err != nil {
-		return err
+		return nil, err
 	}
 	label := defaultLabel(org.Name)
 	if in.HostLabel != nil {
 		label = strings.ToLower(strings.TrimSpace(*in.HostLabel))
 	}
 	if !hostLabel.MatchString(label) {
-		return errInvalid("host_label must be 1-63 letters, digits and hyphens, not starting or ending with a hyphen")
+		return nil, errInvalid("host_label must be 1-63 letters, digits and hyphens, not starting or ending with a hyphen")
 	}
 	host := &store.LoginHost{Host: label + "." + s.DefaultHostDomain, HostSettings: defaultHostSettings()}
 	if err := in.HostSettings.apply(&host.HostSettings); err != nil {
-		return err
+		return nil, err
 	}
 	pool := &store.Pool{ID: crypto.NewID(), Name: "Default"}
-	if err := s.Store.CreateOrgWithHost(r.Context(), org, pool, host); err != nil {
+	if err := s.Store.CreateOrgWithHost(ctx, org, pool, host); err != nil {
 		if errors.Is(err, store.ErrHostTaken) {
-			return errConflict("host_taken", "the default host "+host.Host+" is taken: choose another host_label")
+			return nil, errConflict("host_taken", "the default host "+host.Host+" is taken: choose another host_label")
 		}
-		return err
+		return nil, err
 	}
 	out := orgJSON(org)
 	out.DefaultPoolID = pool.ID
-	writeVersioned(w, http.StatusCreated, org.Version, out)
-	return nil
+	return &out, nil
 }
 
-// listOrgs lists every org, oldest first.
-func (s *Server) listOrgs(w http.ResponseWriter, r *http.Request) error {
-	limit, err := pageLimit(r)
+// ListOptions selects a page of a paginated list.
+type ListOptions struct {
+	// Limit is the page size: 1 to 100, or 0 for the default of 50.
+	Limit int32
+	// Cursor is the NextCursor of the previous page, or "" for the first.
+	Cursor string
+}
+
+const (
+	defaultPageSize = 50
+	maxPageSize     = 100
+)
+
+func (o ListOptions) limit() (int32, error) {
+	switch {
+	case o.Limit == 0:
+		return defaultPageSize, nil
+	case o.Limit < 1 || o.Limit > maxPageSize:
+		return 0, errInvalid("limit must be between 1 and %d", maxPageSize)
+	}
+	return o.Limit, nil
+}
+
+// Page is one page of a paginated list. NextCursor is "" on the last page.
+type Page[T any] struct {
+	Items      []T
+	NextCursor string
+}
+
+// ListOrgs lists every org, oldest first. Only operators list orgs.
+func (s *Service) ListOrgs(ctx context.Context, p Principal, opts ListOptions) (*Page[Org], error) {
+	if err := requireOperator(p); err != nil {
+		return nil, err
+	}
+	limit, err := opts.limit()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	const scope = "orgs"
 	var inner string
-	if c := r.URL.Query().Get("cursor"); c != "" {
-		if inner, err = s.Cursor.Verify(r.Context(), scope, c); err != nil {
-			return err
+	if opts.Cursor != "" {
+		if inner, err = s.Cursor.Verify(ctx, scope, opts.Cursor); err != nil {
+			return nil, err
 		}
 	}
-	orgs, next, err := s.Store.ListOrgs(r.Context(), store.ListOrgsOptions{Limit: limit, Cursor: inner})
+	orgs, next, err := s.Store.ListOrgs(ctx, store.ListOrgsOptions{Limit: limit, Cursor: inner})
 	if errors.Is(err, store.ErrInvalidCursor) {
-		return errInvalidCursor()
+		return nil, errInvalidCursor()
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	signed, err := s.Cursor.Sign(r.Context(), scope, next)
+	signed, err := s.Cursor.Sign(ctx, scope, next)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	out := list[Org]{Items: make([]Org, 0, len(orgs)), NextCursor: signed}
+	out := &Page[Org]{Items: make([]Org, 0, len(orgs)), NextCursor: signed}
 	for i := range orgs {
 		out.Items = append(out.Items, orgJSON(&orgs[i]))
 	}
-	writeJSON(w, http.StatusOK, out)
-	return nil
+	return out, nil
 }
 
-func (s *Server) getOrg(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "org")
-	if err != nil {
-		return err
+// GetOrg returns an org.
+func (s *Service) GetOrg(ctx context.Context, p Principal, id string) (*Org, error) {
+	if err := inOrg(p, id); err != nil {
+		return nil, err
 	}
-	org, err := s.Store.GetOrg(r.Context(), id)
+	org, err := s.Store.GetOrg(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	writeVersioned(w, http.StatusOK, org.Version, orgJSON(org))
-	return nil
+	out := orgJSON(org)
+	return &out, nil
 }
 
-func (s *Server) updateOrg(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "org")
-	if err != nil {
-		return err
-	}
-	version, err := ifMatch(r)
-	if err != nil {
-		return err
-	}
-	var in OrgInput
-	if err := decode(r, &in); err != nil {
-		return err
+// UpdateOrg changes an org's name or description. version is the org's
+// version when it was read.
+func (s *Service) UpdateOrg(ctx context.Context, p Principal, id string, version int64, in OrgInput) (*Org, error) {
+	if err := inOrg(p, id); err != nil {
+		return nil, err
 	}
 	if in.HostLabel != nil || in.HostSettings != nil {
-		return errInvalid("host_label and host_settings can only be set when creating an org; change the host with PATCH /v1/hosts/{host}")
+		return nil, errInvalid("host_label and host_settings can only be set when creating an org; change the host with PATCH /v1/hosts/{host}")
 	}
-	org, err := s.Store.GetOrg(r.Context(), id)
+	org, err := s.Store.GetOrg(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if in.Name != nil {
 		if org.Name, err = validName(*in.Name); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if in.Description != nil {
 		if org.Description, err = validDescription(*in.Description); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	org.Version = version
-	if err := s.Store.UpdateOrg(r.Context(), org); err != nil {
-		return err
+	if err := s.Store.UpdateOrg(ctx, org); err != nil {
+		return nil, err
 	}
-	writeVersioned(w, http.StatusOK, org.Version, orgJSON(org))
-	return nil
+	out := orgJSON(org)
+	return &out, nil
 }
 
-func (s *Server) setOrgStatus(status string) func(http.ResponseWriter, *http.Request) error {
-	return func(w http.ResponseWriter, r *http.Request) error {
-		id, err := pathValue(r, "org")
-		if err != nil {
-			return err
-		}
-		version, ok, err := optionalIfMatch(r)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			org, err := s.Store.GetOrg(r.Context(), id)
-			if err != nil {
-				return err
-			}
-			version = org.Version
-		}
-		if _, err := s.Store.SetOrgStatus(r.Context(), id, status, version); err != nil {
-			return err
-		}
-		org, err := s.Store.GetOrg(r.Context(), id)
-		if err != nil {
-			return err
-		}
-		writeVersioned(w, http.StatusOK, org.Version, orgJSON(org))
-		return nil
+// SetOrgStatus suspends or reactivates an org (store.OrgSuspended or
+// store.OrgActive). version is the org's version when it was read, or 0
+// for its current version. Only operators suspend orgs.
+func (s *Service) SetOrgStatus(ctx context.Context, p Principal, id, status string, version int64) (*Org, error) {
+	if err := requireOperator(p); err != nil {
+		return nil, err
 	}
+	if version == 0 {
+		org, err := s.Store.GetOrg(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		version = org.Version
+	}
+	if _, err := s.Store.SetOrgStatus(ctx, id, status, version); err != nil {
+		return nil, err
+	}
+	return s.GetOrg(ctx, p, id)
 }
 
 // ---- Pools ----
@@ -261,93 +277,76 @@ type PoolInput struct {
 	MFARequired *bool `json:"mfa_required"`
 }
 
-func (s *Server) createPool(w http.ResponseWriter, r *http.Request) error {
-	orgID, err := pathValue(r, "org")
-	if err != nil {
-		return err
-	}
-	var in PoolInput
-	if err := decode(r, &in); err != nil {
-		return err
+// CreatePool creates a user pool in an org.
+func (s *Service) CreatePool(ctx context.Context, p Principal, orgID string, in PoolInput) (*Pool, error) {
+	if err := inOrg(p, orgID); err != nil {
+		return nil, err
 	}
 	pool := &store.Pool{ID: crypto.NewID(), OrgID: orgID, RequireEmailVerified: deref(in.RequireEmailVerified), MFARequired: deref(in.MFARequired)}
+	var err error
 	if pool.Name, err = validName(deref(in.Name)); err != nil {
-		return err
+		return nil, err
 	}
 	if pool.Description, err = validDescription(deref(in.Description)); err != nil {
-		return err
+		return nil, err
 	}
-	if err := s.Store.CreatePool(r.Context(), pool); err != nil {
-		return err
+	if err := s.Store.CreatePool(ctx, pool); err != nil {
+		return nil, err
 	}
-	writeVersioned(w, http.StatusCreated, pool.Version, poolJSON(pool))
-	return nil
+	out := poolJSON(pool)
+	return &out, nil
 }
 
-// list is the response of every list endpoint.
-type list[T any] struct {
-	Items      []T    `json:"items"`
-	NextCursor string `json:"next_cursor,omitempty"`
-}
-
-func (s *Server) listPools(w http.ResponseWriter, r *http.Request) error {
-	orgID, err := pathValue(r, "org")
+// ListPools lists an org's user pools.
+func (s *Service) ListPools(ctx context.Context, p Principal, orgID string) ([]Pool, error) {
+	if err := inOrg(p, orgID); err != nil {
+		return nil, err
+	}
+	if _, err := s.Store.GetOrg(ctx, orgID); err != nil {
+		return nil, err
+	}
+	pools, err := s.Store.ListPools(ctx, orgID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if _, err := s.Store.GetOrg(r.Context(), orgID); err != nil {
-		return err
-	}
-	pools, err := s.Store.ListPools(r.Context(), orgID)
-	if err != nil {
-		return err
-	}
-	out := list[Pool]{Items: make([]Pool, 0, len(pools))}
+	out := make([]Pool, 0, len(pools))
 	for i := range pools {
-		out.Items = append(out.Items, poolJSON(&pools[i]))
+		out = append(out, poolJSON(&pools[i]))
 	}
-	writeJSON(w, http.StatusOK, out)
-	return nil
+	return out, nil
 }
 
-func (s *Server) getPool(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "pool")
+// GetPool returns a user pool.
+func (s *Service) GetPool(ctx context.Context, p Principal, id string) (*Pool, error) {
+	pool, err := s.Store.GetPool(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	pool, err := s.Store.GetPool(r.Context(), id)
-	if err != nil {
-		return err
+	if err := inOrg(p, pool.OrgID); err != nil {
+		return nil, err
 	}
-	writeVersioned(w, http.StatusOK, pool.Version, poolJSON(pool))
-	return nil
+	out := poolJSON(pool)
+	return &out, nil
 }
 
-func (s *Server) updatePool(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "pool")
+// UpdatePool changes a user pool's settings. version is the pool's
+// version when it was read.
+func (s *Service) UpdatePool(ctx context.Context, p Principal, id string, version int64, in PoolInput) (*Pool, error) {
+	pool, err := s.Store.GetPool(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	version, err := ifMatch(r)
-	if err != nil {
-		return err
-	}
-	var in PoolInput
-	if err := decode(r, &in); err != nil {
-		return err
-	}
-	pool, err := s.Store.GetPool(r.Context(), id)
-	if err != nil {
-		return err
+	if err := inOrg(p, pool.OrgID); err != nil {
+		return nil, err
 	}
 	if in.Name != nil {
 		if pool.Name, err = validName(*in.Name); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if in.Description != nil {
 		if pool.Description, err = validDescription(*in.Description); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if in.RequireEmailVerified != nil {
@@ -357,29 +356,29 @@ func (s *Server) updatePool(w http.ResponseWriter, r *http.Request) error {
 		pool.MFARequired = *in.MFARequired
 	}
 	pool.Version = version
-	if err := s.Store.UpdatePool(r.Context(), pool); err != nil {
-		return err
+	if err := s.Store.UpdatePool(ctx, pool); err != nil {
+		return nil, err
 	}
-	writeVersioned(w, http.StatusOK, pool.Version, poolJSON(pool))
-	return nil
+	out := poolJSON(pool)
+	return &out, nil
 }
 
-// deletePool starts an asynchronous deletion: the pool is marked deleting
-// at once, and the Worker deletes its users and then the pool.
-func (s *Server) deletePool(w http.ResponseWriter, r *http.Request) error {
-	id, err := pathValue(r, "pool")
+// DeletePool starts an asynchronous deletion: the pool is marked deleting
+// at once, and the Worker deletes its users and then the pool. It returns
+// the pool as it is now.
+func (s *Service) DeletePool(ctx context.Context, p Principal, id string) (*Pool, error) {
+	if err := s.authorizePool(ctx, p, id); err != nil {
+		return nil, err
+	}
+	if err := s.Store.MarkPoolDeleting(ctx, id); err != nil {
+		return nil, err
+	}
+	pool, err := s.Store.GetPool(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := s.Store.MarkPoolDeleting(r.Context(), id); err != nil {
-		return err
-	}
-	pool, err := s.Store.GetPool(r.Context(), id)
-	if err != nil {
-		return err
-	}
-	writeJSON(w, http.StatusAccepted, poolJSON(pool))
-	return nil
+	out := poolJSON(pool)
+	return &out, nil
 }
 
 // ---- Signing keys ----
@@ -395,18 +394,22 @@ type SigningKey struct {
 	RetiredAt   string `json:"retired_at,omitempty"`
 }
 
-func (s *Server) listKeys(w http.ResponseWriter, r *http.Request) error {
-	keys, err := s.Store.ListSigningKeys(r.Context())
-	if err != nil {
-		return err
+// ListSigningKeys lists the token signing keys and their rotation status.
+// Only operators see them: one set of keys signs for every org.
+func (s *Service) ListSigningKeys(ctx context.Context, p Principal) ([]SigningKey, error) {
+	if err := requireOperator(p); err != nil {
+		return nil, err
 	}
-	out := list[SigningKey]{Items: make([]SigningKey, 0, len(keys))}
+	keys, err := s.Store.ListSigningKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SigningKey, 0, len(keys))
 	for _, k := range keys {
-		out.Items = append(out.Items, SigningKey{KID: k.KID, Status: k.Status, Alg: k.Alg, KMSKeyARN: k.KMSKeyARN,
+		out = append(out, SigningKey{KID: k.KID, Status: k.Status, Alg: k.Alg, KMSKeyARN: k.KMSKeyARN,
 			CreatedAt: timestamp(k.CreatedAt), ActivatedAt: timestamp(k.ActivatedAt), RetiredAt: timestamp(k.RetiredAt)})
 	}
-	writeJSON(w, http.StatusOK, out)
-	return nil
+	return out, nil
 }
 
 func deref[T any](p *T) T {
