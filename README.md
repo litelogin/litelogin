@@ -43,7 +43,7 @@ dist/litelogin init --org "Acme" --client "Acme Portal" --redirect-uri https://a
 
 With [Claude Code](https://claude.com/claude-code), you can ask for it instead: open Claude Code in the repository and say "deploy LiteLogin to my AWS account". The `litelogin` skill in `.claude/skills` runs `deploy.sh`, brings you each decision (the account, the NS records, every plan before it's applied), and then helps with creating orgs and clients, finding what's wrong, upgrades and removal. See [SelfHosting.md](SelfHosting.md#with-claude-code).
 
-`init` prints an issuer URL, a client ID and a client secret. Point any OpenID Connect library at the issuer: it finds the rest through `/.well-known/openid-configuration`. `litelogin client test` signs in end to end, as an app would. [SelfHosting.md](SelfHosting.md) has every step in full.
+`init` prints an issuer URL, a client ID and a client secret. Point any OpenID Connect library at the issuer: it finds the rest through `/.well-known/openid-configuration`. `litelogin client test` signs in end to end, as an app would, and [examples/go](examples/go/README.md) is a small Go web app that signs in and out. [SelfHosting.md](SelfHosting.md) has every step in full.
 
 ## How it works
 
@@ -69,6 +69,7 @@ Every request is handled by a Lambda function and all state is in two on-demand 
 
 - [SelfHosting.md](SelfHosting.md): deploy LiteLogin in your own AWS account
 - [Local.md](Local.md): run LiteLogin on your machine, sign in, and add a passkey
+- [examples/go/README.md](examples/go/README.md): sign in to a Go web app
 - [Architecture.md](Architecture.md): how it works
 - [Datamodel.md](Datamodel.md): the DynamoDB tables and every access pattern
 - [Cost.md](Cost.md): the monthly cost on AWS, fixed and per request
