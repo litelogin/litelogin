@@ -352,13 +352,9 @@ func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	id := a.sessionID(r)
 	s, signedIn := a.sessions.get(id)
-	if !signedIn {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
 	// The token in the form shows the request came from our own page, and
 	// not from some other site posting here.
-	if subtle.ConstantTimeCompare([]byte(r.PostFormValue("csrf")), []byte(s.CSRF)) != 1 {
+	if signedIn && subtle.ConstantTimeCompare([]byte(r.PostFormValue("csrf")), []byte(s.CSRF)) != 1 {
 		a.fail(w, http.StatusForbidden, "The sign-out request didn't come from this app's page.")
 		return
 	}
@@ -376,8 +372,14 @@ func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := u.Query()
-	q.Set("id_token_hint", s.User.RawIDToken)
 	q.Set("client_id", a.cfg.clientID)
+	// If the app's own session has already expired, we no longer have the
+	// ID token, but LiteLogin's session may still be going. We send the
+	// browser there anyway, without id_token_hint, and LiteLogin asks the
+	// user to confirm before signing them out.
+	if signedIn {
+		q.Set("id_token_hint", s.User.RawIDToken)
+	}
 	if a.cfg.postLogoutRedirectURL != "" {
 		q.Set("post_logout_redirect_uri", a.cfg.postLogoutRedirectURL)
 	}

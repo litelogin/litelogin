@@ -72,7 +72,7 @@ To build a binary, `go build -o dist/go-example ./examples/go` (`dist/` is ignor
 | `/callback` checks that the browser has the cookie for the returned `state` and takes that sign-in off the server, so each response works once. Then it checks `iss` (RFC 9207), exchanges the code with `VerifierOption`, verifies the ID token and compares its nonce. | `handleCallback` |
 | The session is created only at sign-in, with a new random ID, so a session ID planted in the browser beforehand is worthless. | `handleCallback` |
 | `/claims` shows the verified ID token's payload. | `handleClaims` |
-| **Sign out** is a POST with a per-session token. It deletes the app's session and redirects to the issuer's `end_session_endpoint` with `id_token_hint`, `client_id` and `post_logout_redirect_uri`. LiteLogin asks the user to confirm, ends its session and redirects back. | `handleLogout` |
+| **Sign out** is a POST with a per-session token. It deletes the app's session and redirects to the issuer's `end_session_endpoint` with `id_token_hint`, `client_id` and `post_logout_redirect_uri`. LiteLogin asks the user to confirm, ends its session and redirects back. If the app's session has already expired, it still goes to LiteLogin, just without `id_token_hint`, so LiteLogin's session ends too. | `handleLogout` |
 
 The app's session lasts 8 hours, whatever the ID token's expiry. It asks for the `openid` and `email` scopes only. Add `offline_access` and keep `tok.RefreshToken` if the app calls APIs with the access token after it expires.
 

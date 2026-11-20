@@ -215,6 +215,25 @@ func TestSignInAndOut(t *testing.T) {
 		t.Fatalf("signing in again: %d at %s\n%s", p.status, p.url, p.body)
 	}
 
+	// If the app's session has expired by the time the user signs out,
+	// LiteLogin's session still has to end.
+	appAddr, _ := url.Parse(appURL)
+	for _, c := range jar.Cookies(appAddr) {
+		if c.Name == sessionCookie {
+			a.sessions.delete(c.Value)
+		}
+	}
+	p = post(t, b, appURL+"/logout", url.Values{})
+	if !strings.Contains(p.body, `action="/logout"`) {
+		t.Fatalf("expected LiteLogin's logout confirmation after the app's session expired, got %d at %s:\n%s", p.status, p.url, p.body)
+	}
+	p = post(t, b, issuer+"/logout", hiddenFields(p.body))
+	if p.url != appURL+"/" || !strings.Contains(p.body, "not signed in") {
+		t.Fatalf("after logout with an expired session: %d at %s\n%s", p.status, p.url, p.body)
+	}
+	if p := signIn(); !signedIn(p) {
+		t.Fatalf("signing in after logout with an expired session: %d at %s\n%s", p.status, p.url, p.body)
+	}
 }
 
 // TestLoadConfig checks the defaults, and that settings the app can't work
