@@ -1,0 +1,7 @@
+{{define "content"}}
+<section class="message">
+  <h1>{{.Title}}</h1>
+  <p>{{.Error}}</p>
+  {{if .Retry}}<p><a class="button" href="/login">Sign in again</a></p>{{end}}
+</section>
+{{end}}

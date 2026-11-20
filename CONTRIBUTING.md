@@ -28,6 +28,14 @@ dist/litelogin --endpoint http://localhost:8081 init --org Acme --client "Acme P
 
 Locally, orgs get default hosts under `litelogin.localhost`, and browsers resolve every `*.localhost` name to this machine. So the client above signs users in at <http://acme.litelogin.localhost:8080/login>. Emails are printed to the Auth server's output instead of being sent. The Worker doesn't run locally, so items for revoked sessions stay in the Session table, though they no longer work.
 
+The admin console runs next to the Auth server:
+
+```sh
+make run-console    # the admin console on http://localhost:8082
+```
+
+On start it creates the console org (its login host is `console.litelogin.localhost`) and its client, if they don't exist, and gives the client a new secret. Any user of the console org's pool can sign in; the console prints the command that creates one when there's none yet.
+
 [Local.md](Local.md) walks through this step by step, from a clean clone: creating a user, signing in on the login host in a browser, and adding a passkey.
 
 `make help` lists every target.
@@ -55,6 +63,7 @@ By contributing, you agree that your contributions are licensed under the MIT Li
 cmd/
   auth/          Auth Lambda: every endpoint on login hosts
   admin/         Admin Lambda: the Admin API
+  console/       The admin console (local development only, for now)
   worker/        Worker Lambda: background jobs and the reconciler
   rotate/        Key rotation Lambda
   litelogin/     The CLI
@@ -64,6 +73,7 @@ internal/
   store/         DynamoDB access: one function per access pattern in Datamodel.md
   web/           Login, registration, account and OIDC endpoints; templates
   admin/         Admin API: the Service (operations, permission checks) and its JSON handlers
+  console/       Admin console: sign-in, sessions, pages over the Service; templates, htmx
   cli/           CLI commands
   jwt/           KMS signing, JWKS and token verification
   keyrotation/   Signing key lifecycle
@@ -105,7 +115,7 @@ Architecture.md describes the runtime design, and Datamodel.md the tables and ev
 | Fuzz | Host and email normalization, password hash verification | Go native fuzzing |
 | Store integration | Every access pattern, including failures and races | `make test-integration`, against DynamoDB Local |
 | End to end | Sign-in with `coreos/go-oidc` and `golang.org/x/oauth2` as the relying party | `test/e2e`, in `make test-integration` |
-| Browser | Adding a passkey and signing in with it, through the pages' script, in headless Chrome with a virtual WebAuthn authenticator | `internal/web/browser_test.go`, in `make test-integration` (CI requires Chrome) |
+| Browser | Adding a passkey and signing in with it, through the pages' script, in headless Chrome with a virtual WebAuthn authenticator; signing in to the admin console, with htmx under its CSP | `internal/web/browser_test.go` and `test/e2e/console_browser_test.go` (driven by `internal/chrometest`), in `make test-integration` (CI requires Chrome) |
 | Load | Sign-ins and refreshes at a fixed rate | `test/load` (its README) |
 
 Two checks run against a deployed environment, with its AWS credentials:

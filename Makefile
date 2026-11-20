@@ -100,6 +100,10 @@ run-auth: ## Run the Auth Lambda as a local HTTP server on localhost:8080
 run-admin: ## Run the Admin API as a local HTTP server on localhost:8081 (no auth: use --endpoint http://localhost:8081)
 	$(LOCAL_ENV) LITELOGIN_DEFAULT_HOST_DOMAIN=litelogin.localhost go run ./cmd/admin
 
+.PHONY: run-console
+run-console: ## Run the admin console on localhost:8082 (needs make run-auth; sets up the console org and client)
+	$(LOCAL_ENV) go run ./cmd/console
+
 .PHONY: cli
 cli: ## Build the litelogin CLI for this machine as dist/litelogin
 	go build -trimpath -o dist/litelogin ./cmd/litelogin

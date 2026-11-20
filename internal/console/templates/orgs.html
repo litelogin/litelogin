@@ -1,0 +1,21 @@
+{{define "content"}}
+<h1>Orgs</h1>
+{{if .Orgs}}
+<table>
+  <thead><tr><th>Name</th><th>Default login host</th><th>Status</th><th>Created</th></tr></thead>
+  <tbody>
+  {{range .Orgs}}
+    <tr>
+      <td><a href="/orgs/{{.ID}}">{{.Name}}</a></td>
+      <td><code>{{.DefaultHost}}</code></td>
+      <td><span class="status status-{{.Status}}">{{.Status}}</span></td>
+      <td>{{.CreatedAt}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{if .NextPage}}<p><a href="{{.NextPage}}">Next page</a></p>{{end}}
+{{else}}
+<p class="empty">There are no orgs yet.</p>
+{{end}}
+{{end}}

@@ -345,6 +345,19 @@ litelogin user create --pool {pool} --email admin@acme.com --invite
 litelogin user revoke-sessions {user}
 ```
 
+## Admin console
+
+A web console for operators who don't use the CLI (#52). It's in progress: it runs locally (`make run-console`), and its deployment, as its own Lambda function behind CloudFront, comes next.
+
+- **Same service, no API calls.** The console's pages (`internal/console`) call `admin.Service` in their own process, as the Admin API's handlers do. There's no HTTP call to the Admin Lambda and no second copy of its logic.
+- **A client of LiteLogin.** The console is a confidential client on the console org's login host. It signs admins in with the authorization code flow, PKCE and a nonce, with a state bound to the browser by a cookie, and verifies the ID token's signature, issuer, audience and expiry.
+- **Every console admin is an operator.** Any active user of the console org's pool can sign in, and manages every org. The console checks the user's pool on every request, so a token for another client or pool never gives access. Roles limited to some orgs come later: `admin.Service` already checks a `Principal` limited to a list of orgs.
+- **Its own sessions.** A console session is an opaque `__Host-` cookie backed by a `CONSOLE_SESSION` item (Datamodel.md, "Admin console sign-in"): 8 hours at most, and 1 hour idle. The user is read on every request, so disabling an admin, or signing them out everywhere, ends their console session at once. Signing out ends the console session, then the login host's (RP-initiated logout).
+- **Server-rendered pages with htmx.** Pages are `html/template`, and work without JavaScript. htmx 4 is embedded, and `TestHTMXHash` checks it against its published SHA-384. Links are boosted (`hx-boost:inherited`), and a request with `HX-Request-Type: partial` gets only the page's content block. Static files are served at content-hashed paths that can be cached for good.
+- **Strict CSP.** `default-src 'none'`, with scripts, styles and fetches from the console only: no inline script or style, and no `unsafe-eval`. The htmx features that evaluate JavaScript (`hx-on`, trigger filters, `js:` values) can't run, and a test fails on any template that uses them, or an inline script, style or event handler.
+- **CSRF.** Every POST must pass `http.CrossOriginProtection` (Sec-Fetch-Site or Origin) and carry the double-submit token from its `__Host-` cookie. Pages use only GET and POST.
+- **Audit log.** Every POST is logged as `console audit`, with the admin's user ID and email.
+
 ## Management integration
 
 The admin API is the contract between LiteLogin and every management tool, including the CLI.

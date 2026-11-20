@@ -1,0 +1,96 @@
+:root {
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --text: #1d1d1b;
+  --muted: #62625d;
+  --line: #e2e2dc;
+  --accent: #2e5bba;
+  --ok: #1f7a45;
+  --warn: #9a5b00;
+  --bad: #b3261e;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --surface: #1f1f1d;
+    --text: #ecece8;
+    --muted: #a3a39c;
+    --line: #34342f;
+    --accent: #8fb0ff;
+    --ok: #6fcf97;
+    --warn: #e5b45a;
+    --bad: #ff8a80;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+a { color: var(--accent); }
+code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 24px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+.brand { font-weight: 600; color: var(--text); text-decoration: none; }
+.brand span { color: var(--muted); font-weight: 400; }
+.top nav { display: flex; gap: 16px; flex: 1; }
+.me { display: flex; align-items: center; gap: 16px; color: var(--muted); }
+.me form { margin: 0; }
+button.link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 1.6rem; margin: 0 0 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+h2 { font-size: 1.15rem; margin: 32px 0 8px; }
+.crumbs { margin: 0 0 4px; color: var(--muted); }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  display: block;
+  overflow-x: auto;
+}
+thead, tbody { display: table; width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 0.85rem; }
+tbody tr:last-child td { border-bottom: 0; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0 0 8px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; }
+.status { font-size: 0.8rem; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.status-active, .status-verified { color: var(--ok); }
+.status-pending, .status-deleting, .status-removing { color: var(--warn); }
+.status-suspended, .status-disabled { color: var(--bad); }
+.empty { color: var(--muted); }
+.message { max-width: 560px; margin: 48px auto; }
+.button {
+  display: inline-block;
+  padding: 8px 16px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--surface);
+  text-decoration: none;
+  font-weight: 600;
+}
+/* htmx's request indicators (its own CSS is off: the CSP allows only this file). */
+.htmx-indicator { opacity: 0; visibility: hidden; }
+.htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; visibility: visible; transition: opacity 200ms ease-in; }

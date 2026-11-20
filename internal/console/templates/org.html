@@ -1,0 +1,36 @@
+{{define "content"}}
+<p class="crumbs"><a href="/orgs">Orgs</a></p>
+<h1>{{.Org.Name}} <span class="status status-{{.Org.Status}}">{{.Org.Status}}</span></h1>
+{{if .Org.Description}}<p>{{.Org.Description}}</p>{{end}}
+<dl class="facts">
+  <dt>Org ID</dt><dd><code>{{.Org.ID}}</code></dd>
+  <dt>Default login host</dt><dd><code>{{.Org.DefaultHost}}</code></dd>
+  <dt>Created</dt><dd>{{.Org.CreatedAt}}</dd>
+</dl>
+
+<h2>Applications</h2>
+{{if .Clients}}
+<table>
+  <thead><tr><th>Name</th><th>Client ID</th><th>Type</th><th>Status</th></tr></thead>
+  <tbody>
+  {{range .Clients}}<tr><td>{{.Name}}</td><td><code>{{.ID}}</code></td><td>{{.ClientType}}</td><td><span class="status status-{{.Status}}">{{.Status}}</span></td></tr>{{end}}
+  </tbody>
+</table>
+{{else}}<p class="empty">No applications yet.</p>{{end}}
+
+<h2>Login hosts</h2>
+<table>
+  <thead><tr><th>Host</th><th>Type</th><th>Status</th><th>Issuer</th></tr></thead>
+  <tbody>
+  {{range .Hosts}}<tr><td><code>{{.Host}}</code></td><td>{{.Type}}</td><td><span class="status status-{{.Status}}">{{.Status}}</span></td><td><code>{{.Issuer}}</code></td></tr>{{end}}
+  </tbody>
+</table>
+
+<h2>User pools</h2>
+<table>
+  <thead><tr><th>Name</th><th>Pool ID</th><th>Status</th><th>Two-factor sign-in</th></tr></thead>
+  <tbody>
+  {{range .Pools}}<tr><td>{{.Name}}</td><td><code>{{.ID}}</code></td><td><span class="status status-{{.Status}}">{{.Status}}</span></td><td>{{if .MFARequired}}Required{{else}}Optional{{end}}</td></tr>{{end}}
+  </tbody>
+</table>
+{{end}}
