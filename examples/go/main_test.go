@@ -129,14 +129,18 @@ func TestSignInAndOut(t *testing.T) {
 	appSrv.Config.Handler = a.routes()
 	appSrv.Start()
 
-	// A stand-in for the browser. It follows redirects like a real one and
-	// remembers the callback URL, so we can try replaying it later.
+	// A stand-in for the browser. It follows redirects like a real one, and
+	// remembers the last authorization request and callback it was sent
+	// to, so we can pick a sign-in up again or replay a callback.
 	jar, _ := cookiejar.New(nil)
-	var callback string
+	var authorize, callback string
 	b := &http.Client{Transport: transport, Jar: jar, Timeout: 10 * time.Second,
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			if strings.HasPrefix(req.URL.String(), appURL+"/callback?") {
-				callback = req.URL.String()
+			switch u := req.URL.String(); {
+			case strings.HasPrefix(u, issuer+"/authorize?"):
+				authorize = u
+			case strings.HasPrefix(u, appURL+"/callback?"):
+				callback = u
 			}
 			return nil
 		}}
@@ -156,9 +160,25 @@ func TestSignInAndOut(t *testing.T) {
 		form.Set("password", userPassword)
 		return post(t, b, issuer+"/login", form)
 	}
-	home := signIn()
-	if home.url != appURL+"/" || !strings.Contains(home.body, "Signed in as <strong>"+userEmail+"</strong>") {
-		t.Fatalf("after sign-in: %d at %s\n%s", home.status, home.url, home.body)
+	signedIn := func(p page) bool {
+		return p.url == appURL+"/" && strings.Contains(p.body, "Signed in as <strong>"+userEmail+"</strong>")
+	}
+
+	// Two tabs: the first starts a sign-in and stops at LiteLogin's login
+	// page, then the second signs in all the way.
+	if p := get(t, b, appURL+"/login"); !strings.Contains(p.body, `action="/login"`) {
+		t.Fatalf("expected the login page, got %d:\n%s", p.status, p.body)
+	}
+	firstTab := authorize
+	if p := signIn(); !signedIn(p) {
+		t.Fatalf("after sign-in: %d at %s\n%s", p.status, p.url, p.body)
+	}
+	// The first tab can still finish its sign-in. LiteLogin already has a
+	// session, so it goes straight back to the app with the first tab's
+	// state.
+	home := get(t, b, firstTab)
+	if !signedIn(home) {
+		t.Fatalf("finishing the first tab's sign-in: %d at %s\n%s", home.status, home.url, home.body)
 	}
 
 	// The claims page should show what LiteLogin put in the ID token.
@@ -191,9 +211,10 @@ func TestSignInAndOut(t *testing.T) {
 	}
 	// If LiteLogin's session really ended, signing in again has to ask
 	// for the password. signIn fails if it doesn't.
-	if home := signIn(); !strings.Contains(home.body, "Signed in as") {
-		t.Fatalf("signing in again: %d at %s\n%s", home.status, home.url, home.body)
+	if p := signIn(); !signedIn(p) {
+		t.Fatalf("signing in again: %d at %s\n%s", p.status, p.url, p.body)
 	}
+
 }
 
 // TestLoadConfig checks the defaults, and that settings the app can't work

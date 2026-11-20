@@ -48,7 +48,7 @@ In PowerShell, set each variable with `$env:ISSUER_URL = "..."` and so on.
 
 The app logs `listening on localhost:3000`. Open <http://localhost:3000>, click **Sign in**, and sign in on LiteLogin's page. You come back signed in, with a link to your ID token's claims and a **Sign out** button. Signing out shows LiteLogin's confirmation page, then brings you back to the app, signed out of both.
 
-Use `localhost`, not `127.0.0.1`: the session cookie belongs to the name you opened the app on, and LiteLogin sends the browser back to the redirect URI's.
+Use `localhost`, not `127.0.0.1`: the app's cookies belong to the name you opened the app on, and LiteLogin sends the browser back to the redirect URI's.
 
 To build a binary, `go build -o dist/go-example ./examples/go` (`dist/` is ignored by git). A plain `go build ./examples/go` names it `go`, after the directory.
 
@@ -68,9 +68,9 @@ To build a binary, `go build -o dist/go-example ./examples/go` (`dist/` is ignor
 | Step | Where |
 | -- | -- |
 | At startup, `oidc.NewProvider` reads the issuer's discovery document: its endpoints, keys and `end_session_endpoint`. | `newApp` |
-| `/login` creates a `state`, a `nonce` and a PKCE verifier, keeps them in the browser's session, and redirects to the issuer with `AuthCodeURL`, the nonce and `S256ChallengeOption`. | `handleLogin` |
-| `/callback` takes the sign-in with the returned `state` from the session (so each response works once), checks `iss` (RFC 9207), exchanges the code with `VerifierOption`, verifies the ID token and compares its nonce. | `handleCallback` |
-| After sign-in, the app starts a new session with a new ID, so a session ID set before sign-in can't be used afterwards. | `sessionStore.signIn` |
+| `/login` creates a `state`, a `nonce` and a PKCE verifier. It keeps the nonce and verifier on the server under the state, sets a short-lived `login_<state>` cookie for `/callback`, and redirects to the issuer with `AuthCodeURL`, the nonce and `S256ChallengeOption`. Each sign-in has its own state and cookie, so sign-ins in several tabs don't get in each other's way. | `handleLogin` |
+| `/callback` checks that the browser has the cookie for the returned `state` and takes that sign-in off the server, so each response works once. Then it checks `iss` (RFC 9207), exchanges the code with `VerifierOption`, verifies the ID token and compares its nonce. | `handleCallback` |
+| The session is created only at sign-in, with a new random ID, so a session ID planted in the browser beforehand is worthless. | `handleCallback` |
 | `/claims` shows the verified ID token's payload. | `handleClaims` |
 | **Sign out** is a POST with a per-session token. It deletes the app's session and redirects to the issuer's `end_session_endpoint` with `id_token_hint`, `client_id` and `post_logout_redirect_uri`. LiteLogin asks the user to confirm, ends its session and redirects back. | `handleLogout` |
 
@@ -79,7 +79,7 @@ The app's session lasts 8 hours, whatever the ID token's expiry. It asks for the
 ## Running it for real
 
 - Serve the app over https and register https URIs: `REDIRECT_URL=https://app.example.com/callback` and `POST_LOGOUT_REDIRECT_URL=https://app.example.com/`. The session cookie is then marked `Secure`. Behind a proxy that terminates TLS, set `LISTEN_ADDR` to the address the proxy forwards to.
-- Sessions are in memory, so restarting the app signs everyone out, and several instances don't share them. Keep them in a shared store, such as a database or Redis, instead.
+- Sign-ins in progress and sessions are kept in memory, so restarting the app signs everyone out, and several instances don't share them. Keep them in a shared store, such as a database or Redis, instead.
 
 To copy the app out of this repository, copy `main.go` into a new module and run `go mod init` and `go mod tidy`. `main_test.go` uses LiteLogin's internal packages, so leave it behind.
 
@@ -96,5 +96,5 @@ make test-integration
 
 - **`discovery: oidc: issuer URL provided to client (...) did not match the issuer URL returned by provider (...)`.** Set `ISSUER_URL` to the issuer in the discovery document exactly. Locally that's the `http://...:8080` one.
 - **LiteLogin says the return address isn't registered.** The redirect URI or post-logout redirect URI isn't on the client exactly as the app sends it, including the port and the trailing slash. Check with `litelogin client get CLIENT_ID`.
-- **"This sign-in response doesn't match a sign-in started in this browser, or it expired."** The browser didn't send the session cookie back: the app was opened on another name than the redirect URI's (`127.0.0.1` and `localhost` are different), the app restarted during the sign-in, or the sign-in took more than 10 minutes. Start again from the home page.
+- **"This sign-in response doesn't match a sign-in started in this browser, or it expired."** The browser didn't send back the cookie the sign-in started with, or the app no longer has the sign-in. Either the app was opened on another name than the redirect URI's (`127.0.0.1` and `localhost` are different), the app restarted during the sign-in, or the sign-in took more than 10 minutes. Start again from the home page.
 - **Signing out says the request isn't valid for this application.** The ID token no longer verifies. Locally, restarting the Auth server creates a new signing key, so tokens from before the restart don't verify: sign in again first.

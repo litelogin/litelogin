@@ -44,6 +44,10 @@ import (
 
 const (
 	sessionCookie = "example_session"
+	// loginCookiePrefix names the cookie that ties a sign-in to the browser
+	// that started it: login_<state>. Each sign-in gets its own cookie, so
+	// signing in from several tabs at once works.
+	loginCookiePrefix = "login_"
 	// loginTimeout is how long we wait between sending someone off to sign
 	// in and seeing them come back. Ten minutes is plenty to type a
 	// password or find a passkey.
@@ -51,9 +55,6 @@ const (
 	// sessionLifetime is how long someone stays signed in to this app. It's
 	// the app's own session, so it doesn't care when the ID token expires.
 	sessionLifetime = 8 * time.Hour
-	// maxPendingLogins caps how many sign-ins one browser can have going at
-	// once, say from a few open tabs, so one session can't grow forever.
-	maxPendingLogins = 5
 )
 
 func main() {
@@ -136,7 +137,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 	return cfg, nil
 }
 
-// app is the web app itself: the OpenID Connect client plus the sessions.
+// app is the web app itself: the OpenID Connect client, the sign-ins in
+// progress, and the sessions of signed-in users.
 type app struct {
 	cfg      config
 	http     *http.Client
@@ -150,9 +152,10 @@ type app struct {
 	// is suspicious, so we turn it away.
 	requireIss bool
 	// secure is true when the app is served over https, which is when its
-	// cookie can be marked Secure.
+	// cookies can be marked Secure.
 	secure   bool
-	sessions *sessionStore
+	logins   *expiringMap[pendingLogin] // by state
+	sessions *expiringMap[session]      // by session ID
 }
 
 // newApp reads the issuer's discovery document, which tells us its
@@ -187,7 +190,8 @@ func newApp(ctx context.Context, cfg config, client *http.Client) (*app, error) 
 		endSession: meta.EndSession,
 		requireIss: meta.IssParameter,
 		secure:     cfg.redirectURL.Scheme == "https",
-		sessions:   newSessionStore(),
+		logins:     newExpiringMap[pendingLogin](),
+		sessions:   newExpiringMap[session](),
 	}, nil
 }
 
@@ -208,56 +212,53 @@ func (a *app) routes() http.Handler {
 	return securityHeaders(mux)
 }
 
-// handleHome shows who's signed in, or a link to sign in.
+// handleHome shows who's signed in, or a link to sign in. When nobody is,
+// s is empty and the page shows the link.
 func (a *app) handleHome(w http.ResponseWriter, r *http.Request) {
-	s := a.sessions.get(a.sessionID(r))
-	page := struct {
-		User *user
-		CSRF string
-	}{}
-	if s != nil {
-		page.User, page.CSRF = s.user, s.csrf
-	}
-	render(w, http.StatusOK, "home", page)
+	s, _ := a.sessions.get(a.sessionID(r))
+	render(w, http.StatusOK, "home", s)
 }
 
 // handleClaims shows what's in the signed-in user's ID token. If nobody is
 // signed in there's nothing to show, so we send them home.
 func (a *app) handleClaims(w http.ResponseWriter, r *http.Request) {
-	s := a.sessions.get(a.sessionID(r))
-	if s == nil {
+	s, ok := a.sessions.get(a.sessionID(r))
+	if !ok {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	render(w, http.StatusOK, "claims", struct{ User *user }{s.user})
+	render(w, http.StatusOK, "claims", s)
 }
 
 // handleLogin starts a sign-in. It makes a fresh state, nonce and PKCE
-// verifier, keeps them in this browser's session, and sends the browser
+// verifier, keeps the nonce and verifier on the server under the state,
+// marks this browser with a cookie for that state, and sends the browser
 // off to LiteLogin.
 func (a *app) handleLogin(w http.ResponseWriter, r *http.Request) {
-	p := pendingLogin{
-		state:    rand.Text(),
-		nonce:    rand.Text(),
-		verifier: oauth2.GenerateVerifier(),
-		expires:  time.Now().Add(loginTimeout),
-	}
-	id := a.sessions.addPending(a.sessionID(r), p)
-	a.setSessionCookie(w, id)
-	authURL := a.oauth.AuthCodeURL(p.state, oidc.Nonce(p.nonce), oauth2.S256ChallengeOption(p.verifier))
+	state := rand.Text()
+	p := pendingLogin{nonce: rand.Text(), verifier: oauth2.GenerateVerifier()}
+	a.logins.put(state, p, loginTimeout)
+	a.setCookie(w, loginCookiePrefix+state, "1", "/callback", loginTimeout)
+	authURL := a.oauth.AuthCodeURL(state, oidc.Nonce(p.nonce), oauth2.S256ChallengeOption(p.verifier))
 	http.Redirect(w, r, authURL, http.StatusSeeOther)
 }
 
 // handleCallback is where LiteLogin sends the browser back. Before we trust
 // anything in the response, we make sure it belongs to a sign-in this
 // browser started. Then we trade the code for tokens, check the ID token
-// and its nonce, and sign the user in with a brand new session.
+// and its nonce, and start a session for the user.
 func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	id := a.sessionID(r)
-	// First, the state has to match a sign-in this browser really started.
-	// takePending also removes it, so nobody can replay the same response.
-	p, ok := a.sessions.takePending(id, q.Get("state"))
+	state := q.Get("state")
+	// First, the state has to be one this browser started: it carries the
+	// matching cookie. Taking the sign-in out of the map means nobody can
+	// replay the same response.
+	if _, err := r.Cookie(loginCookiePrefix + state); state == "" || err != nil {
+		a.fail(w, http.StatusBadRequest, "This sign-in response doesn't match a sign-in started in this browser, or it expired.")
+		return
+	}
+	a.clearCookie(w, loginCookiePrefix+state, "/callback")
+	p, ok := a.logins.take(state)
 	if !ok {
 		a.fail(w, http.StatusBadRequest, "This sign-in response doesn't match a sign-in started in this browser, or it expired.")
 		return
@@ -318,11 +319,16 @@ func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Start a brand new session instead of reusing the one from before
-	// sign-in. If someone planted a session ID in this browser beforehand,
-	// it's now worthless (that's session fixation).
-	newID := a.sessions.signIn(id, &user{Subject: idToken.Subject, Email: claims.Email, Claims: pretty.String(), RawIDToken: rawIDToken})
-	a.setSessionCookie(w, newID)
+	// The session starts here, with a brand new ID, so nobody can plant a
+	// session ID in this browser beforehand (session fixation). A session
+	// from an earlier sign-in in this browser is replaced.
+	a.sessions.delete(a.sessionID(r))
+	id := rand.Text()
+	a.sessions.put(id, session{
+		User: user{Subject: idToken.Subject, Email: claims.Email, Claims: pretty.String(), RawIDToken: rawIDToken},
+		CSRF: rand.Text(),
+	}, sessionLifetime)
+	a.setCookie(w, sessionCookie, id, "/", 0)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -334,19 +340,19 @@ func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
 func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 	id := a.sessionID(r)
-	s := a.sessions.get(id)
-	if s == nil {
+	s, signedIn := a.sessions.get(id)
+	if !signedIn {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 	// The token in the form shows the request came from our own page, and
 	// not from some other site posting here.
-	if subtle.ConstantTimeCompare([]byte(r.PostFormValue("csrf")), []byte(s.csrf)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(r.PostFormValue("csrf")), []byte(s.CSRF)) != 1 {
 		a.fail(w, http.StatusForbidden, "The sign-out request didn't come from this app's page.")
 		return
 	}
 	a.sessions.delete(id)
-	a.clearSessionCookie(w)
+	a.clearCookie(w, sessionCookie, "/")
 	// If the issuer has no logout endpoint, signing out of the app is all
 	// we can do.
 	if a.endSession == "" {
@@ -359,7 +365,7 @@ func (a *app) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := u.Query()
-	q.Set("id_token_hint", s.user.RawIDToken)
+	q.Set("id_token_hint", s.User.RawIDToken)
 	q.Set("client_id", a.cfg.clientID)
 	if a.cfg.postLogoutRedirectURL != "" {
 		q.Set("post_logout_redirect_uri", a.cfg.postLogoutRedirectURL)
@@ -376,26 +382,29 @@ func (a *app) sessionID(r *http.Request) string {
 	return ""
 }
 
-func (a *app) setSessionCookie(w http.ResponseWriter, id string) {
-	// Secure is only set over https. Plain http is just for running on
-	// your own machine, the one place LiteLogin accepts http redirect URIs.
+// setCookie sets an HttpOnly, SameSite=Lax cookie on path. A maxAge of 0
+// makes it last until the browser closes.
+//
+// Secure is only set over https. Plain http is just for running on your own
+// machine, the one place LiteLogin accepts http redirect URIs.
+func (a *app) setCookie(w http.ResponseWriter, name, value, path string, maxAge time.Duration) {
 	http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure is set whenever we're on https
-		Name: sessionCookie, Value: id, Path: "/",
+		Name: name, Value: value, Path: path, MaxAge: int(maxAge.Seconds()),
 		HttpOnly: true, Secure: a.secure, SameSite: http.SameSiteLaxMode,
 	})
 }
 
-// clearSessionCookie tells the browser to forget the session cookie.
-func (a *app) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // same reasoning as setSessionCookie
-		Name: sessionCookie, Value: "", Path: "/", MaxAge: -1,
+// clearCookie tells the browser to forget a cookie.
+func (a *app) clearCookie(w http.ResponseWriter, name, path string) {
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // same reasoning as setCookie
+		Name: name, Value: "", Path: path, MaxAge: -1,
 		HttpOnly: true, Secure: a.secure, SameSite: http.SameSiteLaxMode,
 	})
 }
 
 // fail shows an error page with a short explanation.
 func (a *app) fail(w http.ResponseWriter, status int, msg string) {
-	render(w, status, "error", struct{ Message string }{msg})
+	render(w, status, "error", msg)
 }
 
 // securityHeaders keeps the pages out of caches, since they show who's
@@ -410,7 +419,20 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// ---- Sessions ----
+// ---- Sign-ins and sessions ----
+
+// pendingLogin is a sign-in we've sent to the issuer and are waiting to
+// hear back about. It's kept under its state.
+type pendingLogin struct {
+	nonce, verifier string
+}
+
+// session is a signed-in user's session.
+type session struct {
+	User user
+	// CSRF is the token the logout form carries.
+	CSRF string
+}
 
 // user is someone who has signed in.
 type user struct {
@@ -421,139 +443,68 @@ type user struct {
 	RawIDToken string
 }
 
-// pendingLogin is a sign-in we've sent to the issuer and are waiting to
-// hear back about.
-type pendingLogin struct {
-	state, nonce, verifier string
-	expires                time.Time
+// expiringMap is a map whose entries go away after a while. It keeps
+// everything in memory, which is fine for an example, but a real app would
+// use a shared store such as a database or Redis, so sign-ins and sessions
+// survive a restart and work across several instances.
+type expiringMap[T any] struct {
+	mu      sync.Mutex
+	entries map[string]expiringEntry[T]
 }
 
-// session is one browser's session. Until someone signs in, it holds the
-// sign-ins in progress. After that, it holds the signed-in user.
-type session struct {
+type expiringEntry[T any] struct {
+	value   T
 	expires time.Time
-	pending []pendingLogin // sign-ins still in progress
-	user    *user          // set once someone has signed in
-	// csrf is the token the logout form carries. It's set at sign-in.
-	csrf string
 }
 
-// sessionStore keeps sessions in memory, by ID. That's fine for an
-// example, but a real app would use a shared store such as a database, so
-// sessions survive a restart and work across several instances.
-type sessionStore struct {
-	mu       sync.Mutex
-	sessions map[string]*session
+func newExpiringMap[T any]() *expiringMap[T] {
+	return &expiringMap[T]{entries: map[string]expiringEntry[T]{}}
 }
 
-func newSessionStore() *sessionStore {
-	return &sessionStore{sessions: map[string]*session{}}
-}
-
-// get returns the session with this ID if someone is signed in to it, or
-// nil.
-func (s *sessionStore) get(id string) *session {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess := s.live(id)
-	if sess == nil || sess.user == nil {
-		return nil
-	}
-	return sess
-}
-
-// addPending adds a sign-in to the session with this ID, starting a new
-// session if there isn't one yet, and returns the session's ID. Sign-ins
-// that have expired get dropped along the way.
-func (s *sessionStore) addPending(id string, p pendingLogin) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess := s.live(id)
-	if sess == nil {
-		s.sweep()
-		id = rand.Text()
-		sess = &session{expires: p.expires}
-		s.sessions[id] = sess
-	}
+// put stores value under key for ttl. It also clears out expired entries
+// while it's there, so the map doesn't keep growing.
+func (m *expiringMap[T]) put(key string, value T, ttl time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	now := time.Now()
-	kept := sess.pending[:0]
-	for _, old := range sess.pending {
-		if now.Before(old.expires) {
-			kept = append(kept, old)
+	for k, e := range m.entries {
+		if !now.Before(e.expires) {
+			delete(m.entries, k)
 		}
 	}
-	if len(kept) >= maxPendingLogins {
-		kept = kept[1:] // too many at once, so let the oldest go
-	}
-	sess.pending = append(kept, p)
-	// Keep the session around at least as long as this sign-in.
-	if sess.expires.Before(p.expires) {
-		sess.expires = p.expires
-	}
-	return id
+	m.entries[key] = expiringEntry[T]{value: value, expires: now.Add(ttl)}
 }
 
-// takePending finds the sign-in with this state, removes it and returns
-// it. It reports false if there's no such sign-in, or if it has expired.
-func (s *sessionStore) takePending(id, state string) (pendingLogin, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sess := s.live(id)
-	if sess == nil || state == "" {
-		return pendingLogin{}, false
+// get returns the value under key, if it's there and hasn't expired.
+func (m *expiringMap[T]) get(key string) (T, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[key]
+	if !ok || !time.Now().Before(e.expires) {
+		var zero T
+		return zero, false
 	}
-	for i, p := range sess.pending {
-		if subtle.ConstantTimeCompare([]byte(p.state), []byte(state)) == 1 {
-			sess.pending = append(sess.pending[:i], sess.pending[i+1:]...)
-			return p, time.Now().Before(p.expires)
-		}
-	}
-	return pendingLogin{}, false
+	return e.value, true
 }
 
-// signIn throws away the session with oldID and starts a new, signed-in
-// one in its place. It returns the new session's ID.
-func (s *sessionStore) signIn(oldID string, u *user) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.sessions, oldID)
-	s.sweep()
-	id := rand.Text()
-	s.sessions[id] = &session{expires: time.Now().Add(sessionLifetime), user: u, csrf: rand.Text()}
-	return id
+// take is get, but it also removes the entry, so it can be used only once.
+func (m *expiringMap[T]) take(key string) (T, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[key]
+	delete(m.entries, key)
+	if !ok || !time.Now().Before(e.expires) {
+		var zero T
+		return zero, false
+	}
+	return e.value, true
 }
 
-// delete removes the session with this ID.
-func (s *sessionStore) delete(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.sessions, id)
-}
-
-// live returns the session with this ID if it hasn't expired, or nil.
-// Expired sessions are removed as we come across them. The caller holds
-// s.mu.
-func (s *sessionStore) live(id string) *session {
-	sess, ok := s.sessions[id]
-	if !ok {
-		return nil
-	}
-	if !time.Now().Before(sess.expires) {
-		delete(s.sessions, id)
-		return nil
-	}
-	return sess
-}
-
-// sweep clears out every expired session. It runs whenever a session is
-// created, so the map doesn't keep growing. The caller holds s.mu.
-func (s *sessionStore) sweep() {
-	now := time.Now()
-	for id, sess := range s.sessions {
-		if !now.Before(sess.expires) {
-			delete(s.sessions, id)
-		}
-	}
+// delete removes the entry under key, if there is one.
+func (m *expiringMap[T]) delete(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.entries, key)
 }
 
 // ---- Pages ----
@@ -581,7 +532,7 @@ var pages = template.Must(template.New("").Parse(`
 {{end}}
 
 {{define "home"}}{{template "top"}}
-{{if .User}}
+{{if .User.Subject}}
 <p>Signed in as <strong>{{or .User.Email .User.Subject}}</strong>.</p>
 <p><a href="/claims">Your ID token's claims</a></p>
 <form method="post" action="/logout">
@@ -602,7 +553,7 @@ var pages = template.Must(template.New("").Parse(`
 {{template "bottom"}}{{end}}
 
 {{define "error"}}{{template "top"}}
-<p>{{.Message}}</p>
+<p>{{.}}</p>
 <p><a href="/">Home</a></p>
 {{template "bottom"}}{{end}}
 `))
