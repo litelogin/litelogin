@@ -161,6 +161,8 @@ Not counted, because they are a few cents or less: SQS (the work queues and dead
 
 **Storage** depends on users, not sign-ins. DynamoDB storage is free up to 25 GB, and point-in-time recovery on the Config table costs $0.20 per GB-month of that table. At about 1 KB a user, 100,000 users are 0.1 GB: $0.02 a month.
 
+**The admin console** is optional (`console`, SelfHosting.md) and adds almost nothing: its CloudFront distribution has no fixed charge, and shares the login hosts' web ACL in Full; in Lean it's on a Free plan of its own, with its web ACL. Its client secret is a standard SSM parameter, at no charge. It adds the Console Lambda's alarms: 2 in Full ($0.20), 1 in Lean ($0.10). Its requests are an operator's page views, a few thousand a month.
+
 **Custom login hosts** are tenants of a CloudFront multi-tenant distribution. The first 10 tenants have no charge; see the CloudFront pricing page for more. They are optional (`custom_hosts = false` leaves the distribution out), which costs nothing either way.
 
 ## Totals

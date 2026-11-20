@@ -5,3 +5,10 @@ alarm_email         = "ops@example.com"
 
 # "full" (the default) or "lean" for small deployments (Cost.md, "Setups").
 # setup = "lean"
+
+# The admin console, on console.<default_host_domain>, once its org and
+# client exist (SelfHosting.md, "Admin console").
+# console = {
+#   client_id = "<the console client's ID>"
+#   issuer    = "https://admin.login.example.com"
+# }

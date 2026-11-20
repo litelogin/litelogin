@@ -19,6 +19,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/route53 v1.71.0
 	github.com/aws/aws-sdk-go-v2/service/sesv2 v1.79.9
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.53.0
+	github.com/aws/aws-sdk-go-v2/service/ssm v1.81.4
 	github.com/aws/aws-sdk-go-v2/service/sts v1.52.0
 	github.com/aws/smithy-go v1.28.9
 	github.com/coreos/go-oidc/v3 v3.21.0

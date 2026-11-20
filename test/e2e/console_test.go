@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,7 +46,16 @@ func TestConsoleSignIn(t *testing.T) {
 	srv.URL = base
 	srv.Service = &admin.Service{Store: h.st, Cursor: cursor, DefaultHostDomain: "login.test"}
 	client, secret := h.newClient(t, "Console", "confidential", []string{ts.URL + "/callback"}, []string{ts.URL + "/signed-out"})
-	srv.ClientID, srv.ClientSecret = client.ID, secret
+	// The secret comes from a source read at every exchange, as SSM is in
+	// Lambda: an old one in ClientSecret isn't used.
+	var secretReads atomic.Int64
+	srv.ClientID, srv.ClientSecret = client.ID, "not-the-secret"
+	srv.SecretSource = func(context.Context) (string, error) { secretReads.Add(1); return secret, nil }
+	t.Cleanup(func() {
+		if secretReads.Load() == 0 {
+			t.Error("the secret source was never read")
+		}
+	})
 	handler = httpx.SecurityHeaders(srv.Handler())
 
 	jar, _ := cookiejar.New(nil)

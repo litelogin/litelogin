@@ -213,6 +213,56 @@ dist/litelogin client test CLIENT
 
 `dist/litelogin help` lists every command. With Claude Code, you can ask for these tasks in your own words ([With Claude Code](#with-claude-code)).
 
+## Admin console
+
+The admin console is a web interface for the same work as the CLI, at `https://console.<default_host_domain>`. It's optional. Its admins sign in through LiteLogin itself, on the login host of an org kept for them, the console org. **Every user of the console org manages every org**, as an Admin API caller does, so keep its users to the people who run the deployment.
+
+1. Create the console org, with registration off. Its login host is `admin.<default_host_domain>` here; any label but `console` works:
+
+   ```sh
+   dist/litelogin org create --name Console --host-label admin --registration=false --passkeys
+   dist/litelogin pool update POOL --name "Console admins" --mfa-required
+   ```
+
+   `POOL` is the org's `default_pool_id`. `--mfa-required` makes every admin set up an authenticator app at their first sign-in.
+
+2. Create the console's client. Its secret isn't needed: step 4 replaces it, so don't keep the output.
+
+   ```sh
+   dist/litelogin client create --org ORG --host admin.login.example.com --name Console \
+     --grant-types authorization_code \
+     --redirect-uri https://console.login.example.com/callback \
+     --post-logout-redirect-uri https://console.login.example.com/signed-out -o json > /dev/null
+   dist/litelogin client list --org ORG    # the client's ID
+   ```
+
+3. Turn the console on in `terraform.tfvars`, then plan and apply as in [5. Deploy](#5-deploy):
+
+   ```hcl
+   console = {
+     client_id = "<the client's ID>"
+     issuer    = "https://admin.login.example.com"
+   }
+   ```
+
+   This adds the console's Lambda and a CloudFront distribution for `console.<default_host_domain>`. With `cloudfront_plan = "free"` the distribution gets a Free plan and a web ACL of its own (an account can have three Free plans); otherwise it shares the login hosts' web ACL.
+
+4. Give the client a secret, stored where the console reads it. The `console_rotate_secret_command` output is this command with your values:
+
+   ```sh
+   dist/litelogin console rotate-secret --client CLIENT --parameter /litelogin-<environment>/console/client-secret
+   ```
+
+   It stores the new secret in that SSM parameter (a SecureString) and never shows it. It needs `ssm:PutParameter` on the parameter, besides the Admin API. Run it again to rotate the secret; the console uses the new one from its next sign-in.
+
+5. Invite the admins. Each gets an email to set a password:
+
+   ```sh
+   dist/litelogin user create --pool POOL --email you@example.com --invite
+   ```
+
+To turn the console off, set `console = null` and apply. Terraform doesn't remove the parameter, which it never managed: `aws ssm delete-parameter --name /litelogin-<environment>/console/client-secret`.
+
 ## Custom domains
 
 An org can serve sign-in on its own domain, such as `login.acme.com`:
@@ -353,8 +403,9 @@ The [Claude Code skill](#with-claude-code) can take you through these steps, ask
 1. Remove every custom host (`litelogin host remove`) and wait until `litelogin host list` no longer shows them. Their CloudFront tenants are created by LiteLogin, not by Terraform, and the distribution they belong to can't be deleted while they exist.
 2. Set `deletion_protection = false` on the `litelogin` module in `main.tf`, then plan and apply.
 3. Run `tofu destroy`.
-4. Schedule deletion of the signing keys, which Terraform didn't create. They're tagged `litelogin-purpose=token-signing` and `litelogin-environment=<environment>`.
-5. Delete the NS records for `default_host_domain` at its parent domain's DNS provider. Records left pointing at the deleted Route 53 zone let anyone who creates a zone of that name serve your login hosts' domain. Check each of the parent's name servers: `dig +norec +noall +authority NS <domain> @<parent name server>` should print nothing.
+4. Delete the console's client secret parameter, if the console was on, which Terraform didn't create: `aws ssm delete-parameter --name /litelogin-<environment>/console/client-secret`.
+5. Schedule deletion of the signing keys, which Terraform didn't create. They're tagged `litelogin-purpose=token-signing` and `litelogin-environment=<environment>`.
+6. Delete the NS records for `default_host_domain` at its parent domain's DNS provider. Records left pointing at the deleted Route 53 zone let anyone who creates a zone of that name serve your login hosts' domain. Check each of the parent's name servers: `dig +norec +noall +authority NS <domain> @<parent name server>` should print nothing.
 
 KMS keys are deleted after AWS's waiting period. The state bucket is left for you to delete.
 

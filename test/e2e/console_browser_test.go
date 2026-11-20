@@ -27,7 +27,7 @@ import (
 )
 
 // TestConsoleInChrome uses the console in Chrome as local development
-// does: the login host is console.litelogin.localhost and the console is
+// does: the login host is login.litelogin.localhost and the console is
 // on localhost, both over HTTP. It checks that htmx runs under the
 // console's CSP, that links are boosted, and that signing in and out work
 // in a real browser.

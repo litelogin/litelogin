@@ -221,3 +221,7 @@ output "function_arn" {
 output "function_url" {
   value = module.admin.function_url
 }
+
+output "cursor_key_arn" {
+  value = aws_kms_key.cursor.arn
+}

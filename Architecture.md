@@ -32,6 +32,7 @@ flowchart LR
         AdminFn["Admin Lambda"]
         Worker["Worker Lambda"]
         Rotate["Key rotation Lambda"]
+        ConsoleFn["Console Lambda (optional)"]
     end
 
     subgraph Data
@@ -47,6 +48,9 @@ flowchart LR
     Browser --> CF
     RP --> CF
     CF -->|"login hosts"| AuthFn
+    CF -->|"console host"| ConsoleFn
+    ConsoleFn --> Config
+    ConsoleFn --> Session
 
     AuthFn --> Config
     AuthFn --> Session
@@ -78,6 +82,7 @@ flowchart LR
 | `litelogin` CLI | Command-line client for the admin API, including bootstrapping a new deployment |
 | Worker Lambda | Background jobs (revocation cleanup, pool deletion, custom domain onboarding and removal). Config table changes start them; a scheduled reconciler retries any that stall. |
 | Key rotation Lambda | Signing key rotation on a schedule (see "Rotate signing keys" in the data model) |
+| Console Lambda | The optional admin console, on its own CloudFront distribution (see [Admin console](#admin-console)) |
 | DynamoDB | Config table (orgs, clients, pools, users, hosts, keys) and Session table (sessions, codes, refresh tokens, one-time tokens) |
 | DynamoDB Streams | Change feed on the Config table that triggers the Worker Lambda, whether the change came from the Auth Lambda or the Admin Lambda |
 | KMS | Asymmetric RSA signing keys. Private keys never leave KMS. |
@@ -347,8 +352,11 @@ litelogin user revoke-sessions {user}
 
 ## Admin console
 
-A web console for operators who don't use the CLI (#52). It's in progress: it runs locally (`make run-console`), and its deployment, as its own Lambda function behind CloudFront, comes next.
+A web console for operators who don't use the CLI (#52), at `https://console.{default_host_domain}`. It's optional: the environment's `console` variable turns it on (SelfHosting.md, "Admin console"). Locally it runs with `make run-console`.
 
+- **Deployment.** The Console Lambda (`cmd/console`) is behind its own CloudFront distribution, with the default hosts' wildcard certificate and the same origin secret check as the Auth Lambda. On CloudFront's Free plan the distribution has a plan and a web ACL of its own; otherwise it shares the login hosts' web ACL. Pages aren't cached; static files, at content-hashed paths, are. `console` is a reserved host label, so no org can take `console.{default_host_domain}` as a login host.
+- **Least privilege.** The Console Lambda reads the Config table, and may touch only its own `CONSOLE_LOGIN` and `CONSOLE_SESSION` items in the Session table (an IAM `dynamodb:LeadingKeys` condition), so it can't read or end anyone's login-host sessions or tokens. It shares the Admin API's cursor key. Pages that change things will widen this as they're added.
+- **The client secret** is in an SSM SecureString, read at every sign-in, so rotating it takes effect at once. `litelogin console rotate-secret` sets it without showing it. Terraform doesn't manage the parameter: reading it would put the secret in the state, which the plan role can read.
 - **Same service, no API calls.** The console's pages (`internal/console`) call `admin.Service` in their own process, as the Admin API's handlers do. There's no HTTP call to the Admin Lambda and no second copy of its logic.
 - **A client of LiteLogin.** The console is a confidential client on the console org's login host. It signs admins in with the authorization code flow, PKCE and a nonce, with a state bound to the browser by a cookie, and verifies the ID token's signature, issuer, audience and expiry.
 - **Every console admin is an operator.** Any active user of the console org's pool can sign in, and manages every org. The console checks the user's pool on every request, so a token for another client or pool never gives access. Roles limited to some orgs come later: `admin.Service` already checks a `Principal` limited to a list of orgs.

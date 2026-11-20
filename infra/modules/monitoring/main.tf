@@ -20,7 +20,7 @@ variable "name_prefix" {
 }
 
 variable "function_names" {
-  description = "The environment's Lambda functions, by role (auth, admin, worker, rotate)."
+  description = "The environment's Lambda functions, by role (auth, admin, worker, rotate, and console when it's deployed)."
   type        = map(string)
 }
 

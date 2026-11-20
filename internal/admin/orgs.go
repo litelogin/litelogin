@@ -101,6 +101,9 @@ func (s *Service) CreateOrg(ctx context.Context, p Principal, in OrgInput) (*Org
 	if !hostLabel.MatchString(label) {
 		return nil, errInvalid("host_label must be 1-63 letters, digits and hyphens, not starting or ending with a hyphen")
 	}
+	if label == ConsoleLabel {
+		return nil, errConflict("host_taken", "the host "+label+"."+s.DefaultHostDomain+" is the admin console's: choose another host_label")
+	}
 	host := &store.LoginHost{Host: label + "." + s.DefaultHostDomain, HostSettings: defaultHostSettings()}
 	if err := in.HostSettings.apply(&host.HostSettings); err != nil {
 		return nil, err
@@ -116,6 +119,10 @@ func (s *Service) CreateOrg(ctx context.Context, p Principal, in OrgInput) (*Org
 	out.DefaultPoolID = pool.ID
 	return &out, nil
 }
+
+// ConsoleLabel is reserved: console.{DefaultHostDomain} is the admin
+// console's own host, not a login host.
+const ConsoleLabel = "console"
 
 // ListOptions selects a page of a paginated list.
 type ListOptions struct {

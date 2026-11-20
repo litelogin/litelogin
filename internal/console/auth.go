@@ -138,7 +138,14 @@ func (s *Server) callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hctx := oidc.ClientContext(ctx, c.http)
-	tok, err := c.oauth.Exchange(hctx, q.Get("code"), oauth2.VerifierOption(login.Verifier))
+	oauth := *c.oauth
+	if s.SecretSource != nil {
+		if oauth.ClientSecret, err = s.SecretSource(ctx); err != nil {
+			s.fail(w, r, nil, fmt.Errorf("console: client secret: %w", err))
+			return
+		}
+	}
+	tok, err := oauth.Exchange(hctx, q.Get("code"), oauth2.VerifierOption(login.Verifier))
 	if err != nil {
 		s.log().WarnContext(ctx, "console code exchange failed", "error", err)
 		s.render(w, r, nil, http.StatusBadRequest, "error", pageData{Title: "Sign-in failed", Error: "The sign-in couldn't be completed.", Retry: true})

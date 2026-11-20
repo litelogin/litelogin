@@ -67,11 +67,15 @@ type Server struct {
 	// URL is the console's own origin, e.g. https://console.example.com.
 	URL *url.URL
 	// Issuer is the console org's login host, e.g.
-	// https://console.login.example.com.
+	// https://login.example.com.
 	Issuer string
 	// ClientID and ClientSecret are the console's client, a confidential
 	// client on the issuer's host.
 	ClientID, ClientSecret string
+	// SecretSource, if set, is used instead of ClientSecret: it's called
+	// for every code exchange, so a rotated secret takes effect without a
+	// restart.
+	SecretSource func(context.Context) (string, error)
 	// HTTP makes the console's requests to the issuer. nil uses a client
 	// with a timeout.
 	HTTP *http.Client

@@ -34,7 +34,7 @@ The admin console runs next to the Auth server:
 make run-console    # the admin console on http://localhost:8082
 ```
 
-On start it creates the console org (its login host is `console.litelogin.localhost`) and its client, if they don't exist, and gives the client a new secret. Any user of the console org's pool can sign in; the console prints the command that creates one when there's none yet.
+On start it creates the console org (its login host is `login.litelogin.localhost`, as in a deployment) and its client, if they don't exist, and gives the client a new secret. Any user of the console org's pool can sign in; the console prints the command that creates one when there's none yet.
 
 [Local.md](Local.md) walks through this step by step, from a clean clone: creating a user, signing in on the login host in a browser, and adding a passkey.
 
@@ -63,7 +63,7 @@ By contributing, you agree that your contributions are licensed under the MIT Li
 cmd/
   auth/          Auth Lambda: every endpoint on login hosts
   admin/         Admin Lambda: the Admin API
-  console/       The admin console (local development only, for now)
+  console/       Console Lambda: the optional admin console
   worker/        Worker Lambda: background jobs and the reconciler
   rotate/        Key rotation Lambda
   litelogin/     The CLI

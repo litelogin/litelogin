@@ -239,7 +239,7 @@ build() {
   if [[ "$SKIP_BUILD" == true || -n "$APPLY_PLAN" ]]; then
     # A saved plan applies the packages it was made with: rebuilding them
     # could change what it uploads.
-    for f in auth admin worker rotate; do
+    for f in auth admin worker rotate console; do
       [[ -f "${ROOT}/dist/${f}.zip" ]] || die "dist/${f}.zip is missing: run without --skip-build"
     done
     [[ -x "$CLI" ]] || die "dist/litelogin is missing: run make cli"
@@ -247,7 +247,7 @@ build() {
   fi
   log "Building the Lambda packages and the CLI (make package cli)"
   make -C "$ROOT" package cli >/dev/null
-  info "dist/: auth.zip, admin.zip, worker.zip, rotate.zip, litelogin"
+  info "dist/: auth.zip, admin.zip, worker.zip, rotate.zip, console.zip, litelogin"
 }
 
 tf() { (cd "$ENV_DIR" && "$TF" "$@"); }

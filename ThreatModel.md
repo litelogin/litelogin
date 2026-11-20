@@ -22,7 +22,7 @@ What LiteLogin protects, from whom, and how, with each control checked against t
 3. **Relying parties ↔ `/token`, `/userinfo`.** Clients are identified, and confidential ones authenticated, on every request.
 4. **Tenant ↔ tenant.** Login hosts, pools and clients of different orgs share tables and functions.
 5. **Operators ↔ Admin API.** IAM-authenticated; anyone allowed to call it manages every org.
-6. **Admins ↔ admin console.** Not deployed yet (it runs locally only). Every user of the console org is an operator (F10).
+6. **Admins ↔ admin console.** Optional. Behind CloudFront and WAF on `console.{domain}`, like the login hosts; every user of the console org is an operator (F10).
 7. **Source ↔ running code.** The build and deploy pipeline, and whoever can change Lambda code directly.
 
 ## Threats and controls
@@ -104,7 +104,7 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 
 ### Admin console
 
-Not deployed yet: it runs locally only (Architecture.md, "Admin console"). The edge controls (CloudFront, WAF, the origin secret) come with its deployment.
+Optional, on `console.{domain}` (Architecture.md, "Admin console").
 
 | Threat | Control | Status |
 | -- | -- | -- |
@@ -113,6 +113,10 @@ Not deployed yet: it runs locally only (Architecture.md, "Admin console"). The e
 | A stolen or stale console session | Opaque 256-bit `__Host-` cookie, `HttpOnly`, `SameSite=Lax`, stored hashed; 8 hours at most and 1 hour idle. The user is read on every request: disabling them or signing them out everywhere ends it at once (internal/console/console.go; `TestSignedOut`, `TestConsoleSignIn`) | verified |
 | Cross-site requests that change something | `http.CrossOriginProtection` (Sec-Fetch-Site or Origin), and the double-submit token from a `__Host-` cookie on every POST (internal/console/console.go; `TestPagesAndCSRF`) | verified |
 | Script injection into console pages | `html/template` escaping; CSP `default-src 'none'` with scripts and styles from the console only, and no `unsafe-eval`, so htmx can't evaluate JavaScript; a test refuses templates with `hx-on`, trigger filters, `js:` values, inline scripts, styles or event handlers, and a Chrome test fails on any CSP violation (internal/console/render.go; `TestTemplatesDontNeedEval`, `TestConsoleInChrome`) | verified |
+| Reaching the Console Lambda without CloudFront and WAF | Its function URL serves only requests carrying the origin secret, as the Auth Lambda's does (cmd/console, internal/httpx) | verified |
+| An org taking the console's host as a login host | `console` is a reserved host label (internal/admin/orgs.go; `TestCreateOrgDefaultHost`) | verified |
+| The client secret leaking | An SSM SecureString, set by `litelogin console rotate-secret`, which never prints it. Terraform doesn't manage the parameter, so it isn't in the state; the plan role can't read parameters (infra/modules/console; internal/cli/console.go, `TestConsoleRotateSecret`) | verified |
+| A flaw in the console reaching login-host credentials | Its IAM role reads the Config table and touches only `CONSOLE_LOGIN#` and `CONSOLE_SESSION#` items in the Session table (`dynamodb:LeadingKeys`); no KMS signing, no SES, no secrets of identity providers (infra/modules/console) | verified |
 | A changed copy of htmx | Embedded, not loaded from a CDN, and checked against the SHA-384 of the published release (`TestHTMXHash`) | verified |
 | Open redirect after signing in | The return path must be a path on the console (`safeReturn`, `TestSafeReturn`) | verified |
 
@@ -146,7 +150,7 @@ Not deployed yet: it runs locally only (Architecture.md, "Admin console"). The e
 
 **F9 — Pull request plans run branch code with AWS credentials (fixed, with a residual risk accepted).** The plan role had all of `ReadOnlyAccess`, and code from any branch of the repository runs with it, since `terraform plan` runs the branch's HCL (and a branch can add its own workflow). Anyone with push access could read password hashes, emails and encrypted TOTP secrets from the tables, and logs, without being able to approve a prod deploy. The role now denies reading table items, log events, queue messages, WAF sampled requests, secrets and parameters, and every use of KMS keys, for the whole account; `make package` runs before the job gets credentials. *Accepted:* the role still reads the Terraform state, which a plan needs. Its only secret is the origin secret, which CloudFront's configuration, readable by the same role, shows anyway; with it, someone can call the function URL without going through CloudFront and WAF, but can't get at any account. *Later:* run prod plans in a GitHub environment that needs approval, with the prod plan role trusting only that environment. Existing accounts get the change by running `scripts/bootstrap-account.sh` again.
 
-**F10 — Every console admin is an operator (accepted, for now).** Any active user of the console org's pool can sign in to the console and manage every org, as an Admin API caller can (F3). So the console org's users, and its login host, are as valuable as IAM access to the Admin API: an account taken over there is every org. *Mitigations when it's deployed:* the console pool requires two-factor sign-in and its host has registration off. *Later:* roles limited to some orgs (`admin.Service` already checks a principal limited to a list of orgs), and signing in again before destructive actions.
+**F10 — Every console admin is an operator (accepted, for now).** Any active user of the console org's pool can sign in to the console and manage every org, as an Admin API caller can (F3). So the console org's users, and its login host, are as valuable as IAM access to the Admin API: an account taken over there is every org. *Mitigations:* SelfHosting.md has the console pool require two-factor sign-in and its host turn registration off, and dev's console org is set up that way. *Later:* roles limited to some orgs (`admin.Service` already checks a principal limited to a list of orgs), and signing in again before destructive actions.
 
 ## Not covered here
 
