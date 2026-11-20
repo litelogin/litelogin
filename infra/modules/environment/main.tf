@@ -1,6 +1,6 @@
 # A whole LiteLogin environment in one AWS account: tables, signing keys,
 # the Auth, Admin, Worker and Rotate Lambdas, CloudFront and WAF, email
-# and monitoring. Each environment's root module (infra/envs/*)
+# and monitoring, and optionally the admin console. Each environment's root module (infra/envs/*)
 # configures the AWS provider and state backend and calls this module;
 # a self-hosted deployment does the same (SelfHosting.md).
 #
@@ -37,7 +37,7 @@ variable "default_host_domain" {
 }
 
 variable "package_dir" {
-  description = "Directory holding the Lambda packages built by make package (auth.zip, admin.zip, worker.zip, rotate.zip)."
+  description = "Directory holding the Lambda packages built by make package (auth.zip, admin.zip, worker.zip, rotate.zip, console.zip)."
   type        = string
 }
 
@@ -125,6 +125,22 @@ variable "table_encryption" {
   }
 }
 
+
+variable "console" {
+  description = <<-EOT
+    The admin console, on console.{default_host_domain} (Architecture.md,
+    "Admin console"; SelfHosting.md, "Admin console"). Null: no console.
+    client_id is the console's client, a confidential client on the
+    console org's login host, and issuer is that host, e.g.
+    https://login.example.com. After the first deploy, run the
+    console_rotate_secret_command output.
+  EOT
+  type = object({
+    client_id = string
+    issuer    = string
+  })
+  default = null
+}
 
 variable "rate_limit_exempt_cidrs" {
   description = "Addresses exempt from WAF rate limits, only while a load test runs (test/load/README.md)."
@@ -339,6 +355,32 @@ module "admin" {
   reduced_metrics            = local.reduced_metrics
 }
 
+module "console" {
+  source = "../console"
+  count  = var.console == null ? 0 : 1
+
+  name_prefix          = local.name_prefix
+  zip_path             = "${var.package_dir}/console.zip"
+  code_signing         = module.codesigning.code_signing
+  domain               = var.default_host_domain
+  zone_id              = module.dns.zone_id
+  certificate_arn      = module.edge.certificate_arn
+  client_id            = var.console.client_id
+  issuer               = var.console.issuer
+  origin_secret        = module.edge.origin_secret
+  origin_secret_hashes = module.edge.origin_secret_hashes
+  web_acl_arn          = module.edge.web_acl_arn
+  free_plan            = local.free_plan
+  config_table_name    = module.tables.config_table_name
+  config_table_arn     = module.tables.config_table_arn
+  session_table_name   = module.tables.session_table_name
+  session_table_arn    = module.tables.session_table_arn
+  table_kms_key_arn    = module.kms.tables_key_arn
+  cursor_key_arn       = module.admin.cursor_key_arn
+  system_log_level     = local.system_log_level
+  reduced_metrics      = local.reduced_metrics
+}
+
 module "jobs" {
   source             = "../jobs"
   name_prefix        = local.name_prefix
@@ -370,12 +412,12 @@ module "monitoring" {
   alarm_email     = var.alarm_email
   reduced_metrics = local.reduced_metrics
   dashboard       = local.dashboard
-  function_names = {
+  function_names = merge({
     auth   = module.auth.function_name
     admin  = module.admin.function_name
     worker = module.jobs.worker_function_name
     rotate = module.signing.rotate_function_name
-  }
+  }, var.console == null ? {} : { console = module.console[0].function_name })
   table_names = [module.tables.config_table_name, module.tables.session_table_name]
 }
 
@@ -413,6 +455,16 @@ output "admin_function_name" {
 output "admin_url" {
   description = "Admin API endpoint (AWS_IAM auth). Use with: litelogin --endpoint <url>, or litelogin configure --environment <environment>."
   value       = module.admin.function_url
+}
+
+output "console_url" {
+  description = "The admin console, or null without it."
+  value       = var.console == null ? null : module.console[0].url
+}
+
+output "console_rotate_secret_command" {
+  description = "Gives the console's client a new secret, stored where the console reads it. Run it after the first deploy (with --profile or --environment), and to rotate."
+  value       = var.console == null ? null : module.console[0].rotate_secret_command
 }
 
 output "worker_function_name" {

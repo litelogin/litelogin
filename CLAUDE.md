@@ -30,11 +30,12 @@ The Makefile pins `GOTOOLCHAIN` to the `toolchain` line in `go.mod`. `TF` defaul
 
 ## Architecture
 
-There are four Lambdas, each `cmd/<name>` → `dist/<name>.zip`:
+There are five Lambdas, each `cmd/<name>` → `dist/<name>.zip`:
 - **auth**: every endpoint on login hosts, the sign-in pages and OIDC (`internal/web`).
 - **admin**: the IAM-authenticated Admin API that the CLI calls (`internal/admin`, `internal/cli`).
 - **worker**: consumes the Config table's stream (revocation, custom hosts on CloudFront) and runs a 5-minute reconciler.
 - **rotate**: daily KMS signing-key rotation (`internal/keyrotation`).
+- **console**: the optional admin console on `console.{domain}`, over `admin.Service` (`internal/console`).
 
 State is two on-demand DynamoDB tables:
 - **Config**: orgs, pools, users, clients, hosts.

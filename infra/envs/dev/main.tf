@@ -132,6 +132,13 @@ module "litelogin" {
   lambda_logs             = var.lambda_logs
   table_encryption        = var.table_encryption
   rate_limit_exempt_cidrs = var.rate_limit_exempt_cidrs
+
+  # The console org (host label "login") and its client were made with
+  # the CLI (SelfHosting.md, "Admin console").
+  console = {
+    client_id = "d996ade6-4235-430e-b8f4-cc305c4c4098"
+    issuer    = "https://login.${var.default_host_domain}"
+  }
 }
 
 # The environment's resources moved into module.litelogin.
@@ -240,3 +247,12 @@ output "dashboard" {
   value       = module.litelogin.dashboard
 }
 
+output "console_url" {
+  description = "The admin console, or null without it."
+  value       = module.litelogin.console_url
+}
+
+output "console_rotate_secret_command" {
+  description = "Gives the console's client a new secret, stored where the console reads it. Run it after the first deploy, and to rotate."
+  value       = module.litelogin.console_rotate_secret_command
+}

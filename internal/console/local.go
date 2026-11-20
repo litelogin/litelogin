@@ -22,17 +22,21 @@ type LocalClient struct {
 // localOperator sets up local development as the deployment's operator.
 var localOperator = admin.Principal{ID: "console-local-setup", Operator: true}
 
+// LocalLabel is the console org's host label in local development:
+// its login host is login.{domain}, as in a deployment.
+const LocalLabel = "login"
+
 // SetUpLocal makes sure the console org (with its default login host,
-// console.{domain}) and the console client exist, for local development
+// login.{domain}) and the console client exist, for local development
 // only. The client's secret is replaced on every run, since only this
 // process needs it.
 func SetUpLocal(ctx context.Context, svc *admin.Service, consoleURL string) (*LocalClient, error) {
-	host := "console." + svc.DefaultHostDomain
+	host := LocalLabel + "." + svc.DefaultHostDomain
 	out := &LocalClient{Host: host}
 	h, err := svc.Store.GetLoginHost(ctx, host)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		name, label := "Console", "console"
+		name, label := "Console", LocalLabel
 		org, err := svc.CreateOrg(ctx, localOperator, admin.OrgInput{Name: &name, HostLabel: &label})
 		if err != nil {
 			return nil, err

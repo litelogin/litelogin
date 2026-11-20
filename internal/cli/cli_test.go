@@ -37,6 +37,24 @@ type env struct {
 	mail     *email.Recorder
 	ids      atomic.Int64
 	config   string
+	params   fakeParameters
+}
+
+// fakeParameters records the SSM parameters a command stores.
+type fakeParameters struct {
+	values map[string]string
+	err    error
+}
+
+func (f *fakeParameters) PutSecureString(_ context.Context, name, value string) error {
+	if f.err != nil {
+		return f.err
+	}
+	if f.values == nil {
+		f.values = map[string]string{}
+	}
+	f.values[name] = value
+	return nil
 }
 
 func newEnv(t *testing.T) *env {
@@ -94,7 +112,7 @@ func (e *env) run(stdin string, args ...string) string {
 
 func (e *env) try(stdin string, args ...string) (string, string, int) {
 	var out, errOut bytes.Buffer
-	app := &App{Stdout: &out, Stderr: &errOut, Stdin: strings.NewReader(stdin), ConfigFile: e.config, NewID: func() string {
+	app := &App{Stdout: &out, Stderr: &errOut, Stdin: strings.NewReader(stdin), ConfigFile: e.config, Parameters: &e.params, NewID: func() string {
 		return fmt.Sprintf("key-%s-%d", e.t.Name(), e.ids.Add(1))
 	}}
 	code := Execute(app, append([]string{"--endpoint", e.endpoint}, args...))

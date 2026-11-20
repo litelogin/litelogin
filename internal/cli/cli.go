@@ -39,6 +39,9 @@ type App struct {
 	NewID func() string
 	// ConfigFile overrides the config file's path (default: ConfigPath).
 	ConfigFile string
+	// Parameters stores SSM parameters (default: SSM, with the AWS
+	// credentials).
+	Parameters ParameterWriter
 
 	profile     string
 	endpoint    string
@@ -103,6 +106,7 @@ API endpoint comes from --endpoint, $LITELOGIN_ENDPOINT, --environment
 		app.userCommand(),
 		app.keysCommand(),
 		app.statusCommand(),
+		app.consoleCommand(),
 	)
 	return root
 }

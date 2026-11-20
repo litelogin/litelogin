@@ -633,3 +633,18 @@ output "origin_secret_hashes" {
   description = "SHA-256 (hex) of both origin secrets, for the Auth Lambda."
   value       = [for k in ["a", "b"] : sha256(random_password.origin[k].result)]
 }
+
+output "certificate_arn" {
+  description = "The validated wildcard certificate for *.{domain}."
+  value       = aws_acm_certificate_validation.wildcard.certificate_arn
+}
+
+output "web_acl_arn" {
+  value = aws_wafv2_web_acl.this.arn
+}
+
+output "origin_secret" {
+  description = "The origin secret CloudFront sends, for other distributions in front of LiteLogin's Lambdas."
+  value       = random_password.origin[var.active_origin_secret].result
+  sensitive   = true
+}

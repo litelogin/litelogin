@@ -293,7 +293,9 @@ func TestCreateOrgDefaultHost(t *testing.T) {
 	}{
 		{`{"name":"Acme"}`, 201},
 		{`{"name":"Other","host_label":"acme"}`, 409}, // taken
-		{`{"name":"!!!"}`, 400},                       // no label from the name
+		{`{"name":"Console"}`, 409},                   // the console's host
+		{`{"name":"x","host_label":"Console"}`, 409},
+		{`{"name":"!!!"}`, 400}, // no label from the name
 		{`{"name":"x","host_label":"-bad"}`, 400},
 		{`{"name":"x","host_label":"a.b"}`, 400},
 		{`{"name":"x","host_label":"Login-1"}`, 201},

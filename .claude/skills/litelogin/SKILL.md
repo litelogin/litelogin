@@ -15,7 +15,7 @@ These hold for every task, whatever the user's wording.
 - **Before anything that changes an account, show its account ID** (`aws sts get-caller-identity`) and the environment, and have the user confirm the pair. A confirmation covers that account and environment only.
 - **Never apply a plan the user hasn't seen.** No `apply -auto-approve`, no `terraform apply` without a saved plan, no `aws lambda update-function-code` (the functions only accept code signed by the environment's Signer profile anyway). Use `scripts/deploy.sh`, which shows each plan and applies only a saved one.
 - **Destructive commands need an explicit yes for that command**: deleting or disabling clients, users, pools, orgs or hosts; `user revoke-sessions`; `client rotate-secret` (the old secret stops working at once); `org suspend`; anything in "Remove a deployment".
-- **Client secrets are shown once.** Show the secret to the user and tell them to store it now; don't write it to a file, a log or the repository.
+- **Client secrets are shown once.** Show the secret to the user and tell them to store it now; don't write it to a file, a log or the repository. The admin console's client is the exception: `console rotate-secret` stores its secret in SSM without showing it, so never print that one.
 - **Don't commit** `infra/envs/<environment>/terraform.tfvars`, `backend.hcl` or plan files (they're git-ignored; keep it that way) unless the user asks for the environment to be in git.
 
 ## Deploy a new environment, or upgrade one
@@ -80,6 +80,14 @@ Lean logs only failed requests (`lambda_logs = "failures"`), so a quiet log ther
 - **Custom login hosts** (Full, or `custom_hosts = true`): `host add --org ORG login.acme.com` shows a `cname_target`; the domain's owner adds the CNAME; `host get login.acme.com` shows progress (`work_last_error` says what it's waiting for, usually 10–20 minutes); then `host add-client login.acme.com CLIENT`. Warn the user that a client on a new host has a new issuer, so its app must be reconfigured, and apps that key users by `iss` + `sub` will see them as new. SelfHosting.md, "Custom domains".
 - **Identity providers for social sign-in** (OpenID Connect providers work; GitHub and Apple can be configured but aren't shown yet): `idp create --pool POOL --id google --type oidc --name Google --issuer https://accounts.google.com --client-id ID --client-secret-file FILE` (`--type github`; `--type apple` with `--apple-team-id`, `--apple-key-id`, `--apple-private-key-file`). Secrets come from files or stdin (`-`), never flags, and are never shown again. `--trust-email-verified` (off by default; for Google and Apple) takes the provider's `email_verified` for new users, and `--mfa-amr`/`--mfa-acr` (none by default) say which `amr`/`acr` values count as two factors; ask the user before turning either on. The org registers `https://HOST/federation/callback` for each of the pool's hosts with the provider (`idp get POOL IDP` lists them). `host update HOST --idps google,github` shows them on a host's sign-in page (`org create` has no `--idps`: a new pool has no providers); `idp remove` refuses while a host lists it. A provider account whose email is already registered isn't linked automatically: the user links it from their account page. `user identity list USER` shows a user's linked accounts; `user identity unlink USER IDP` needs an explicit yes (it logs the user out everywhere and can remove their last way to sign in). SelfHosting.md, "Social sign-in".
 - **Signing keys**: `keys list` shows the active key and the rotation.
+- **The admin console** (optional; SelfHosting.md, "Admin console"), on `https://console.<domain>`. Every console admin manages every org, so confirm who should be one. Setting it up, with a yes before each step:
+  1. `org create --name Console --host-label admin --registration=false --passkeys` (any label but the reserved `console`), then `pool update POOL --name "Console admins" --mfa-required` on its `default_pool_id`.
+  2. `client create --org ORG --host <label>.<domain> --name Console --grant-types authorization_code --redirect-uri https://console.<domain>/callback --post-logout-redirect-uri https://console.<domain>/signed-out -o json`: show only its `id`, and discard the secret without printing it (step 4 replaces it).
+  3. Set `console = { client_id = "...", issuer = "https://<label>.<domain>" }` in `infra/envs/<environment>/terraform.tfvars` and run `scripts/deploy.sh <environment>`, plan stop as usual. The plan adds the Console Lambda and a CloudFront distribution (taking 10–20 minutes).
+  4. Run the `console_rotate_secret_command` output with `--profile <profile>` (`tofu output -raw console_rotate_secret_command` in the environment's directory). It also rotates the secret later.
+  5. Invite each admin: `user create --pool POOL --email <email> --invite`. At their first sign-in they set up an authenticator app.
+
+  "Sign-in failed" on the console after a deploy usually means step 4 hasn't run. To turn the console off: `console = null`, deploy, then `aws ssm delete-parameter --name /litelogin-<environment>/console/client-secret`.
 
 ## Remove a deployment
 
@@ -94,8 +102,9 @@ Follow SelfHosting.md, "Removing a deployment", in order, with the user's yes be
    AWS_PROFILE=<profile> tofu apply destroy.tfplan
    ```
    Use `terraform` if that's what's installed (the script's output says which).
-4. Schedule deletion of the token signing keys, which the rotate function created (tagged `litelogin-environment=<environment>`, `litelogin-purpose=token-signing`). Check the tags of each key before scheduling it.
-5. **Have the user delete the NS records for the domain at the parent's DNS provider**, then confirm with the parent-server loop above that no server returns them, reading the authority section. A delegation left pointing at the deleted zone can be taken over. Don't report removal done until it's gone everywhere.
-6. Optionally, delete the state bucket (`litelogin-tofu-state-<account>`; it's versioned, so delete every version and delete marker first) and `infra/envs/<environment>`.
+4. If the console was on, delete its secret parameter, which Terraform didn't create: `aws ssm delete-parameter --name /litelogin-<environment>/console/client-secret`.
+5. Schedule deletion of the token signing keys, which the rotate function created (tagged `litelogin-environment=<environment>`, `litelogin-purpose=token-signing`). Check the tags of each key before scheduling it.
+6. **Have the user delete the NS records for the domain at the parent's DNS provider**, then confirm with the parent-server loop above that no server returns them, reading the authority section. A delegation left pointing at the deleted zone can be taken over. Don't report removal done until it's gone everywhere.
+7. Optionally, delete the state bucket (`litelogin-tofu-state-<account>`; it's versioned, so delete every version and delete marker first) and `infra/envs/<environment>`.
 
 KMS keys are deleted after their waiting period, and AWS Signer keeps canceled signing profiles forever (they cost nothing). An environment can be deployed again in the same account afterwards.
