@@ -248,6 +248,8 @@ Holds short-lived authentication state: browser sessions, authorization codes, r
 | MFA#{pending_hash} | DETAILS | purpose=mfa_verify\|mfa_enroll\|mfa_setup, host, pool_id, user_id, auth_version, session_hash (setup only), authz (the pending /authorize request), secret (the new TOTP secret, encrypted; enroll and setup only), first_factor (["fed"] after an identity provider; absent after a password), attempts, expires_at (now + 5 min) |
 | FED#{state_hash} | DETAILS | purpose=fed_signin\|fed_link\|fed_confirm, host, pool_id, idp_id, nonce, verifier (PKCE), browser_hash (of the `__Host-litelogin_fed` cookie), authz (the pending /authorize request; sign-in only), user_id, session_hash, auth_version (the signed-in user and session that started a link or a confirmation), expires_at (now + 10 min) |
 | WEBAUTHN#{challenge_hash} | DETAILS | purpose=passkey_register\|passkey_login, host, user_id and session_hash (registration only), data (the ceremony's WebAuthn session data), expires_at (now + 5 min) |
+| CONSOLE_LOGIN#{state_hash} | DETAILS | nonce, verifier (PKCE), browser_hash (of the `__Host-litelogin_console_login` cookie), return_to (a console path), expires_at (now + 10 min) |
+| CONSOLE_SESSION#{session_hash} | DETAILS | user_id, email, auth_version, auth_time, amr, id_token (the logout's `id_token_hint`), created_at, last_seen_at, idle_expires_at (now + 1h, pushed forward on activity), expires_at (now + 8h) |
 | IDEMPOTENCY#{caller_hash}#{key} | DETAILS | request_hash, status=in_progress\|completed, response_status, response_body, expires_at (now + 24h) |
 
 - **Idempotency keys:** `IDEMPOTENCY` items record admin API requests sent with an `Idempotency-Key` header. `{caller_hash}` is a SHA-256 of the caller's IAM principal ARN, so keys are scoped per caller.
@@ -256,6 +258,7 @@ Holds short-lived authentication state: browser sessions, authorization codes, r
 - **Sessions:** `expires_at` is the absolute lifetime (and the TTL attribute). `idle_expires_at` is pushed forward on activity.
 - **Refresh tokens:** every token belongs to a family that starts with one authorization code grant. A refresh token is valid only while its `REFRESH_FAMILY` item exists. To revoke a family, delete that item. Its orphaned `REFRESH` items then fail the check and expire through TTL.
 - **Authorization codes:** kept after use (`used_at` set) until TTL removes them. A reused code can then be detected, and the family it issued revoked (RFC 6749 §4.1.2).
+- **Console sessions:** the admin console's own sessions, for users of the console org (Architecture.md, "Admin console"). They aren't login-host sessions: they have no GSI1 attributes, so they're not listed on the account page, and a login host never reads them. Like a session, one is valid only while its `auth_version` is the user's.
 - **Revocation:** a session, code or refresh family is valid only while its `auth_version` equals the user's current `auth_version`. Incrementing the user's `auth_version` revokes all of them at once. Deleting the items afterwards is only cleanup.
 
 ### GSI1 (user → sessions and refresh families)
@@ -485,6 +488,15 @@ Admin invites use the same token: the user is created without a password, and a 
 | Unlink an identity | GetItem `USER#{user}` / `IDENTITY#{idp}` for the `sub`, then TransactWriteItems: Delete it (`attribute_exists(PK)`) and `POOL#{pool}#IDP#{idp}#SUB#{sub}` / `IDENTITY` (`user_id = :user`); UpdateItem `USER#{user}` / `DETAILS` ADD `identity_count :-1`, `auth_version :1`, `version :1`, condition `identity_count >= :1`, and from the account page also `attribute_exists(password_hash) OR identity_count > :1 OR passkey_count > 0`: the last way to sign in can't go, and of concurrent unlinks of a user's last two identities, one fails. The administrator's unlink leaves that out. |
 | Set a first password | UpdateItem `USER#{user}` / `DETAILS` SET `password_hash`, `password_updated_at`, ADD `auth_version :1`, `version :1`, condition `attribute_not_exists(password_hash) AND status = active` |
 | List a user's identities | Query `PK=USER#{user}`, `begins_with(SK, "IDENTITY#")` (account page; Admin API `GET /v1/users/{user}/identities`) |
+
+### Admin console sign-in
+
+| Operation | DynamoDB |
+| -- | -- |
+| Start signing in | Put `CONSOLE_LOGIN#{state_hash}` / `DETAILS`, condition `attribute_not_exists(PK)` |
+| Finish signing in | DeleteItem `CONSOLE_LOGIN#{state_hash}` / `DETAILS`, condition `expires_at > :now`, ReturnValues `ALL_OLD`: each state works once. The cookie must hash to `browser_hash`. After the code exchange, GetItem `USER#{user}` / `DETAILS` (the ID token's `sub`; it must be active and in the console client's pool, from GetItem `CLIENT#{client}` / `DETAILS`, read once), then Put `CONSOLE_SESSION#{session_hash}` / `DETAILS`, condition `attribute_not_exists(PK)` |
+| Every console request | GetItem `CONSOLE_SESSION#{session_hash}` / `DETAILS` and `USER#{user}` / `DETAILS` (both strongly consistent): the session counts only while the user is active, in the console's pool, at the session's `auth_version`. At most every 5 minutes, UpdateItem SET `last_seen_at`, `idle_expires_at`, condition `last_seen_at = :seen` |
+| Sign out | DeleteItem `CONSOLE_SESSION#{session_hash}` / `DETAILS`, then RP-initiated logout on the console org's login host |
 
 ### Two-factor sign-in
 

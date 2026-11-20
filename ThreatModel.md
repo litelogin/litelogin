@@ -22,7 +22,8 @@ What LiteLogin protects, from whom, and how, with each control checked against t
 3. **Relying parties ↔ `/token`, `/userinfo`.** Clients are identified, and confidential ones authenticated, on every request.
 4. **Tenant ↔ tenant.** Login hosts, pools and clients of different orgs share tables and functions.
 5. **Operators ↔ Admin API.** IAM-authenticated; anyone allowed to call it manages every org.
-6. **Source ↔ running code.** The build and deploy pipeline, and whoever can change Lambda code directly.
+6. **Admins ↔ admin console.** Not deployed yet (it runs locally only). Every user of the console org is an operator (F10).
+7. **Source ↔ running code.** The build and deploy pipeline, and whoever can change Lambda code directly.
 
 ## Threats and controls
 
@@ -101,6 +102,20 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 | Secrets in request samples | WAF sampled requests show URIs, which for reset links include the token | accepted (F6) |
 | Data at rest | Tables encrypted at rest: with a customer managed KMS key in Full (`table_encryption = "customer-managed"`), whose deletion makes the tables and their backups unreadable; with DynamoDB's AWS owned key in Lean, where access is controlled by IAM alone. Point-in-time recovery on the Config table (the Session table holds only short-lived data) | verified |
 
+### Admin console
+
+Not deployed yet: it runs locally only (Architecture.md, "Admin console"). The edge controls (CloudFront, WAF, the origin secret) come with its deployment.
+
+| Threat | Control | Status |
+| -- | -- | -- |
+| Signing in with a token meant for another client, or a user of another org | The console redeems the code as its own client, with PKCE and its secret, and verifies the ID token's issuer, audience, signature, expiry and nonce. The user must be active and in the console client's pool, checked on sign-in and on every request (internal/console/auth.go, console.go; `TestConsoleSignIn`, `TestSignedOut`) | verified |
+| Login CSRF (signing a victim in as the attacker) | The state works once and only from the browser that started the sign-in: its `__Host-` cookie must hash to the stored `browser_hash` (internal/console/auth.go, internal/store/console.go) | verified |
+| A stolen or stale console session | Opaque 256-bit `__Host-` cookie, `HttpOnly`, `SameSite=Lax`, stored hashed; 8 hours at most and 1 hour idle. The user is read on every request: disabling them or signing them out everywhere ends it at once (internal/console/console.go; `TestSignedOut`, `TestConsoleSignIn`) | verified |
+| Cross-site requests that change something | `http.CrossOriginProtection` (Sec-Fetch-Site or Origin), and the double-submit token from a `__Host-` cookie on every POST (internal/console/console.go; `TestPagesAndCSRF`) | verified |
+| Script injection into console pages | `html/template` escaping; CSP `default-src 'none'` with scripts and styles from the console only, and no `unsafe-eval`, so htmx can't evaluate JavaScript; a test refuses templates with `hx-on`, trigger filters, `js:` values, inline scripts, styles or event handlers, and a Chrome test fails on any CSP violation (internal/console/render.go; `TestTemplatesDontNeedEval`, `TestConsoleInChrome`) | verified |
+| A changed copy of htmx | Embedded, not loaded from a CDN, and checked against the SHA-384 of the published release (`TestHTMXHash`) | verified |
+| Open redirect after signing in | The return path must be a path on the console (`safeReturn`, `TestSafeReturn`) | verified |
+
 ### Supply chain
 
 | Threat | Control | Status |
@@ -130,6 +145,8 @@ Status: **verified** in the code (file noted), **accepted** risk, or **gap** (se
 **F8 — Admin reset of two-factor sign-in (accepted).** An administrator can turn off a user's two-factor sign-in (`DELETE /v1/users/{user}/mfa`), the one recovery path for a user who lost their app and recovery codes. The Admin API is a single IAM-authenticated function URL, so this can't be limited to a narrower role than the rest of the API (F3). Anyone who can call it, and has the user's password, gets past the second factor. Mitigations: the user is emailed, every session and refresh token ends, and the call is in the audit log. SelfHosting.md tells operators to check who is asking first. *Later:* a separate reset function with its own IAM policy, if operators need to split the role.
 
 **F9 — Pull request plans run branch code with AWS credentials (fixed, with a residual risk accepted).** The plan role had all of `ReadOnlyAccess`, and code from any branch of the repository runs with it, since `terraform plan` runs the branch's HCL (and a branch can add its own workflow). Anyone with push access could read password hashes, emails and encrypted TOTP secrets from the tables, and logs, without being able to approve a prod deploy. The role now denies reading table items, log events, queue messages, WAF sampled requests, secrets and parameters, and every use of KMS keys, for the whole account; `make package` runs before the job gets credentials. *Accepted:* the role still reads the Terraform state, which a plan needs. Its only secret is the origin secret, which CloudFront's configuration, readable by the same role, shows anyway; with it, someone can call the function URL without going through CloudFront and WAF, but can't get at any account. *Later:* run prod plans in a GitHub environment that needs approval, with the prod plan role trusting only that environment. Existing accounts get the change by running `scripts/bootstrap-account.sh` again.
+
+**F10 — Every console admin is an operator (accepted, for now).** Any active user of the console org's pool can sign in to the console and manage every org, as an Admin API caller can (F3). So the console org's users, and its login host, are as valuable as IAM access to the Admin API: an account taken over there is every org. *Mitigations when it's deployed:* the console pool requires two-factor sign-in and its host has registration off. *Later:* roles limited to some orgs (`admin.Service` already checks a principal limited to a list of orgs), and signing in again before destructive actions.
 
 ## Not covered here
 
