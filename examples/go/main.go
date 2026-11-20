@@ -265,7 +265,12 @@ func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	// RFC 9207: make sure the response came from our issuer, and not from
 	// some other one the browser was talking to.
-	if iss := q.Get("iss"); (a.requireIss || iss != "") && iss != a.cfg.issuer {
+	iss := q.Get("iss")
+	if iss == "" && a.requireIss {
+		a.fail(w, http.StatusBadRequest, "This sign-in response doesn't say which issuer sent it.")
+		return
+	}
+	if iss != "" && iss != a.cfg.issuer {
 		a.fail(w, http.StatusBadRequest, "This sign-in response came from another issuer.")
 		return
 	}
@@ -303,18 +308,24 @@ func (a *app) handleCallback(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, http.StatusBadRequest, "The ID token is for another sign-in.")
 		return
 	}
-	// Keep the claims just as LiteLogin sent them (same order, same
-	// numbers) for the claims page, and pick out the email for the home page.
+
+	// The email, for the home page.
+	var claims struct {
+		Email string `json:"email"`
+	}
+	if err := idToken.Claims(&claims); err != nil {
+		a.fail(w, http.StatusBadGateway, "The ID token's claims can't be read.")
+		return
+	}
+	// All the claims, for the claims page, just as LiteLogin sent them
+	// (same order, same numbers) but indented.
 	var raw json.RawMessage
 	if err := idToken.Claims(&raw); err != nil {
 		a.fail(w, http.StatusBadGateway, "The ID token's claims can't be read.")
 		return
 	}
-	var claims struct {
-		Email string `json:"email"`
-	}
 	var pretty bytes.Buffer
-	if err := json.Unmarshal(raw, &claims); err != nil || json.Indent(&pretty, raw, "", "  ") != nil {
+	if err := json.Indent(&pretty, raw, "", "  "); err != nil {
 		a.fail(w, http.StatusBadGateway, "The ID token's claims can't be read.")
 		return
 	}
