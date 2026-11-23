@@ -154,6 +154,13 @@ data "aws_iam_policy_document" "console" {
     resources = [var.config_table_arn, "${var.config_table_arn}/index/*"]
   }
 
+  # And change it, as the Admin API does: applications so far. Writes are
+  # transactions, whose items need these actions.
+  statement {
+    actions   = ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:ConditionCheckItem"]
+    resources = [var.config_table_arn]
+  }
+
   # Its own items in the Session table, and no others: a console can't
   # read or end a login host's sessions or tokens.
   statement {

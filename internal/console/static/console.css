@@ -91,6 +91,51 @@ tbody tr:last-child td { border-bottom: 0; }
   text-decoration: none;
   font-weight: 600;
 }
+.button.danger { background: var(--bad); }
+button.button { border: 0; font: inherit; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 32px 0 8px; }
+.section-head h2 { margin: 0; }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px 20px; border-bottom: 1px solid var(--line); margin: 0 0 20px; }
+.tabs a { padding: 8px 0; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs a[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+.notice, .error, .conflict, .secret { padding: 10px 14px; border-radius: 6px; border: 1px solid; background: var(--surface); }
+.notice { border-color: var(--ok); }
+.error, .conflict { border-color: var(--bad); }
+.secret { border-color: var(--warn); }
+.conflict p, .secret p { margin: 4px 0; }
+.stack { display: grid; gap: 14px; max-width: 640px; }
+.stack label { display: grid; gap: 4px; font-weight: 600; }
+.stack label.check, label.check { display: flex; align-items: baseline; gap: 8px; font-weight: 400; }
+.hint { color: var(--muted); font-weight: 400; font-size: 0.9rem; }
+input:not([type=checkbox]):not([type=radio]), select, textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 10px;
+  width: 100%;
+}
+textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9rem; }
+fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 8px 14px 12px; display: grid; gap: 6px; }
+legend { font-weight: 600; padding: 0 4px; }
+form.inline { display: flex; gap: 8px; max-width: 640px; }
+td form { margin: 0; }
+dialog.confirm {
+  position: static;
+  margin: 24px 0;
+  max-width: 560px;
+  padding: 16px 20px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--bad);
+  border-radius: 8px;
+}
+dialog.confirm h2 { margin-top: 0; }
+.danger-zone h2 { color: var(--bad); }
+.copy { display: none; margin-left: 4px; font-size: 0.85rem; }
+.js .copy { display: inline; }
 /* htmx's request indicators (its own CSS is off: the CSP allows only this file). */
 .htmx-indicator { opacity: 0; visibility: hidden; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; visibility: visible; transition: opacity 200ms ease-in; }

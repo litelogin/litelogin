@@ -1,6 +1,7 @@
 {{define "content"}}
 <p class="crumbs"><a href="/orgs">Orgs</a></p>
 <h1>{{.Org.Name}} <span class="status status-{{.Org.Status}}">{{.Org.Status}}</span></h1>
+{{if .Notice}}<p class="notice" role="status">{{.Notice}}</p>{{end}}
 {{if .Org.Description}}<p>{{.Org.Description}}</p>{{end}}
 <dl class="facts">
   <dt>Org ID</dt><dd><code>{{.Org.ID}}</code></dd>
@@ -8,12 +9,15 @@
   <dt>Created</dt><dd>{{.Org.CreatedAt}}</dd>
 </dl>
 
-<h2>Applications</h2>
+<div class="section-head">
+  <h2>Applications</h2>
+  <a class="button" href="/orgs/{{.Org.ID}}/apps/new">New application</a>
+</div>
 {{if .Clients}}
 <table>
   <thead><tr><th>Name</th><th>Client ID</th><th>Type</th><th>Status</th></tr></thead>
   <tbody>
-  {{range .Clients}}<tr><td>{{.Name}}</td><td><code>{{.ID}}</code></td><td>{{.ClientType}}</td><td><span class="status status-{{.Status}}">{{.Status}}</span></td></tr>{{end}}
+  {{range .Clients}}<tr><td><a href="/apps/{{.ID}}">{{.Name}}</a></td><td><code>{{.ID}}</code></td><td>{{.ClientType}}</td><td><span class="status status-{{.Status}}">{{.Status}}</span></td></tr>{{end}}
   </tbody>
 </table>
 {{else}}<p class="empty">No applications yet.</p>{{end}}

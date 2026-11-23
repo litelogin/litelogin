@@ -1,0 +1,31 @@
+{{define "content"}}
+<p class="crumbs"><a href="/orgs">Orgs</a> / <a href="/orgs/{{.Org.ID}}">{{.Org.Name}}</a></p>
+<h1>New application</h1>
+{{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+{{with .NewApp}}
+<form method="post" action="/orgs/{{$.Org.ID}}/apps" class="stack">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <label>Name <input name="name" value="{{.Name}}" required maxlength="100"></label>
+  <label>Description <input name="description" value="{{.Description}}" maxlength="500"></label>
+  <fieldset>
+    <legend>Type</legend>
+    <label class="check"><input type="radio" name="client_type" value="confidential"{{if eq .ClientType "confidential"}} checked{{end}}>
+      Confidential <span class="hint">A server-side app that can keep a client secret.</span></label>
+    <label class="check"><input type="radio" name="client_type" value="public"{{if eq .ClientType "public"}} checked{{end}}>
+      Public <span class="hint">A browser, mobile or desktop app, which can't. It uses PKCE instead.</span></label>
+  </fieldset>
+  <label>Login host <span class="hint">Where users sign in. Its user pool is the application's. Other hosts can be added later.</span>
+    <select name="host">
+      {{$host := .Host}}
+      {{range $.Hosts}}<option value="{{.Host}}"{{if eq .Host $host}} selected{{end}}>{{.Host}}</option>{{end}}
+    </select></label>
+  <label>Redirect URIs <span class="hint">One per line, like https://app.example.com/callback. Compared exactly.</span>
+    <textarea name="redirect_uris" rows="3" required>{{.RedirectURIs}}</textarea></label>
+  <label>Sign-out redirect URIs <span class="hint">Optional. One per line.</span>
+    <textarea name="post_logout_redirect_uris" rows="2">{{.PostLogoutRedirectURIs}}</textarea></label>
+  <label>Allowed origins <span class="hint">Optional. One per line, like https://app.example.com, for browser apps.</span>
+    <textarea name="allowed_origins" rows="2">{{.AllowedOrigins}}</textarea></label>
+  <p><button type="submit" class="button">Create application</button> <a href="/orgs/{{$.Org.ID}}">Cancel</a></p>
+</form>
+{{end}}
+{{end}}

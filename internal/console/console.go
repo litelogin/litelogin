@@ -129,9 +129,20 @@ func (s *Server) Handler() http.Handler {
 	})
 	page("GET /orgs", s.orgs)
 	page("GET /orgs/{org}", s.org)
-	page("/", func(w http.ResponseWriter, r *http.Request, v *viewer) {
-		s.render(w, r, v, http.StatusNotFound, "error", pageData{Title: "Page not found", Error: "There's nothing at this address."})
-	})
+
+	page("GET /orgs/{org}/apps/new", s.newClientPage)
+	page("POST /orgs/{org}/apps", s.createClient)
+	page("GET /apps/{client}", s.clientPage)
+	page("GET /apps/{client}/{tab}", s.clientPage)
+	page("POST /apps/{client}/settings", s.updateClient("settings"))
+	page("POST /apps/{client}/tokens", s.updateClient("tokens"))
+	page("POST /apps/{client}/secret", s.rotateClientSecret)
+	page("POST /apps/{client}/status", s.setClientStatus)
+	page("POST /apps/{client}/delete", s.deleteClient)
+	page("POST /apps/{client}/hosts/add", s.addClientHost)
+	page("POST /apps/{client}/hosts/remove", s.removeClientHost)
+
+	page("/", s.notFound)
 
 	// Cross-origin POSTs are refused before anything else, by
 	// Sec-Fetch-Site or Origin. Behind CloudFront the Host header is the
@@ -142,6 +153,10 @@ func (s *Server) Handler() http.Handler {
 		s.render(w, r, nil, http.StatusForbidden, "error", formExpired)
 	}))
 	return cop.Handler(mux)
+}
+
+func (s *Server) notFound(w http.ResponseWriter, r *http.Request, v *viewer) {
+	s.render(w, r, v, http.StatusNotFound, "error", pageData{Title: "Page not found", Error: "There's nothing at this address."})
 }
 
 var formExpired = pageData{

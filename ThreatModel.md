@@ -116,8 +116,10 @@ Optional, on `console.{domain}` (Architecture.md, "Admin console").
 | Reaching the Console Lambda without CloudFront and WAF | Its function URL serves only requests carrying the origin secret, as the Auth Lambda's does (cmd/console, internal/httpx) | verified |
 | An org taking the console's host as a login host | `console` is a reserved host label (internal/admin/orgs.go; `TestCreateOrgDefaultHost`) | verified |
 | The client secret leaking | An SSM SecureString, set by `litelogin console rotate-secret`, which never prints it. Terraform doesn't manage the parameter, so it isn't in the state; the plan role can't read parameters (infra/modules/console; internal/cli/console.go, `TestConsoleRotateSecret`) | verified |
-| A flaw in the console reaching login-host credentials | Its IAM role reads the Config table and touches only `CONSOLE_LOGIN#` and `CONSOLE_SESSION#` items in the Session table (`dynamodb:LeadingKeys`); no KMS signing, no SES, no secrets of identity providers (infra/modules/console) | verified |
+| A flaw in the console reaching login-host credentials | Its IAM role reads and writes the Config table and touches only `CONSOLE_LOGIN#` and `CONSOLE_SESSION#` items in the Session table (`dynamodb:LeadingKeys`); no KMS signing, no SES, no secrets of identity providers (infra/modules/console) | verified |
 | A changed copy of htmx | Embedded, not loaded from a CDN, and checked against the SHA-384 of the published release (`TestHTMXHash`) | verified |
+| Showing a client secret where it can be found again | A secret is shown once, in the response to the POST that creates or rotates it; it isn't stored, and isn't in a URL or redirect. Pages are `no-store` (internal/console/clients.go; `TestConsoleApplications`) | verified |
+| A stale form overwriting another admin's change | Every form sends the client's `version`; a mismatch changes nothing and shows what changed (internal/console/clients.go; `TestConsoleApplications`, `TestClientChanges`) | verified |
 | Open redirect after signing in | The return path must be a path on the console (`safeReturn`, `TestSafeReturn`) | verified |
 
 ### Supply chain

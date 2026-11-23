@@ -134,6 +134,8 @@ func loadPages() (map[string]*template.Template, error) {
 type pageData struct {
 	Title string
 	Error string
+	// Notice says a change was made.
+	Notice string
 	// Retry offers to sign in again, on sign-in errors.
 	Retry bool
 
@@ -143,6 +145,10 @@ type pageData struct {
 	Clients  []admin.Client
 	Hosts    []admin.Host
 	NextPage string
+
+	// App is an application's page; NewApp the form to create one.
+	App    *clientView
+	NewApp *clientForm
 
 	// Set by render.
 	Admin      *adminView
