@@ -1,0 +1,214 @@
+{{define "content"}}
+{{with .App}}
+<p class="crumbs"><a href="/orgs">Orgs</a> / <a href="/orgs/{{.Org.ID}}">{{.Org.Name}}</a> / Applications</p>
+<h1>{{.Name}} <span class="status status-{{.Status}}">{{.Status}}</span></h1>
+<nav class="tabs" aria-label="Application">
+  {{$id := .ID}}{{$tab := .Tab}}
+  {{range .Tabs}}<a href="/apps/{{$id}}{{if .Slug}}/{{.Slug}}{{end}}"{{if eq .Slug $tab}} aria-current="page"{{end}}>{{.Name}}</a>{{end}}
+</nav>
+{{end}}
+{{if .Notice}}<p class="notice" role="status">{{.Notice}}</p>{{end}}
+{{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+{{$csrf := .CSRF}}
+{{with .App}}
+
+{{if eq .Tab ""}}
+<section>
+  <p>Sign users in with any OpenID Connect library, using the authorization code flow{{if eq .ClientType "public"}} with PKCE{{end}}. Point the library at an issuer below and give it this client ID{{if eq .ClientType "confidential"}} and the client secret (see <a href="/apps/{{.ID}}/credentials">Credentials</a>){{end}}.</p>
+  <dl class="facts">
+    <dt>Client ID</dt><dd><code>{{.ID}}</code> <button type="button" class="copy link" data-copy="{{.ID}}">Copy</button></dd>
+    <dt>Type</dt><dd>{{.ClientType}}{{if eq .ClientType "confidential"}} (has a client secret){{else}} (no secret; PKCE is required){{end}}</dd>
+    <dt>Scopes</dt><dd>{{range $i, $s := .AllowedScopes}}{{if $i}}, {{end}}<code>{{$s}}</code>{{end}}</dd>
+    <dt>Redirect URIs</dt><dd>{{range .RedirectURIs}}<code>{{.}}</code> <button type="button" class="copy link" data-copy="{{.}}">Copy</button><br>{{end}}</dd>
+  </dl>
+  <h2>Issuers</h2>
+  <p>Each login host the application is on is an issuer of its own.</p>
+  <table>
+    <thead><tr><th>Issuer</th><th>Discovery document</th></tr></thead>
+    <tbody>
+    {{range .Hosts}}<tr>
+      <td><code>{{.Issuer}}</code> <button type="button" class="copy link" data-copy="{{.Issuer}}">Copy</button></td>
+      <td><a href="{{.Issuer}}/.well-known/openid-configuration">{{.Issuer}}/.well-known/openid-configuration</a></td>
+    </tr>{{end}}
+    </tbody>
+  </table>
+</section>
+{{end}}
+
+{{if eq .Tab "settings"}}
+{{with .Changes}}
+<div class="conflict" role="alert">
+  <p>Another admin saved this application while you were editing it. It now has:</p>
+  <ul>{{range .}}<li>{{.Label}}: <code>{{.Now}}</code></li>{{end}}</ul>
+  <p>Your changes are below, unsaved. Save again to replace theirs.</p>
+</div>
+{{end}}
+<form method="post" action="/apps/{{.ID}}/settings" class="stack">
+  <input type="hidden" name="csrf" value="{{$csrf}}">
+  <input type="hidden" name="version" value="{{.Form.Version}}">
+  <label>Name <input name="name" value="{{.Form.Name}}" required maxlength="100"></label>
+  <label>Description <input name="description" value="{{.Form.Description}}" maxlength="500"></label>
+  <label>Redirect URIs <span class="hint">One per line. Compared exactly.</span>
+    <textarea name="redirect_uris" rows="3" required>{{.Form.RedirectURIs}}</textarea></label>
+  <label>Sign-out redirect URIs <span class="hint">One per line. Where users may return after signing out.</span>
+    <textarea name="post_logout_redirect_uris" rows="2">{{.Form.PostLogoutRedirectURIs}}</textarea></label>
+  <label>Allowed origins <span class="hint">One per line, like https://app.example.com. For browser apps that call the token endpoint.</span>
+    <textarea name="allowed_origins" rows="2">{{.Form.AllowedOrigins}}</textarea></label>
+  {{if eq .ClientType "confidential"}}
+  <label>Client authentication
+    <select name="token_endpoint_auth_method">
+      <option value="client_secret_basic"{{if eq .Form.AuthMethod "client_secret_basic"}} selected{{end}}>client_secret_basic (HTTP Basic)</option>
+      <option value="client_secret_post"{{if eq .Form.AuthMethod "client_secret_post"}} selected{{end}}>client_secret_post (form body)</option>
+    </select></label>
+  <label class="check"><input type="checkbox" name="require_pkce"{{if .Form.RequirePKCE}} checked{{end}}> Require PKCE</label>
+  {{else}}
+  <input type="hidden" name="token_endpoint_auth_method" value="none">
+  <input type="hidden" name="require_pkce" value="on">
+  {{end}}
+  <fieldset>
+    <legend>Grants and scopes</legend>
+    <label class="check"><input type="checkbox" name="refresh_tokens"{{if .Form.RefreshTokens}} checked{{end}}> Refresh tokens</label>
+    <label class="check"><input type="checkbox" name="scope_email"{{if .Form.ScopeEmail}} checked{{end}}> <code>email</code> scope</label>
+    <label class="check"><input type="checkbox" name="scope_offline_access"{{if .Form.ScopeOffline}} checked{{end}}> <code>offline_access</code> scope</label>
+  </fieldset>
+  <p><button type="submit" class="button">Save</button></p>
+</form>
+{{end}}
+
+{{if eq .Tab "tokens"}}
+{{with .Changes}}
+<div class="conflict" role="alert">
+  <p>Another admin saved this application while you were editing it. It now has:</p>
+  <ul>{{range .}}<li>{{.Label}}: <code>{{.Now}}</code></li>{{end}}</ul>
+  <p>Your changes are below, unsaved. Save again to replace theirs.</p>
+</div>
+{{end}}
+<form method="post" action="/apps/{{.ID}}/tokens" class="stack">
+  <input type="hidden" name="csrf" value="{{$csrf}}">
+  <input type="hidden" name="version" value="{{.Form.Version}}">
+  <p>Lifetimes are in seconds.</p>
+  <label>Access token lifetime <span class="hint">60 to 86400. Default 900 (15 minutes).</span>
+    <input name="access_token_ttl" value="{{.Form.AccessTokenTTL}}" inputmode="numeric" required></label>
+  <label>ID token lifetime <span class="hint">60 to 86400. Default 900.</span>
+    <input name="id_token_ttl" value="{{.Form.IDTokenTTL}}" inputmode="numeric" required></label>
+  <label>Refresh token lifetime <span class="hint">How long an unused refresh token lasts. Default 2592000 (30 days).</span>
+    <input name="refresh_token_ttl" value="{{.Form.RefreshTokenTTL}}" inputmode="numeric" required></label>
+  <label>Refresh token family lifetime <span class="hint">How long a sign-in can be refreshed in all. At least the refresh token lifetime. Default 7776000 (90 days).</span>
+    <input name="refresh_family_ttl" value="{{.Form.RefreshFamilyTTL}}" inputmode="numeric" required></label>
+  <p><button type="submit" class="button">Save</button></p>
+</form>
+{{end}}
+
+{{if eq .Tab "credentials"}}
+<dl class="facts">
+  <dt>Client ID</dt><dd><code>{{.ID}}</code> <button type="button" class="copy link" data-copy="{{.ID}}">Copy</button></dd>
+  <dt>Client authentication</dt><dd><code>{{.TokenEndpointAuthMethod}}</code></dd>
+</dl>
+{{if eq .ClientType "confidential"}}
+{{if .Secret}}
+<div class="secret" role="alert">
+  <p><strong>Copy the client secret now.</strong> It isn't stored, and won't be shown again.</p>
+  <p><code>{{.Secret}}</code> <button type="button" class="copy link" data-copy="{{.Secret}}">Copy</button></p>
+</div>
+{{else}}
+<p>The client secret was shown once, when it was made. If it's lost, rotate it: the application gets a new secret, and the old one stops working at once.</p>
+<p><a class="button danger" href="/apps/{{.ID}}/credentials?confirm=rotate">Rotate secret</a></p>
+{{end}}
+{{if eq .Confirm "rotate"}}
+<dialog open class="confirm" aria-labelledby="rotate-title">
+  <h2 id="rotate-title">Rotate the client secret?</h2>
+  <p>The current secret stops working as soon as the new one is made. Sign-ins fail until the application uses the new secret.</p>
+  <form method="post" action="/apps/{{.ID}}/secret">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <input type="hidden" name="version" value="{{.Version}}">
+    <button type="submit" class="button danger">Rotate secret</button>
+    <a href="/apps/{{.ID}}/credentials">Cancel</a>
+  </form>
+</dialog>
+{{end}}
+{{else}}
+<p>Public applications have no secret: they can't keep one, as they run on users' devices. PKCE protects their authorization codes instead.</p>
+{{end}}
+{{end}}
+
+{{if eq .Tab "hosts"}}
+<p>The application can sign users in on these login hosts. All of them serve its user pool.</p>
+<table>
+  <thead><tr><th>Host</th><th>Type</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+  {{$id := .ID}}{{$last := eq (len .Hosts) 1}}
+  {{range .Hosts}}<tr>
+    <td><code>{{.Host}}</code></td><td>{{.Type}}</td><td><span class="status status-{{.Status}}">{{.Status}}</span></td>
+    <td>
+      <form method="post" action="/apps/{{$id}}/hosts/remove">
+        <input type="hidden" name="csrf" value="{{$csrf}}">
+        <input type="hidden" name="host" value="{{.Host}}">
+        <button type="submit" class="link"{{if $last}} disabled aria-describedby="last-host"{{end}}>Remove</button>
+      </form>
+    </td>
+  </tr>{{end}}
+  </tbody>
+</table>
+{{if $last}}<p class="hint" id="last-host">An application is always on at least one login host, so its only host can't be removed. Add another first.</p>{{end}}
+<h2>Add to a login host</h2>
+{{if .AddableHosts}}
+<form method="post" action="/apps/{{.ID}}/hosts/add" class="inline">
+  <input type="hidden" name="csrf" value="{{$csrf}}">
+  <select name="host" aria-label="Login host">
+    {{range .AddableHosts}}<option value="{{.Host}}">{{.Host}}</option>{{end}}
+  </select>
+  <button type="submit" class="button">Add</button>
+</form>
+{{else}}
+<p class="empty">The org has no other login hosts for this application's user pool.</p>
+{{end}}
+{{end}}
+
+{{if eq .Tab "danger"}}
+<section class="danger-zone">
+  {{if eq .Status "active"}}
+  <h2>Disable</h2>
+  <p>A disabled application can't sign anyone in or refresh tokens. Its settings are kept, and it can be enabled again.</p>
+  <p><a class="button danger" href="/apps/{{.ID}}/danger?confirm=disable">Disable application</a></p>
+  {{else}}
+  <h2>Enable</h2>
+  <p>The application is disabled: it can't sign anyone in or refresh tokens.</p>
+  <form method="post" action="/apps/{{.ID}}/status">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <input type="hidden" name="version" value="{{.Version}}">
+    <input type="hidden" name="status" value="active">
+    <button type="submit" class="button">Enable application</button>
+  </form>
+  {{end}}
+  <h2>Delete</h2>
+  <p>Deleting the application can't be undone. Its users keep their accounts, but it can't sign them in again.</p>
+  <p><a class="button danger" href="/apps/{{.ID}}/danger?confirm=delete">Delete application</a></p>
+</section>
+{{if eq .Confirm "disable"}}
+<dialog open class="confirm" aria-labelledby="disable-title">
+  <h2 id="disable-title">Disable {{.Name}}?</h2>
+  <p>Sign-ins and token refreshes for this application stop at once.</p>
+  <form method="post" action="/apps/{{.ID}}/status">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <input type="hidden" name="version" value="{{.Version}}">
+    <input type="hidden" name="status" value="disabled">
+    <button type="submit" class="button danger">Disable</button>
+    <a href="/apps/{{.ID}}/danger">Cancel</a>
+  </form>
+</dialog>
+{{end}}
+{{if eq .Confirm "delete"}}
+<dialog open class="confirm" aria-labelledby="delete-title">
+  <h2 id="delete-title">Delete {{.Name}}?</h2>
+  <p>This can't be undone. Type the application's name, <code>{{.Name}}</code>, to delete it.</p>
+  <form method="post" action="/apps/{{.ID}}/delete" class="stack">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <label>Name <input name="confirm_name" autocomplete="off" required></label>
+    <p><button type="submit" class="button danger">Delete application</button> <a href="/apps/{{.ID}}/danger">Cancel</a></p>
+  </form>
+</dialog>
+{{end}}
+{{end}}
+
+{{end}}
+{{end}}

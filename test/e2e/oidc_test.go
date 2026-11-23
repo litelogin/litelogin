@@ -279,14 +279,14 @@ func fetch(t *testing.T, c *http.Client, method, u string, form url.Values) resp
 	if form != nil {
 		body = strings.NewReader(form.Encode())
 	}
-	req, err := http.NewRequestWithContext(context.Background(), method, u, body)
+	req, err := http.NewRequestWithContext(context.Background(), method, u, body) //nolint:gosec // a test helper: URLs are the test's own servers
 	if err != nil {
 		t.Fatal(err)
 	}
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
-	resp, err := c.Do(req)
+	resp, err := c.Do(req) //nolint:gosec // as above
 	if err != nil {
 		t.Fatal(err)
 	}

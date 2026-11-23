@@ -30,6 +30,11 @@ func (s *Server) org(w http.ResponseWriter, r *http.Request, v *viewer) {
 		return
 	}
 	d := pageData{Title: org.Name, Org: org}
+	// The notice is fixed text: a link can't make the page say anything
+	// else.
+	if r.URL.Query().Get("deleted") == "app" {
+		d.Notice = "The application was deleted."
+	}
 	if d.Pools, err = s.Service.ListPools(ctx, p, id); err == nil {
 		if d.Clients, err = s.Service.ListClients(ctx, p, id); err == nil {
 			d.Hosts, err = s.Service.ListOrgHosts(ctx, p, id)

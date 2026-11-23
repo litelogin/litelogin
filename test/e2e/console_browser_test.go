@@ -130,6 +130,27 @@ func TestConsoleInChrome(t *testing.T) {
 	c.Eval(`history.back()`)
 	c.WaitFor(`location.pathname === '/orgs' && document.querySelector('h1') && document.querySelector('h1').textContent.startsWith('Orgs')`)
 
+	// Creating an application with a boosted form: htmx swaps in the 422
+	// with what's wrong, then the page with the secret.
+	c.Call("Page.navigate", map[string]any{"url": base.String() + "/orgs/" + acme.ID + "/apps/new"}, nil)
+	c.WaitFor(`document.readyState === 'complete' && window.htmx && document.querySelector('form[action$="/apps"]')`)
+	c.Eval(`window.sameDocument = true;
+		document.querySelector('input[name=name]').value = 'Shop';
+		document.querySelector('textarea[name=redirect_uris]').value = 'http://shop.example/callback';
+		document.querySelector('form[action$="/apps"] button[type=submit]').click()`)
+	c.WaitFor(`document.querySelector('.error') && document.querySelector('.error').textContent.includes('must use https')`)
+	c.Eval(`document.querySelector('textarea[name=redirect_uris]').value = 'https://shop.example/callback';
+		document.querySelector('form[action$="/apps"] button[type=submit]').click()`)
+	c.WaitFor(`document.querySelector('.secret')`)
+	if v := c.Eval(`window.sameDocument === true`); v != true {
+		t.Error("the application form loaded a new document: it wasn't boosted")
+	}
+	// Copy buttons show once console.js has run.
+	if v := c.Eval(`getComputedStyle(document.querySelector('.secret button.copy')).display`); v == "none" {
+		t.Error("the secret's copy button is hidden")
+	}
+	noViolations("the new application's page")
+
 	// Signing out ends at the login host's sign-out page, then comes
 	// back.
 	c.Eval(`document.querySelector('form[action="/logout"] button').click()`)
