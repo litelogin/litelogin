@@ -109,8 +109,10 @@ code { font: .9em var(--font-mono); overflow-wrap: anywhere; color: #e6e7f2; }
 }
 .brand { font-weight: 600; letter-spacing: .01em; color: var(--text); text-decoration: none; opacity: 1; }
 .brand span { color: var(--muted); font-weight: 400; }
-.me { display: flex; align-items: center; gap: 16px; color: var(--muted); font-size: .9rem; }
+.me { display: flex; min-width: 0; align-items: center; gap: 16px; color: var(--muted); font-size: .9rem; }
 .me form { margin: 0; }
+/* The signed-in admin is always shown; a long address shortens on narrow screens. */
+.who { min-width: 0; max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---- Shell: the left nav and the page fill the screen below the bar ---- */
 .shell {
@@ -175,7 +177,6 @@ code { font: .9em var(--font-mono); overflow-wrap: anywhere; color: #e6e7f2; }
   .shell { grid-template-columns: minmax(0, 1fr); }
   .side { position: static; height: auto; border-width: 0 0 1px; }
   .shell main { padding: 24px 16px 40px; }
-  .who { display: none; }
 }
 
 /* ---- Main card ---- */
