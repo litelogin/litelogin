@@ -10,7 +10,7 @@
 </dl>
 
 <div class="section-head">
-  <h2>Applications</h2>
+  <h2 id="applications">Applications</h2>
   <a class="button" href="/orgs/{{.Org.ID}}/apps/new">New application</a>
 </div>
 {{if .Clients}}
@@ -22,7 +22,7 @@
 </table>
 {{else}}<p class="empty">No applications yet.</p>{{end}}
 
-<h2>Login hosts</h2>
+<h2 id="hosts">Login hosts</h2>
 <table>
   <thead><tr><th>Host</th><th>Type</th><th>Status</th><th>Issuer</th></tr></thead>
   <tbody>
@@ -30,7 +30,7 @@
   </tbody>
 </table>
 
-<h2>User pools</h2>
+<h2 id="pools">User pools</h2>
 <table>
   <thead><tr><th>Name</th><th>Pool ID</th><th>Status</th><th>Two-factor sign-in</th></tr></thead>
   <tbody>
