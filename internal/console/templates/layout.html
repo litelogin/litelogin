@@ -13,7 +13,6 @@
 <header class="top">
   <a class="brand" href="/">LiteLogin <span>console</span></a>
   {{if .Admin}}
-  <nav hx-boost:inherited="true"><a href="/orgs">Orgs</a></nav>
   <div class="me">
     <span class="who">{{.Admin.Email}}</span>
     <a href="{{.AccountURL}}">Account</a>
@@ -24,9 +23,45 @@
   </div>
   {{end}}
 </header>
-<main id="main"{{if .Admin}} hx-boost:inherited="true"{{end}}>
+{{if .Admin}}
+<div class="shell">
+{{template "sidenav" .}}
+<main id="main" hx-boost:inherited="true">
 {{template "content" .}}
 </main>
+</div>
+{{else}}
+<main id="main">
+{{template "content" .}}
+</main>
+{{end}}
 </body>
 </html>
+{{end}}
+
+{{/* The left nav: the console's places, and the current org's. The org
+     comes from the org's own pages, or from the application shown. */}}
+{{define "sidenav"}}
+{{$org := .Org}}{{with .App}}{{$org = .Org}}{{end}}
+<nav class="side" aria-label="Console" hx-boost:inherited="true">
+  <ul>
+    <li><a href="/orgs"{{if eq .Title "Orgs"}} aria-current="page"{{end}}>Orgs</a></li>
+  </ul>
+  {{with $org}}
+  <p class="side-head" title="{{.Name}}">{{.Name}}</p>
+  <ul>
+    <li><a href="/orgs/{{.ID}}"{{if and (not $.App) (not $.NewApp)}} aria-current="page"{{end}}>Overview</a></li>
+    <li><a href="/orgs/{{.ID}}#applications">Applications</a>
+      {{if or $.App $.NewApp}}
+      <ul>
+        {{with $.App}}<li><a href="/apps/{{.ID}}" aria-current="page">{{.Name}}</a></li>{{end}}
+        {{if $.NewApp}}<li><a href="/orgs/{{.ID}}/apps/new" aria-current="page">New application</a></li>{{end}}
+      </ul>
+      {{end}}
+    </li>
+    <li><a href="/orgs/{{.ID}}#hosts">Login hosts</a></li>
+    <li><a href="/orgs/{{.ID}}#pools">User pools</a></li>
+  </ul>
+  {{end}}
+</nav>
 {{end}}
